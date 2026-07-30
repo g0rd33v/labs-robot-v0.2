@@ -22,6 +22,10 @@ the owner — the spec changes first, then the code.
    directions, hash-chained. All external I/O goes through the Hub gateway —
    no other socket path.
 4. **English-only internals** (arch §2d); the user's language at the surface.
+   No human-language phrase may live in code — the kernel knows English
+   command *identifiers*, and every phrase lives in a language pack
+   (`prism/src/lang/*.toml`). Adding a language is adding a file. Enforced
+   by `no_surface_vocabulary_lives_in_code`; how-to in `prism/src/lang/README.md`.
 5. **Provenance.** No fact without a source pointer (FK constraint, not
    convention).
 
