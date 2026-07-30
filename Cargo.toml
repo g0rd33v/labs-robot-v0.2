@@ -33,6 +33,11 @@ sha2 = "0.10"
 # local time for the deterministic floor (Q17: time/date answers, "remind me
 # at 18:30") and receipt/reply time rendering
 chrono = "0.4"
+# local embeddings on CPU -- the bge-m3-class seat (Q24, mission M3); ONNX
+# runtime under the hood, model cached under data/models
+fastembed = "5"
+# vector search inside the encrypted cell (Q20, arch sec 13: sqlite-vec)
+sqlite-vec = "0.1"
 # key material, tokens, ids
 rand = "0.8"
 # AEAD for wrapping per-cell DEKs under the KEK (Q4 envelope encryption)

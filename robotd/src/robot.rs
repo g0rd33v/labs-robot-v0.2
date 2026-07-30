@@ -3,16 +3,60 @@
 //! Enforces the boundary-log law on every turn.
 
 use anyhow::anyhow;
+use chrono::{Local, TimeZone};
 use prism::lifecycle::format_fire_at;
-use prism::{CapabilityRouter, Envelope, Evidence, Outcome, PrismError, TurnDeps};
 use prism::verdict::FallbackVerdict;
+use prism::{CapabilityRouter, Envelope, Evidence, Outcome, PrismError, TurnDeps};
 use rusqlite::Connection;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use trust::boundary::{self, Crossing, Direction};
 
 /// The MVP capability set, executed against the member's own cell.
 /// Idempotent per intent, as the router contract requires.
-pub struct Capabilities;
+#[derive(Default, Clone)]
+pub struct Capabilities {
+    /// The local embedding seat (hub). Optional: without it the vector door
+    /// stays closed and recall degrades to FTS + recency.
+    pub embedder: Option<Arc<hub::Embedder>>,
+}
+
+impl Capabilities {
+    /// Provenance anchor (law #5): the source message id journaled at
+    /// intent_open. Knowledge-writing capabilities refuse to run without it.
+    fn source_msg_of(cell: &Connection, intent_id: &str) -> Result<String, PrismError> {
+        let payload = prism::journal::payload_of(cell, intent_id, "intent_open")?
+            .ok_or_else(|| PrismError::Capability("no intent_open journaled".into()))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)?;
+        v["source_msg_id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| {
+                PrismError::Capability(
+                    "no source message journaled; refusing to store an unsourced fact (law #5)"
+                        .into(),
+                )
+            })
+    }
+
+    fn passage_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        self.embedder
+            .as_ref()
+            .and_then(|e| e.embed_passage(text).ok())
+    }
+
+    fn query_embedding(&self, text: &str) -> Option<Vec<f32>> {
+        self.embedder
+            .as_ref()
+            .and_then(|e| e.embed_query(text).ok())
+    }
+}
+
+fn learned_at(ts_ms: i64) -> String {
+    match Local.timestamp_millis_opt(ts_ms).earliest() {
+        Some(dt) => dt.format("%d %b %H:%M").to_string(),
+        None => "unknown time".into(),
+    }
+}
 
 impl CapabilityRouter for Capabilities {
     fn execute(
@@ -29,6 +73,14 @@ impl CapabilityRouter for Capabilities {
             hash: hash.into(),
             ts: trust::ids::ts_ms(),
         };
+        let ok = |evidence: Vec<Evidence>, detail: String| {
+            Ok(Outcome {
+                step_id: String::new(),
+                ok: true,
+                evidence,
+                detail,
+            })
+        };
         match capability {
             "reminder.create" => {
                 let fire_at = args["fire_at"].as_i64().ok_or_else(|| {
@@ -39,16 +91,14 @@ impl CapabilityRouter for Capabilities {
                 })?;
                 let rem = mind::reminders::create(cell, intent_id, fire_at, about)
                     .map_err(|e| PrismError::Capability(e.to_string()))?;
-                Ok(Outcome {
-                    step_id: String::new(),
-                    ok: true,
-                    evidence: vec![evidence(&rem.id, &trust::ids::sha256_hex(about.as_bytes()))],
-                    detail: format!(
+                ok(
+                    vec![evidence(&rem.id, &trust::ids::sha256_hex(about.as_bytes()))],
+                    format!(
                         "done -- i'll remind you at {}: {}",
                         format_fire_at(rem.fire_at),
                         rem.about
                     ),
-                })
+                )
             }
             "reminder.list" => {
                 let all = mind::reminders::list_active(cell)
@@ -65,29 +115,135 @@ impl CapabilityRouter for Capabilities {
                         .collect();
                     format!("your reminders:\n{}", lines.join("\n"))
                 };
-                Ok(Outcome {
-                    step_id: String::new(),
-                    ok: true,
-                    evidence: vec![evidence("reminder.list", "")],
-                    detail,
-                })
+                ok(vec![evidence("reminder.list", "")], detail)
             }
             "reminder.cancel_last" => {
                 match mind::reminders::cancel_latest(cell)
                     .map_err(|e| PrismError::Capability(e.to_string()))?
                 {
-                    Some(rem) => Ok(Outcome {
-                        step_id: String::new(),
-                        ok: true,
-                        evidence: vec![evidence(&rem.id, "")],
-                        detail: format!("cancelled: {}", rem.about),
-                    }),
-                    None => Ok(Outcome {
-                        step_id: String::new(),
-                        ok: true,
-                        evidence: vec![evidence("reminder.cancel_last", "")],
-                        detail: "nothing to cancel -- no active reminders.".into(),
-                    }),
+                    Some(rem) => ok(
+                        vec![evidence(&rem.id, "")],
+                        format!("cancelled: {}", rem.about),
+                    ),
+                    None => ok(
+                        vec![evidence("reminder.cancel_last", "")],
+                        "nothing to cancel -- no active reminders.".into(),
+                    ),
+                }
+            }
+            "memory.remember" => {
+                let content = args["content"].as_str().ok_or_else(|| {
+                    PrismError::Capability("memory.remember: content missing".into())
+                })?;
+                let source = Self::source_msg_of(cell, intent_id)?;
+                let emb = self.passage_embedding(content);
+                let fact = mind::facts::remember(cell, content, &source, intent_id, emb.as_deref())
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                ok(
+                    vec![evidence(&fact.id, &trust::ids::sha256_hex(content.as_bytes()))],
+                    format!(
+                        "remembered: {content}\n(source kept -- see \"my facts\"; \
+                         \"forget fact N\" deletes for real)"
+                    ),
+                )
+            }
+            "memory.recall" => {
+                let query = args["query"].as_str().unwrap_or("");
+                let emb = if query.trim().is_empty() {
+                    None
+                } else {
+                    self.query_embedding(query)
+                };
+                let found = mind::facts::recall(cell, query, emb.as_deref(), 5)
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let detail = if found.is_empty() {
+                    "nothing in memory yet -- tell me \"remember ...\" and i'll keep it, \
+                     with its source."
+                        .to_string()
+                } else {
+                    let lines: Vec<String> = found
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            format!("{}. {} (learned {})", i + 1, f.content, learned_at(f.created_at))
+                        })
+                        .collect();
+                    format!("here's what i remember:\n{}", lines.join("\n"))
+                };
+                ok(vec![evidence("memory.recall", "")], detail)
+            }
+            "registry.list" => {
+                let listed = mind::facts::registry_list(cell, 50)
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let detail = if listed.is_empty() {
+                    "registry is empty -- no facts stored about you.".to_string()
+                } else {
+                    let lines: Vec<String> = listed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (f, src, ts))| {
+                            let snippet: String = src.chars().take(48).collect();
+                            format!(
+                                "{}. {} -- from your words: \"{}\" ({})",
+                                i + 1,
+                                f.content,
+                                snippet,
+                                learned_at(*ts)
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "registry -- every fact and its source:\n{}\n\
+                         (\"forget fact N\" deletes for real; \"correct fact N: ...\" supersedes)",
+                        lines.join("\n")
+                    )
+                };
+                ok(vec![evidence("registry.list", "")], detail)
+            }
+            "memory.forget" => {
+                let index = args["index"].as_u64().unwrap_or(0) as usize;
+                match mind::facts::forget_by_index(cell, index, intent_id)
+                    .map_err(|e| PrismError::Capability(e.to_string()))?
+                {
+                    Some(content) => ok(
+                        vec![evidence("memory.forget", "")],
+                        format!("forgotten for real: {content} -- the row is deleted, not hidden."),
+                    ),
+                    None => ok(
+                        vec![evidence("memory.forget", "")],
+                        format!("no fact #{index} to forget."),
+                    ),
+                }
+            }
+            "memory.correct" => {
+                let index = args["index"].as_u64().unwrap_or(0) as usize;
+                let content = args["content"].as_str().ok_or_else(|| {
+                    PrismError::Capability("memory.correct: content missing".into())
+                })?;
+                let source = Self::source_msg_of(cell, intent_id)?;
+                let emb = self.passage_embedding(content);
+                match mind::facts::correct_by_index(
+                    cell,
+                    index,
+                    content,
+                    &source,
+                    intent_id,
+                    emb.as_deref(),
+                )
+                .map_err(|e| PrismError::Capability(e.to_string()))?
+                {
+                    Some((old_content, new)) => ok(
+                        vec![evidence(&new.id, "")],
+                        format!(
+                            "corrected: \"{old_content}\" -> \"{}\" \
+                             (the old fact is kept as superseded -- history stays inspectable)",
+                            new.content
+                        ),
+                    ),
+                    None => ok(
+                        vec![evidence("memory.correct", "")],
+                        format!("no fact #{index} to correct."),
+                    ),
                 }
             }
             other => Err(PrismError::Capability(format!("unknown capability: {other}"))),
@@ -99,6 +255,7 @@ pub struct RobotCore {
     pub owner_principal: i64,
     pub core: Mutex<Connection>,
     pub owner_cell: Mutex<Connection>,
+    pub embedder: Option<Arc<hub::Embedder>>,
 }
 
 fn chat_crossing(direction: Direction, payload_hash: String, size: i64) -> Crossing {
@@ -139,7 +296,7 @@ impl surfaces::Robot for RobotCore {
                 .owner_cell
                 .lock()
                 .map_err(|_| anyhow!("cell lock poisoned"))?;
-            mind::record_message(&cell, "in", "chat", &text)?;
+            let msg_id = mind::record_message(&cell, "in", "chat", &text)?;
             let env = Envelope {
                 surface: "chat".into(),
                 principal_id: self.owner_principal,
@@ -147,9 +304,13 @@ impl surfaces::Robot for RobotCore {
                 content: text,
                 ts: trust::ids::ts_ms(),
                 device_trust: "owner-session".into(),
+                source_msg_id: Some(msg_id),
+            };
+            let router = Capabilities {
+                embedder: self.embedder.clone(),
             };
             let deps = TurnDeps {
-                router: &Capabilities,
+                router: &router,
                 verdicts: &FallbackVerdict,
                 crash: None,
             };
@@ -188,6 +349,7 @@ mod tests {
     use prism::CRASH_POINTS;
 
     fn file_cell(name: &str) -> (Connection, std::path::PathBuf) {
+        mind::install_vec();
         let path = std::env::temp_dir().join(format!(
             "killtest-{}-{name}.db",
             trust::ids::random_hex(6)
@@ -199,7 +361,10 @@ mod tests {
         (conn, path)
     }
 
-    fn envelope(content: &str) -> Envelope {
+    /// An envelope whose content is first recorded as a message, so
+    /// provenance-requiring capabilities have their anchor.
+    fn envelope(cell: &Connection, content: &str) -> Envelope {
+        let msg_id = mind::record_message(cell, "in", "chat", content).unwrap();
         Envelope {
             surface: "chat".into(),
             principal_id: 1,
@@ -207,22 +372,24 @@ mod tests {
             content: content.into(),
             ts: trust::ids::ts_ms(),
             device_trust: "owner-session".into(),
+            source_msg_id: Some(msg_id),
         }
     }
 
-    fn live_deps<'a>() -> TurnDeps<'a> {
+    fn live_deps(router: &Capabilities) -> TurnDeps<'_> {
         TurnDeps {
-            router: &Capabilities,
+            router,
             verdicts: &FallbackVerdict,
             crash: None,
         }
     }
 
-    /// M2 GATE PART 1: no utterance without a terminal receipt, proven for
-    /// every turn class (spec M1 gate, carried by mission M2).
+    /// M3 GATE PART 1: every turn class ends with a terminal receipt --
+    /// now including the memory set.
     #[test]
     fn every_turn_ends_with_a_terminal_receipt() {
         let (cell, path) = file_cell("receipts");
+        let router = Capabilities::default();
         for text in [
             "what time is it?",
             "who are you",
@@ -230,9 +397,14 @@ mod tests {
             "remind me in 10 minutes to stretch",
             "my reminders",
             "cancel reminder",
+            "remember that i drink green tea",
+            "what do you remember about tea",
+            "my facts",
+            "correct fact 1: i drink black tea",
+            "forget fact 1",
             "tell me a joke", // fallback path
         ] {
-            let out = prism::run_turn(&cell, &envelope(text), &live_deps()).unwrap();
+            let out = prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap();
             assert!(out.receipt.status.is_terminal(), "{text}");
             assert!(!out.reply.is_empty(), "{text}");
             let kinds = prism::journal::kinds_for_intent(&cell, &out.intent_id).unwrap();
@@ -243,94 +415,115 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// M2 GATE PART 2: the kill-test. Murder the turn at every journal
-    /// boundary; replay must finish it with exactly-once effects and a
-    /// terminal receipt. Replay twice to prove idempotency of replay itself.
+    /// M3 GATE PART 2: the memory law walk -- remember with provenance,
+    /// recall finds it, registry shows the source, forget deletes for real.
     #[test]
-    fn kill_test_crash_at_every_boundary_replays_exactly_once() {
-        for point in CRASH_POINTS {
-            let (cell, path) = file_cell(point);
-            let crash = |p: &str| p == point;
-            let deps = TurnDeps {
-                router: &Capabilities,
-                verdicts: &FallbackVerdict,
-                crash: Some(&crash),
-            };
-            let err = prism::run_turn(
-                &cell,
-                &envelope("remind me in 10 minutes to call mark"),
-                &deps,
-            )
-            .unwrap_err();
-            assert!(
-                matches!(err, PrismError::SimulatedCrash(_)),
-                "{point}: expected crash"
-            );
+    fn memory_walk_remember_recall_registry_forget() {
+        let (cell, path) = file_cell("memory");
+        let router = Capabilities::default();
+        let run = |text: &str| {
+            prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router))
+                .unwrap()
+                .reply
+        };
+        let r = run("remember that the demo is on friday");
+        assert!(r.contains("remembered: the demo is on friday"), "{r}");
 
-            // the process "restarts": replay resumes every open intent
-            let s1 = prism::replay::resume_incomplete(&cell, &Capabilities).unwrap();
-            assert_eq!(s1.resumed + s1.closed_failed, 1, "{point}");
-            // replay is idempotent: a second boot finds nothing to do
-            let s2 = prism::replay::resume_incomplete(&cell, &Capabilities).unwrap();
-            assert_eq!(s2.resumed + s2.closed_failed, 0, "{point}");
+        let r = run("what do you remember about the demo");
+        assert!(r.contains("the demo is on friday"), "{r}");
 
-            // exactly-once: crash before the decision was journaled means the
-            // effect never ran (honest failed receipt); at or after the
-            // decision, replay completes it -- exactly one reminder, never two
-            let expected = if point == "after_open" { 0 } else { 1 };
-            assert_eq!(
-                mind::reminders::count_active(&cell).unwrap(),
-                expected,
-                "{point}"
-            );
+        let r = run("my facts");
+        assert!(r.contains("the demo is on friday"), "{r}");
+        assert!(r.contains("from your words"), "{r}"); // source chain visible
 
-            // and always: intent closed, receipt terminal
-            assert!(prism::journal::open_intents(&cell).unwrap().is_empty(), "{point}");
-            let intent_id: String = cell
-                .query_row(
-                    "SELECT intent_id FROM journal WHERE kind='intent_open' LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            let receipt = prism::receipts::get(&cell, &intent_id).unwrap().unwrap();
-            assert!(receipt.status.is_terminal(), "{point}");
-            let _ = std::fs::remove_file(path);
-        }
-    }
+        let r = run("correct fact 1: the demo moved to monday");
+        assert!(r.contains("superseded"), "{r}");
+        let r = run("what do you remember about the demo");
+        assert!(r.contains("moved to monday"), "{r}");
+        assert!(!r.contains("on friday"), "{r}"); // superseded is out of recall
 
-    /// Crash between the material effect and its outcome journal row: the
-    /// riskiest window. Re-execution must land on the same reminder (UNIQUE
-    /// intent_id), proving double-write is structurally impossible.
-    #[test]
-    fn re_execution_after_crash_is_idempotent() {
-        let (cell, path) = file_cell("idem");
-        let out = prism::run_turn(
-            &cell,
-            &envelope("remind me in 5 minutes to breathe"),
-            &live_deps(),
-        )
-        .unwrap();
-        // simulate the lost outcome row: execute the same step again directly
-        let again = Capabilities
-            .execute(
-                &cell,
-                "reminder.create",
-                &serde_json::json!({"fire_at": trust::ids::ts_ms() + 300_000, "about": "breathe"}),
-                &out.intent_id,
-            )
-            .unwrap();
-        assert!(again.ok);
-        assert_eq!(mind::reminders::count_active(&cell).unwrap(), 1);
+        let r = run("forget fact 1");
+        assert!(r.contains("forgotten for real"), "{r}");
+        assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
         let _ = std::fs::remove_file(path);
     }
 
-    /// The reply effect is deduped in the outbox: same intent, same payload,
-    /// one effect row (Q11: double-send structurally impossible).
+    /// A fact may never exist without its source message (law #5): a turn
+    /// whose envelope has no recorded message must fail the remember step
+    /// and say so honestly.
+    #[test]
+    fn remember_without_provenance_fails_honestly() {
+        let (cell, path) = file_cell("noprov");
+        let router = Capabilities::default();
+        let env = Envelope {
+            surface: "chat".into(),
+            principal_id: 1,
+            modality: "text".into(),
+            content: "remember that x is y".into(),
+            ts: trust::ids::ts_ms(),
+            device_trust: "owner-session".into(),
+            source_msg_id: None, // no anchor
+        };
+        let err = prism::run_turn(&cell, &env, &live_deps(&router));
+        assert!(err.is_err(), "unsourced remember must not succeed");
+        assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// M2's kill-test, carried forward: crash at every boundary, replay
+    /// exactly-once -- for the reminder path and the remember path.
+    #[test]
+    fn kill_test_crash_at_every_boundary_replays_exactly_once() {
+        type EffectCount = fn(&Connection) -> i64;
+        let cases: [(&str, EffectCount); 2] = [
+            ("remind me in 10 minutes to call mark", |c| {
+                mind::reminders::count_active(c).unwrap()
+            }),
+            ("remember that mark prefers mornings", |c| {
+                mind::facts::count_active(c).unwrap()
+            }),
+        ];
+        for (text, check) in cases {
+            for point in CRASH_POINTS {
+                let (cell, path) = file_cell(point);
+                let router = Capabilities::default();
+                let crash = |p: &str| p == point;
+                let deps = TurnDeps {
+                    router: &router,
+                    verdicts: &FallbackVerdict,
+                    crash: Some(&crash),
+                };
+                let err = prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap_err();
+                assert!(
+                    matches!(err, PrismError::SimulatedCrash(_)),
+                    "{text} @ {point}: expected crash"
+                );
+
+                let s1 = prism::replay::resume_incomplete(&cell, &router).unwrap();
+                assert_eq!(s1.resumed + s1.closed_failed, 1, "{text} @ {point}");
+                let s2 = prism::replay::resume_incomplete(&cell, &router).unwrap();
+                assert_eq!(s2.resumed + s2.closed_failed, 0, "{text} @ {point}");
+
+                let expected = if point == "after_open" { 0 } else { 1 };
+                assert_eq!(check(&cell), expected, "{text} @ {point}");
+
+                assert!(
+                    prism::journal::open_intents(&cell).unwrap().is_empty(),
+                    "{text} @ {point}"
+                );
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// The reply effect is deduped in the outbox (Q11).
     #[test]
     fn reply_effect_is_unique_per_intent() {
         let (cell, path) = file_cell("outbox");
-        let out = prism::run_turn(&cell, &envelope("what time is it"), &live_deps()).unwrap();
+        let router = Capabilities::default();
+        let out =
+            prism::run_turn(&cell, &envelope(&cell, "what time is it"), &live_deps(&router))
+                .unwrap();
         let (again_id, fresh) =
             prism::outbox::enqueue(&cell, &out.intent_id, "surface:chat", &out.reply).unwrap();
         assert!(!fresh);

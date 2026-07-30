@@ -16,6 +16,13 @@ data_dir = "./data"
 [server]
 host = "127.0.0.1"
 port = 7777
+
+[mind]
+# local embedding seat (bge-m3-class); weights are fetched once through the
+# hub gateway (boundary-logged) into model_cache. set false to run without
+# the vector door -- recall degrades to FTS + recency.
+embeddings = true
+model_cache = "./data/models"
 "#;
 
 #[derive(Debug, Deserialize, Default)]
@@ -23,6 +30,7 @@ port = 7777
 pub struct RobotConfig {
     pub robot: RobotSection,
     pub server: ServerSection,
+    pub mind: MindSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +61,22 @@ impl Default for ServerSection {
         Self {
             host: "127.0.0.1".into(),
             port: 7777,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct MindSection {
+    pub embeddings: bool,
+    pub model_cache: String,
+}
+
+impl Default for MindSection {
+    fn default() -> Self {
+        Self {
+            embeddings: true,
+            model_cache: "./data/models".into(),
         }
     }
 }

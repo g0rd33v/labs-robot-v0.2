@@ -94,6 +94,38 @@ impl KeyChain {
     }
 }
 
+/// Domain-separated subkey from any 32-byte base key: sha256(base || label).
+/// Used e.g. for the per-cell media-vault key derived from the cell DEK.
+pub fn derive_key(base: &[u8; KEY_LEN], label: &[u8]) -> [u8; KEY_LEN] {
+    let mut h = Sha256::new();
+    h.update(base);
+    h.update(label);
+    h.finalize().into()
+}
+
+/// AEAD-seal arbitrary bytes under a key. Layout: nonce || ciphertext.
+pub fn seal_bytes(key: &[u8; KEY_LEN], plain: &[u8]) -> Result<Vec<u8>, TrustError> {
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let mut nonce = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let ct = cipher
+        .encrypt(XNonce::from_slice(&nonce), plain)
+        .map_err(|e| TrustError::Crypto(format!("seal: {e}")))?;
+    let mut out = nonce.to_vec();
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+pub fn open_bytes(key: &[u8; KEY_LEN], sealed: &[u8]) -> Result<Vec<u8>, TrustError> {
+    if sealed.len() < NONCE_LEN {
+        return Err(TrustError::Crypto("sealed blob too short".into()));
+    }
+    let (nonce, ct) = sealed.split_at(NONCE_LEN);
+    XChaCha20Poly1305::new(Key::from_slice(key))
+        .decrypt(XNonce::from_slice(nonce), ct)
+        .map_err(|e| TrustError::Crypto(format!("open: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +155,27 @@ mod tests {
         bad[0] ^= 0xff;
         assert!(kc.unwrap_dek(&nonce, &bad).is_err());
         let _ = std::fs::remove_file(p);
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+
+    #[test]
+    fn seal_open_roundtrip_and_tamper_detect() {
+        let key = KeyChain::new_dek();
+        let sealed = seal_bytes(&key, b"vault bytes").unwrap();
+        assert_ne!(&sealed[..], b"vault bytes"); // not plaintext
+        assert_eq!(open_bytes(&key, &sealed).unwrap(), b"vault bytes");
+        let mut bad = sealed.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        assert!(open_bytes(&key, &bad).is_err());
+        let other = KeyChain::new_dek();
+        assert!(open_bytes(&other, &sealed).is_err());
+        // derive_key is deterministic and label-separated
+        assert_eq!(derive_key(&key, b"media"), derive_key(&key, b"media"));
+        assert_ne!(derive_key(&key, b"media"), derive_key(&key, b"other"));
     }
 }

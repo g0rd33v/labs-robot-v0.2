@@ -82,6 +82,7 @@ pub fn run_turn(
         "content": env.content,
         "content_hash": ids::sha256_hex(env.content.as_bytes()),
         "device_trust": env.device_trust,
+        "source_msg_id": env.source_msg_id,
     });
     journal::intent_open(cell, &intent_id, &opened.to_string())?;
     crash_check(deps, "after_open")?;
@@ -225,6 +226,30 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision) -> Plan {
                 serde_json::json!({}),
                 Effect::ReversibleWrite,
             )],
+            FloorMatch::Remember { content } => vec![step(
+                "memory.remember",
+                serde_json::json!({ "content": content }),
+                Effect::ReversibleWrite,
+            )],
+            FloorMatch::Recall { query } => vec![step(
+                "memory.recall",
+                serde_json::json!({ "query": query }),
+                Effect::Read,
+            )],
+            FloorMatch::RegistryList => {
+                vec![step("registry.list", serde_json::json!({}), Effect::Read)]
+            }
+            // deletion is real (owner's erase right) -- honestly irreversible
+            FloorMatch::ForgetFact { index } => vec![step(
+                "memory.forget",
+                serde_json::json!({ "index": index }),
+                Effect::Irreversible,
+            )],
+            FloorMatch::CorrectFact { index, content } => vec![step(
+                "memory.correct",
+                serde_json::json!({ "index": index, "content": content }),
+                Effect::ReversibleWrite,
+            )],
         },
         Decision::Verdict { .. } => {
             vec![step("answer.fallback", serde_json::json!({}), Effect::Read)]
@@ -240,14 +265,19 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision) -> Plan {
 const SELF_TEXT: &str = "i'm bender -- your robot, v0.2 MVP. i run on this \
 machine only; your words live in an encrypted cell here, every crossing is \
 in the boundary log, and everything i claim to have done carries a receipt. \
-right now i can: tell the time and date, set reminders (try: remind me in 10 \
-minutes to stretch), list and cancel them. my model brain arrives with M4.";
+i can tell time, keep reminders, and remember facts you tell me -- every \
+fact with its source, listed in my registry, correctable and deletable for \
+real. my model brain arrives with M4.";
 
 const HELP_TEXT: &str = "here's what works today:\n\
 - time / date -- \"what time is it\"\n\
 - reminders -- \"remind me in 10 minutes to stretch\", \"remind me at 18:30 \
 to call mark\", \"remind me tomorrow at 9 to stretch\"\n\
 - \"my reminders\" / \"cancel reminder\"\n\
+- memory -- \"remember that i drink green tea\", \"what do you remember \
+about tea\"\n\
+- registry -- \"my facts\" (every fact + its source), \"forget fact 2\" \
+(deletes for real), \"correct fact 1: ...\"\n\
 - \"who are you\" -- about me\n\
 everything else needs my model brain, which arrives with M4.";
 

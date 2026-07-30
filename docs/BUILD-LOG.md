@@ -5,6 +5,71 @@ dependencies introduced. Newest first.
 
 ---
 
+## M3 — Mind (2026-07-30) · gate PASSED
+
+**Shipped.** The epistemic memory substrate (arch §4). Facts carry a
+`source_msg_id` FOREIGN KEY to the message they were learned from — law #5
+is schema, not convention (an unsourced insert is rejected by SQLite, and a
+remember-turn without a journaled source anchor refuses to run). Hybrid
+recall per Q20: RRF (k=60) fusing the FTS5 door (top-20, quoted-term
+queries), the sqlite-vec door (top-20, cosine cutoff 0.20), the graph door
+(same-entity 1-hop; quiet until M4 extraction populates entities), and
+recency (top-10). Local embeddings live in hub as the gateway's local tier
+(Q24 seat): fastembed/e5-small (384-d multilingual), weights fetched once
+into `data/models` with the download boundary-logged both directions;
+offline or disabled → the Robot boots anyway, vector door closed, recall
+degrades to FTS + recency. Registry-lite (§4b): `my facts` lists every fact
+with its source words and date; `correct fact N:` supersedes (never
+overwrites — history stays inspectable); `forget fact N` deletes the row
+for real (FTS + vector cleaned; superseded chains lose their endpoint —
+the erase right wins). Both destructive ops are idempotent per intent via
+op-markers, because index addressing is not stable across crash replay.
+Media vault (§4a): content-addressed by plaintext sha256 under
+`media/ab/…`, sealed with a DEK-derived key (XChaCha20-Poly1305),
+integrity-checked on read, deduped, refs in the cell. Floor gains the
+memory command set (Q28 memory.*, EN+RU).
+
+**Gate demo (all verified).**
+- Kill-test extended: reminder AND remember turns murdered at all six
+  journal boundaries → replay exactly-once, terminal receipts, no
+  duplicate facts.
+- Provenance: fact insert with a bogus source FK rejected; remember-turn
+  without a source anchor fails honestly; registry shows each fact's
+  source words.
+- Live: remembered facts in EN and RU; "what do you remember about my
+  kid" surfaced "my daughter's name is Vera" first (semantic, not
+  lexical); corrected a RU fact (supersession visible); forgot a fact —
+  row deleted, registry confirms.
+- 41 tests green; clippy -D warnings clean.
+
+**Assumptions** (spec-silent or MVP-scoped):
+- The bge-m3-class seat is filled by multilingual-e5-small (384-d, ~450MB)
+  for the MVP — small, retrieval-tuned, multilingual; bge-m3 proper (1024-d,
+  §Q24) is a straight swap + re-index when wanted.
+- Explicit "remember …" statements store as status `stable`, confidence
+  1.0 (owner-stated is the strongest provenance class short of registry
+  confirmation; Q21 promotion applies to model-extracted facts from M4).
+- "remember to X" (timeless wish) is ambiguous with a reminder and the
+  floor stays silent on it — the fallback answers honestly.
+- Forget/correct address facts by registry position (1-based, newest
+  first), recomputed at execution; op-markers make replay exact.
+- Q20's golden-corpus gate (retrieval ≥ Akita) needs Akita's corpus from
+  the owner — tracked on the board, open.
+- Vault media are sealed per-file with a DEK-derived key; media expiry
+  jobs are explicitly out of MVP scope.
+- Extraction-from-conversation (Q23 cadence) needs models → M4.
+
+**Dependencies introduced** (listed in root Cargo.toml): fastembed 5
+(ONNX-based local embeddings; pulls ort), sqlite-vec 0.1 (vec0 virtual
+table inside the encrypted cell); serde_json added to mind.
+
+**Next.** M4 — Hub: OpenRouter client (hard timeouts, fallback chain,
+hedging), the §6a cast, Serper search + fetch→READ, reminder scheduler
+firing through the outbox. Needs `OPENROUTER_API_KEY` (and
+`SERPER_API_KEY`) in the environment.
+
+---
+
 ## M2 — Prism lifecycle (2026-07-30) · gate PASSED
 
 **Shipped.** The governed lifecycle end to end (arch §3): intent →

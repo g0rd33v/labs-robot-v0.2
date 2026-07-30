@@ -9,3 +9,9 @@ data_dir = "./data"
 [server]
 host = "127.0.0.1"
 port = 7777
+
+[mind]
+# local embedding seat (bge-m3-class); weights fetched once through the hub
+# gateway (boundary-logged). false = no vector door, recall = FTS + recency.
+embeddings = true
+model_cache = "./data/models"

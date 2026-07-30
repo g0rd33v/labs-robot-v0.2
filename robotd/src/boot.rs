@@ -22,6 +22,9 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     std::fs::create_dir_all(data_dir.join("cells"))?;
     std::fs::create_dir_all(data_dir.join("media"))?;
 
+    // the vector door: register sqlite-vec before any cell opens
+    mind::install_vec();
+
     // keys and core
     let keys = KeyChain::load_or_create(&data_dir.join("kek.key"))?;
     let core = trust::cells::open_encrypted(&data_dir.join("core.db"), &keys.core_db_key())
@@ -41,9 +44,27 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     prism::init_cell_schema(&owner_cell)?;
     mind::init_cell_schema(&owner_cell)?;
 
+    // the local embedding seat (Q24): weights fetched through the hub
+    // gateway on first run, boundary-logged; offline or disabled -> the
+    // robot still boots, recall degrades to FTS + recency
+    let embedder = if cfg.mind.embeddings {
+        match hub::Embedder::init(Path::new(&cfg.mind.model_cache), Some(&core)) {
+            Ok(e) => Some(std::sync::Arc::new(e)),
+            Err(e) => {
+                tracing::warn!("embedder unavailable, vector door closed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // crash replay (arch sec 3): resume every intent the last run left open;
     // an intent without a terminal receipt is a bug, never a silent drop
-    let replayed = prism::replay::resume_incomplete(&owner_cell, &crate::robot::Capabilities)?;
+    let router = crate::robot::Capabilities {
+        embedder: embedder.clone(),
+    };
+    let replayed = prism::replay::resume_incomplete(&owner_cell, &router)?;
     if replayed.resumed + replayed.closed_failed > 0 {
         tracing::info!(
             "crash replay: {} resumed, {} closed failed",
@@ -81,6 +102,7 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         owner_principal,
         core: Mutex::new(core),
         owner_cell: Mutex::new(owner_cell),
+        embedder,
     });
     let state = Arc::new(surfaces::WebState::new(robot, slug_hash));
     let addr = SocketAddr::new(
@@ -148,6 +170,10 @@ mod tests {
             server: ServerSection {
                 host: "127.0.0.1".into(),
                 port: 0,
+            },
+            mind: crate::config::MindSection {
+                embeddings: false, // hermetic tests: no downloads
+                model_cache: dir.join("models").to_string_lossy().into_owned(),
             },
         };
         (cfg, dir)

@@ -45,6 +45,11 @@ pub struct Envelope {
     pub content: String,
     pub ts: i64,
     pub device_trust: String,
+    /// The recorded inbound message id -- the provenance anchor (law #5):
+    /// capabilities that store knowledge take their source pointer from
+    /// here, via the journaled intent_open payload.
+    #[serde(default)]
+    pub source_msg_id: Option<String>,
 }
 
 /// Per-cell journal + outbox + receipts tables (decisions Q10). Idempotent.
