@@ -3,16 +3,8 @@
 //! and `Ctx::source_msg` refuses rather than store an unsourced fact.
 
 use super::{attested, mind_err, note_evidence, row_evidence, Capability, Ctx};
-use chrono::{Local, TimeZone};
 use prism::types::{Effect, Outcome};
 use prism::PrismError;
-
-pub(crate) fn learned_at(ts_ms: i64) -> String {
-    match Local.timestamp_millis_opt(ts_ms).earliest() {
-        Some(dt) => dt.format("%d %b %H:%M").to_string(),
-        None => "unknown time".into(),
-    }
-}
 
 pub struct Remember;
 
@@ -36,8 +28,9 @@ impl Capability for Remember {
         attested(
             row_evidence(&fact.id, &trust::ids::sha256_hex(content.as_bytes())),
             format!(
-                "remembered: {content}\n(source kept -- see \"my facts\"; \
-                 \"forget fact N\" deletes for real)"
+                "{}\n{}",
+                ctx.say("remembered", &[("content", content)]),
+                ctx.say("remembered_note", &[])
             ),
         )
     }
@@ -63,23 +56,23 @@ impl Capability for Recall {
             .cell
             .with(|c| mind::facts::recall(c, query, emb.as_deref(), 5).map_err(mind_err))?;
         let detail = if found.is_empty() {
-            "nothing in memory yet -- tell me \"remember ...\" and i'll keep it, \
-             with its source."
-                .to_string()
+            ctx.say("recall_empty", &[])
         } else {
             let lines: Vec<String> = found
                 .iter()
                 .enumerate()
                 .map(|(i, f)| {
-                    format!(
-                        "{}. {} (learned {})",
-                        i + 1,
-                        f.content,
-                        learned_at(f.created_at)
+                    ctx.say(
+                        "recall_line",
+                        &[
+                            ("n", &(i + 1).to_string()),
+                            ("fact", &f.content),
+                            ("when", &ctx.pack().datetime_ms("learned_at", f.created_at)),
+                        ],
                     )
                 })
                 .collect();
-            format!("here's what i remember:\n{}", lines.join("\n"))
+            format!("{}\n{}", ctx.say("recall_header", &[]), lines.join("\n"))
         };
         attested(note_evidence("memory.recall"), detail)
     }
@@ -99,26 +92,29 @@ impl Capability for RegistryList {
             .cell
             .with(|c| mind::facts::registry_list(c, 50).map_err(mind_err))?;
         let detail = if listed.is_empty() {
-            "registry is empty -- no facts stored about you.".to_string()
+            ctx.say("registry_empty", &[])
         } else {
             let lines: Vec<String> = listed
                 .iter()
                 .enumerate()
                 .map(|(i, (f, src, ts))| {
                     let snippet: String = src.chars().take(48).collect();
-                    format!(
-                        "{}. {} -- from your words: \"{}\" ({})",
-                        i + 1,
-                        f.content,
-                        snippet,
-                        learned_at(*ts)
+                    ctx.say(
+                        "registry_line",
+                        &[
+                            ("n", &(i + 1).to_string()),
+                            ("fact", &f.content),
+                            ("source", &snippet),
+                            ("when", &ctx.pack().datetime_ms("learned_at", *ts)),
+                        ],
                     )
                 })
                 .collect();
             format!(
-                "registry -- every fact and its source:\n{}\n\
-                 (\"forget fact N\" deletes for real; \"correct fact N: ...\" supersedes)",
-                lines.join("\n")
+                "{}\n{}\n{}",
+                ctx.say("registry_header", &[]),
+                lines.join("\n"),
+                ctx.say("registry_note", &[])
             )
         };
         attested(note_evidence("registry.list"), detail)
@@ -143,11 +139,11 @@ impl Capability for Forget {
         })? {
             Some(content) => attested(
                 note_evidence("memory.forget"),
-                format!("forgotten for real: {content} -- the row is deleted, not hidden."),
+                ctx.say("forgotten", &[("content", &content)]),
             ),
             None => attested(
                 note_evidence("memory.forget"),
-                format!("no fact #{index} to forget."),
+                ctx.say("forget_missing", &[("n", &index.to_string())]),
             ),
         }
     }
@@ -175,15 +171,11 @@ impl Capability for Correct {
         })? {
             Some((old_content, new)) => attested(
                 row_evidence(&new.id, ""),
-                format!(
-                    "corrected: \"{old_content}\" -> \"{}\" \
-                     (the old fact is kept as superseded -- history stays inspectable)",
-                    new.content
-                ),
+                ctx.say("corrected", &[("old", &old_content), ("new", &new.content)]),
             ),
             None => attested(
                 note_evidence("memory.correct"),
-                format!("no fact #{index} to correct."),
+                ctx.say("correct_missing", &[("n", &index.to_string())]),
             ),
         }
     }

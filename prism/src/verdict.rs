@@ -19,14 +19,11 @@ pub struct FallbackVerdict;
 
 impl VerdictProvider for FallbackVerdict {
     fn verdict(&self, text: &str) -> Verdict {
-        let greeting = {
-            let t = text.trim().to_lowercase();
-            ["hi", "hello", "hey", "привет", "здравствуй", "yo"]
-                .iter()
-                .any(|g| t.starts_with(g))
-        };
+        // greetings live in the packs, like every other surface phrase;
+        // the one that matches also tells us which language to answer in
+        let greeting = crate::lexicon::greeting_pack(text);
         Verdict {
-            action: if greeting {
+            action: if greeting.is_some() {
                 VerdictAction::Chitchat
             } else {
                 VerdictAction::Answer
@@ -34,7 +31,10 @@ impl VerdictProvider for FallbackVerdict {
             domain: VerdictDomain::None,
             door: Door::Followup,
             tier: Tier::Fast,
-            lang: "en".into(),
+            // offline, script is all we have: it is right for a greeting we
+            // recognised and honestly "en" otherwise, which is what the
+            // deterministic strings will render in anyway
+            lang: greeting.map(|p| p.code.clone()).unwrap_or_else(|| "en".into()),
             mood: Mood {
                 valence: 0.0,
                 urgency: 0.1,

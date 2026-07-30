@@ -5,6 +5,99 @@ dependencies introduced. Newest first.
 
 ---
 
+## Language packs — one universal solution (2026-07-31)
+
+The owner's requirement: **everything is operated in English inside; other
+languages exist only as a means for users, and must never create mistakes
+or errors for the system.** That is arch §2d, and the code was violating it
+in both directions at once — Russian phrases hard-coded inside `prism`,
+English constants delivered straight to the user. A Russian speaker got
+Russian *parsing* and English *answers*: precisely inverted.
+
+### The shape
+
+The kernel now knows only English command **identifiers** — `remind`,
+`registry_list`, `forget_fact`. Every surface phrase, every deterministic
+reply, every calendar word lives in a **language pack**: a TOML data file
+embedded in the binary (`prism/src/lang/*.toml`). `prism/src/lexicon.rs`
+owns the mechanism; `floor.rs` is table-driven and contains no human word.
+
+**Adding a language is adding a file.** No kernel change, ever.
+
+What moved out of code and into the packs:
+
+| Was hard-coded in | Now |
+| --- | --- |
+| `floor.rs` — phrases in two languages | `[commands]`, `[heads]`, `[particles]` |
+| `lifecycle.rs` — SELF/HELP/FALLBACK text, reply composition | `[replies]` |
+| `lifecycle.rs` — 26 effect-claim patterns (§5/Q26) | `[effect_claims]` |
+| `verdict.rs` — greeting list | `greetings` |
+| `escalation.rs` — "think hard" / "подумай как следует" | `[signals]` |
+| `caps/*.rs` — every reply string in five files | `[replies]`, via `Ctx::say` |
+| `chrono` `%A`/`%B` — English months whatever you speak | `[calendar]` + `[formats]` |
+
+### The boundary is crossed exactly once
+
+`floor::scan_lang` reports **which pack matched**; the verdict reports what
+it detected. `plan_from_decision` resolves one language for the whole turn,
+journals it on the `Plan`, and stamps it into every step's args — so it
+crosses the crate boundary into `robotd`'s capability registry, and so a
+**replayed** intent speaks the language the live one did. `Ctx::say(id,
+vars)` is the single place a phrase becomes words.
+
+The cell remembers the language its person last used (`cell_meta.lang`), so
+the lanes that speak *without being asked* — a reminder firing at 03:00, a
+backup failure — do it in their language too.
+
+### Unpacked languages degrade, never break
+
+This is the owner's actual requirement, so it is a test, not a promise. A
+language with no pack is an **ordinary turn**: the floor declines (it does
+not guess), the turn goes to the verdict, and the model answers in that
+language. Coverage drops from "instant and free" to "one model call".
+Nothing errors. Japanese, Arabic, Korean, Chinese, Spanish and German all
+complete governed turns with terminal receipts in the offline suite.
+
+Two safety lists — effect claims and escalation signals — are matched
+against **every** pack rather than the turn's own, because a reply that
+drifts into another language must not slip past the claim-vs-receipt check.
+
+### Gate (demonstrated)
+
+- `cargo test --workspace` — **99 passed, 0 failed** (was 92).
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `robotd eval` — routing 69 cases / 0 misroutes (10 new, incl. six
+  unpacked languages that must route to `none`); kill-suite 12/12; floor
+  p95 2.2 ms. RESULT: PASS.
+
+New tests with teeth:
+- `no_surface_vocabulary_lives_in_code` — scans every `.rs` file in four
+  crates for non-Latin script outside test modules. Hard-code a phrase
+  again and the suite fails. It caught three files while being written
+  (`verdict.rs`, `lifecycle.rs`, `escalation.rs`).
+- `a_turn_is_answered_in_the_language_it_was_asked_in` — the same governed
+  turn in two languages, offline, asserting the Russian reply carries no
+  English calendar words.
+- `an_unpacked_language_still_completes_a_governed_turn` — five languages
+  with no pack, all terminal receipts.
+- `every_shipped_pack_translates_every_reply` — English fallback is a
+  safety net, not a licence for a half-translated pack in this repo.
+- `every_pack_can_catch_an_unsupported_effect_claim` — a pack with no
+  effect-claim phrases is a language in which the Robot could claim an
+  effect with no receipt and nothing would notice.
+
+**Assumptions.** Script detection (Cyrillic/Latin majority) is
+deterministic and honest about its limits: it cannot separate Latin-script
+languages, so those are decided by phrase match and then by the verdict's
+`lang`. Calendar words live in the packs rather than a locale crate — no
+new dependency to print twelve words. `toml` was already a workspace
+dependency; `prism` now uses it.
+
+**Not done.** Only `en` and `ru` ship. The next thirty languages are thirty
+files and no code — a translator's job, not an engineer's.
+
+---
+
 ## Decomposition + HTTP integration tests (2026-07-30)
 
 The last structural item from the review, done in the order the review

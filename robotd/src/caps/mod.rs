@@ -71,9 +71,24 @@ pub struct Ctx<'a> {
     pub services: &'a Services,
     pub policy: &'a Policy,
     pub instance: &'a Instance,
+    /// The turn's language, decided once by the kernel and journaled in the
+    /// step args. Capabilities never choose a language; they render through
+    /// `say`, which is the single place a phrase becomes words.
+    pub lang: &'a str,
 }
 
 impl Ctx<'_> {
+    /// The pack this turn speaks. Unknown codes fall back to English rather
+    /// than failing: a missing translation must degrade, never break.
+    pub fn pack(&self) -> &'static prism::lexicon::Pack {
+        prism::lexicon::pack(self.lang).unwrap_or_else(prism::lexicon::english)
+    }
+
+    /// Render reply `id` in the turn's language, filling `{placeholders}`.
+    pub fn say(&self, id: &str, vars: &[(&str, &str)]) -> String {
+        prism::lexicon::fill(self.pack().reply(id), vars)
+    }
+
     /// Provenance anchor (law #5): the source message id journaled at
     /// intent_open. Capabilities that store knowledge refuse without it.
     pub fn source_msg(&self) -> Result<String, PrismError> {
@@ -94,12 +109,12 @@ impl Ctx<'_> {
     /// check that every test tripped first, so the comparison never ran.
     pub fn require_owner(&self, what: &str) -> Result<Arc<Mutex<Connection>>, String> {
         if self.principal != self.instance.owner_principal {
-            return Err(format!("only the owner can {what}."));
+            return Err(self.say("owner_only", &[("what", what)]));
         }
         self.instance
             .core
             .clone()
-            .ok_or_else(|| format!("{what} isn't available in this context."))
+            .ok_or_else(|| self.say("not_available_here", &[("what", what)]))
     }
 }
 
@@ -240,6 +255,9 @@ impl CapabilityRouter for Registry {
         // the acting principal comes from the journaled intent, read once
         // here rather than re-derived inside every capability
         let principal = principal_of(cell, intent_id);
+        // the kernel resolved the language at plan time and journaled it in
+        // the args; capabilities read it, they never detect it themselves
+        let lang = args["lang"].as_str().unwrap_or("en");
         let ctx = Ctx {
             cell,
             intent_id,
@@ -247,6 +265,7 @@ impl CapabilityRouter for Registry {
             services: &self.services,
             policy: &self.policy,
             instance: &self.instance,
+            lang,
         };
         cap.execute(&ctx, args)
     }

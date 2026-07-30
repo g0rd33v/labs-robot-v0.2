@@ -86,8 +86,9 @@ fn eval_routing() -> anyhow::Result<i32> {
         let text = case["text"].as_str().unwrap_or_default();
         let expect = case["expect"].as_str().unwrap_or_default();
         total += 1;
-        let got = match prism::floor::scan(text, chrono::Local::now()) {
-            Some(m) => serde_json::to_value(&m)?["match"]
+        let hit = prism::floor::scan_lang(text, chrono::Local::now());
+        let got = match &hit {
+            Some(h) => serde_json::to_value(&h.matched)?["match"]
                 .as_str()
                 .unwrap_or("?")
                 .to_string(),
@@ -95,6 +96,17 @@ fn eval_routing() -> anyhow::Result<i32> {
         };
         if got != expect {
             misroutes.push(format!("  MISROUTE: {text:?} -> {got} (expected {expect})"));
+        }
+        // a case may also pin the language the floor matched in: routing to
+        // the right command through the wrong pack would answer correctly
+        // in the wrong language
+        if let Some(want) = case["lang"].as_str() {
+            let got_lang = hit.as_ref().map(|h| h.lang.as_str()).unwrap_or("none");
+            if got_lang != want {
+                misroutes.push(format!(
+                    "  WRONG LANGUAGE: {text:?} -> {got_lang} (expected {want})"
+                ));
+            }
         }
     }
     println!("\n[routing] {total} cases, {} misroutes (bar: 0)", misroutes.len());

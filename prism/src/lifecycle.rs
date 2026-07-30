@@ -4,10 +4,11 @@
 //! claiming an effect may only be produced from a verified state transition.
 
 use crate::floor::{self, FloorMatch};
+use crate::lexicon::{self, Pack};
 use crate::types::*;
 use crate::verdict::VerdictProvider;
 use crate::{journal, outbox, receipts, Cell, Envelope, PrismError};
-use chrono::{Local, TimeZone};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use trust::ids;
 
@@ -50,6 +51,11 @@ pub const CRASH_POINTS: [&str; 6] = [
 pub struct TurnOutput {
     pub intent_id: String,
     pub reply: String,
+    /// The language this turn was answered in. The caller persists it per
+    /// cell so background lanes -- a reminder firing at 03:00, a backup
+    /// failure -- address the person in their own language instead of
+    /// defaulting to English.
+    pub lang: String,
     pub receipt: Receipt,
     pub reply_effect_id: String,
 }
@@ -58,7 +64,11 @@ pub struct TurnOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Decision {
-    Floor { m: FloorMatch },
+    Floor {
+        m: FloorMatch,
+        #[serde(default = "crate::types::default_lang")]
+        lang: String,
+    },
     Verdict { v: Verdict },
 }
 
@@ -91,8 +101,11 @@ pub fn run_turn(
     crash_check(deps, "after_open")?;
 
     // decision: the deterministic floor runs first and wins unconditionally (Q17)
-    let decision = match floor::scan(&env.content, Local::now()) {
-        Some(m) => Decision::Floor { m },
+    let decision = match floor::scan_lang(&env.content, Local::now()) {
+        Some(hit) => Decision::Floor {
+            m: hit.matched,
+            lang: hit.lang,
+        },
         None => Decision::Verdict {
             v: deps.verdicts.verdict(&env.content),
         },
@@ -118,6 +131,9 @@ pub(crate) fn finish_planned_intent(
     deps: &TurnDeps,
     live: bool,
 ) -> Result<TurnOutput, PrismError> {
+    // the language was decided at plan time and journaled with it, so a
+    // replayed intent renders exactly as the live one did
+    let pack = lexicon::pack(&plan.lang).unwrap_or_else(lexicon::english);
     // execute steps, reusing journaled outcomes on replay (never re-run a
     // completed effect)
     let prior: Vec<Outcome> = cell
@@ -147,7 +163,7 @@ pub(crate) fn finish_planned_intent(
         }
         // the cell is NOT locked here: a capability may spend seconds in a
         // model call, and the person's other requests must not queue on it
-        let outcome = execute_step(cell, deps.router, step, intent_id)?;
+        let outcome = execute_step(cell, deps.router, step, intent_id, pack)?;
         let outcome_json = serde_json::to_string(&outcome)?;
         let outcome_hash = ids::sha256_hex(outcome.detail.as_bytes());
         cell.with(|c| {
@@ -168,7 +184,7 @@ pub(crate) fn finish_planned_intent(
     // the deterministic expression check (sec 5 / Q26) runs before the
     // receipt is stored, so an unsupported effect claim is recorded as
     // uncertain rather than verified
-    let draft_reply = compose_reply(&outcomes, &receipt);
+    let draft_reply = compose_reply(&outcomes, &receipt, pack);
     let unsupported = unsupported_effect_claim(&draft_reply, &outcomes);
     if unsupported {
         receipt.status = ReceiptStatus::Uncertain;
@@ -200,9 +216,10 @@ pub(crate) fn finish_planned_intent(
 
     // reply through the transactional outbox (Q11): enqueued before it can
     // possibly leave, deduped structurally
-    let mut reply = compose_reply(&outcomes, &receipt);
+    let mut reply = compose_reply(&outcomes, &receipt, pack);
     if unsupported {
-        reply.push_str(UNSUPPORTED_NOTE);
+        reply.push_str("\n\n");
+        reply.push_str(pack.reply("unsupported_note"));
     }
     let (reply_effect_id, _fresh) =
         cell.with(|c| outbox::enqueue(c, intent_id, "surface:chat", &reply))?;
@@ -225,6 +242,7 @@ pub(crate) fn finish_planned_intent(
     Ok(TurnOutput {
         intent_id: intent_id.to_string(),
         reply,
+        lang: plan.lang.clone(),
         receipt,
         reply_effect_id,
     })
@@ -240,7 +258,7 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
         deps: vec![],
     };
     let steps = match decision {
-        Decision::Floor { m } => match m {
+        Decision::Floor { m, .. } => match m {
             FloorMatch::TimeNow => vec![step("answer.time", serde_json::json!({}), Effect::Read)],
             FloorMatch::SelfMeta => vec![step("answer.self", serde_json::json!({}), Effect::Read)],
             FloorMatch::Help => vec![step("answer.help", serde_json::json!({}), Effect::Read)],
@@ -323,41 +341,44 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
             }
         }
     };
+    // one language for the whole turn, decided once: the floor reports the
+    // pack that matched, the verdict reports what it detected. A language
+    // with no pack resolves to English for the deterministic strings, while
+    // the model still answers in the person's own language.
+    let lang = match decision {
+        Decision::Floor { lang, .. } => lang.clone(),
+        Decision::Verdict { v } => v.lang.clone(),
+    };
+    let lang = match lexicon::pack(&lang) {
+        Some(p) => p.code.clone(),
+        None => "en".to_string(),
+    };
+    // the language travels in the step args because that is what crosses
+    // the crate boundary into the capability registry, and because args are
+    // journaled -- a replayed turn speaks the language the live one did
+    let steps = steps
+        .into_iter()
+        .map(|mut st| {
+            if let Some(obj) = st.args.as_object_mut() {
+                obj.insert("lang".into(), serde_json::Value::String(lang.clone()));
+            }
+            st
+        })
+        .collect();
     Plan {
         plan_id: ids::new_id("plan"),
         intent_id: intent_id.into(),
+        lang,
         steps,
     }
 }
-
-const SELF_TEXT: &str = "i'm bender -- your robot, v0.2 MVP. i run on this \
-machine only; your words live in an encrypted cell here, every crossing is \
-in the boundary log, and everything i claim to have done carries a receipt. \
-i can tell time, keep reminders, and remember facts you tell me -- every \
-fact with its source, listed in my registry, correctable and deletable for \
-real. my model brain arrives with M4.";
-
-const HELP_TEXT: &str = "here's what works today:\n\
-- time / date -- \"what time is it\"\n\
-- reminders -- \"remind me in 10 minutes to stretch\", \"remind me at 18:30 \
-to call mark\", \"remind me tomorrow at 9 to stretch\"\n\
-- \"my reminders\" / \"cancel reminder\"\n\
-- memory -- \"remember that i drink green tea\", \"what do you remember \
-about tea\"\n\
-- registry -- \"my facts\" (every fact + its source), \"forget fact 2\" \
-(deletes for real), \"correct fact 1: ...\"\n\
-- \"who are you\" -- about me\n\
-everything else needs my model brain, which arrives with M4.";
-
-const FALLBACK_TEXT: &str = "i can't reason about that yet -- my model brain \
-arrives with M4. today i can tell the time, and set, list, or cancel \
-reminders. try \"help\".";
 
 fn execute_step(
     cell: &Cell,
     router: &dyn CapabilityRouter,
     step: &PlanStep,
     intent_id: &str,
+    pack: &Pack,
 ) -> Result<Outcome, PrismError> {
     // floor answers are system-generated constants computed from local state:
     // they attest to exactly what they say
@@ -377,14 +398,14 @@ fn execute_step(
     match step.capability.as_str() {
         "answer.time" => {
             let now = Local::now();
-            Ok(deterministic(format!(
-                "it's {}",
-                now.format("%H:%M on %A, %d %B %Y")
+            Ok(deterministic(lexicon::fill(
+                pack.reply("time_now"),
+                &[("time", &pack.datetime("now", &now))],
             )))
         }
-        "answer.self" => Ok(deterministic(SELF_TEXT.into())),
-        "answer.help" => Ok(deterministic(HELP_TEXT.into())),
-        "answer.fallback" => Ok(deterministic(FALLBACK_TEXT.into())),
+        "answer.self" => Ok(deterministic(pack.reply("self_meta").into())),
+        "answer.help" => Ok(deterministic(pack.reply("help").into())),
+        "answer.fallback" => Ok(deterministic(pack.reply("fallback").into())),
         // the verdict's own chitchat one-liner (Q16 reply field) -- model
         // text, so it speaks but attests to nothing
         "answer.direct" => Ok(Outcome::utterance(
@@ -455,37 +476,6 @@ pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
     }
 }
 
-/// Phrases in which the Robot asserts it changed something in the world.
-/// Deliberately narrow: only first-person completions, not descriptions.
-const EFFECT_CLAIM_PATTERNS: [&str; 26] = [
-    "i've set",
-    "i have set",
-    "i've created",
-    "i have created",
-    "i've added",
-    "i have added",
-    "i've saved",
-    "i have saved",
-    "i've stored",
-    "i have stored",
-    "i've deleted",
-    "i have deleted",
-    "i've removed",
-    "i have removed",
-    "i've cancelled",
-    "i've canceled",
-    "i've scheduled",
-    "i have scheduled",
-    "i've remembered",
-    "i have remembered",
-    "i've sent",
-    "i have sent",
-    "reminder is set",
-    "я поставил",
-    "я запомнил",
-    "я удалил",
-];
-
 /// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set
 /// logic, ~0 ms", run on every turn, never on the model that generated).
 ///
@@ -497,18 +487,16 @@ pub fn unsupported_effect_claim(reply: &str, outcomes: &[Outcome]) -> bool {
     if outcomes.iter().any(|o| o.is_effect()) {
         return false; // something really happened; the claim may be true
     }
-    let lower = reply.to_lowercase();
-    EFFECT_CLAIM_PATTERNS.iter().any(|p| lower.contains(p))
+    // checked against EVERY pack, not just this turn's: the check is a
+    // safety property, and a reply that drifts into another language must
+    // not slip past it
+    lexicon::asserts_an_effect(reply)
 }
-
-const UNSUPPORTED_NOTE: &str = "\n\n[note from my own checks: the sentence above \
-sounds like i changed something, but this turn executed no action -- nothing was \
-created, saved, or deleted. the receipt for this turn records no effect.]";
 
 /// The reply is rendered from the receipt's claims -- system evidence, not
 /// model narration. English for now; Soul's user-language rendering is a
 /// later milestone.
-pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt) -> String {
+pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt, pack: &Pack) -> String {
     match receipt.status {
         ReceiptStatus::Verified | ReceiptStatus::Partial => {
             let mut parts: Vec<&str> = outcomes
@@ -517,11 +505,12 @@ pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt) -> String {
                 .map(|o| o.detail.as_str())
                 .collect();
             if parts.is_empty() {
-                parts.push("done.");
+                parts.push(pack.reply("done"));
             }
             let mut reply = parts.join("\n");
             if receipt.status == ReceiptStatus::Partial {
-                reply.push_str("\n(some of that failed -- the receipt has the honest detail.)");
+                reply.push('\n');
+                reply.push_str(pack.reply("partial_note"));
             }
             reply
         }
@@ -533,14 +522,15 @@ pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt) -> String {
                 .map(|o| o.detail.as_str())
                 .collect();
             if details.is_empty() {
-                "that didn't work -- nothing was changed. the receipt records the \
-                 failure honestly."
-                    .to_string()
+                pack.reply("failed_generic").to_string()
             } else {
                 format!(
-                    "{}\n(nothing was changed; the receipt records this as {}.)",
+                    "{}\n{}",
                     details.join("\n"),
-                    receipt.status.as_str()
+                    lexicon::fill(
+                        pack.reply("failed_note"),
+                        &[("status", receipt.status.as_str())]
+                    )
                 )
             }
         }
@@ -581,11 +571,8 @@ pub(crate) fn interrupted_receipt(intent_id: &str) -> Receipt {
 }
 
 /// Format a fire-time for human display (local time).
-pub fn format_fire_at(fire_at_ms: i64) -> String {
-    match Local.timestamp_millis_opt(fire_at_ms).earliest() {
-        Some(dt) => dt.format("%H:%M on %a, %d %b").to_string(),
-        None => format!("t+{fire_at_ms}ms"),
-    }
+pub fn format_fire_at(pack: &Pack, fire_at_ms: i64) -> String {
+    pack.datetime_ms("fire_at", fire_at_ms)
 }
 
 #[cfg(test)]
@@ -645,7 +632,7 @@ mod receipt_tests {
         let receipt = build_receipt("int_3", std::slice::from_ref(&outcome));
         assert_eq!(receipt.status, ReceiptStatus::Failed);
         // and the reply says what went wrong, not a generic line
-        let reply = compose_reply(&[outcome], &receipt);
+        let reply = compose_reply(&[outcome], &receipt, lexicon::english());
         assert!(reply.contains("trouble thinking"), "{reply}");
         assert!(reply.contains("nothing was changed"), "{reply}");
     }

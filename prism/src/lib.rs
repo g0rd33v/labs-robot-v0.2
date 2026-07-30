@@ -7,6 +7,7 @@
 
 pub mod floor;
 pub mod journal;
+pub mod lexicon;
 pub mod lifecycle;
 pub mod outbox;
 pub mod receipts;

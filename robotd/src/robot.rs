@@ -301,6 +301,14 @@ impl RobotCore {
             // the cell is locked only in short bursts inside run_turn; the
             // model call in the middle happens with it free
             let out = prism::run_turn(cell, &env, &deps)?;
+            // remember what language this person speaks to us in, so the
+            // lanes that talk to them when they are not asking -- a
+            // reminder firing at 03:00, a backup failure -- do it in their
+            // language rather than in English by default
+            cell.with(|c| {
+                remember_lang(c, &out.lang);
+                Ok(())
+            })?;
             // `confirmed` must follow the delivery it claims. For the local
             // chat the message store IS the delivery channel (the surface
             // renders from history), so recording it is the confirmation.
@@ -315,6 +323,35 @@ impl RobotCore {
         self.notify(principal);
         Ok(reply)
     }
+}
+
+/// The language a cell last spoke, remembered in `cell_meta`.
+///
+/// Kept here rather than in the kernel: prism decides the language, robotd
+/// composes and stores. A failure to record it is not a reason to fail the
+/// turn -- worst case the next background notice speaks English.
+pub fn remember_lang(conn: &Connection, lang: &str) {
+    let _ = conn.execute(
+        "INSERT INTO cell_meta(key, value) VALUES ('lang', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![lang],
+    );
+}
+
+/// The pack a cell speaks, for the lanes that talk without being asked.
+pub fn cell_pack(cell: &Cell) -> &'static prism::lexicon::Pack {
+    let code: Option<String> = cell
+        .sql(|c| {
+            c.query_row("SELECT value FROM cell_meta WHERE key = 'lang'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+        })
+        .ok()
+        .flatten();
+    code.as_deref()
+        .and_then(prism::lexicon::pack)
+        .unwrap_or_else(prism::lexicon::english)
 }
 
 const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus", "flac"];
@@ -667,6 +704,115 @@ mod tests {
             assert!(kinds.iter().any(|k| k == "receipt"), "{text}");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The whole point of the language architecture, end to end: the same
+    /// governed turn, in two languages, answered in the language it was
+    /// asked in -- with no model call anywhere (the router is offline).
+    #[test]
+    fn a_turn_is_answered_in_the_language_it_was_asked_in() {
+        let (cell, path) = file_cell("lang_roundtrip");
+        let router = Registry::offline();
+        let run = |text: &str| {
+            prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap()
+        };
+
+        let en = run("remind me in 10 minutes to stretch");
+        assert_eq!(en.lang, "en");
+        assert!(en.reply.starts_with("done -- i'll remind you"), "{}", en.reply);
+
+        let ru = run("напомни через 10 минут размяться");
+        assert_eq!(ru.lang, "ru");
+        assert!(ru.reply.starts_with("готово"), "{}", ru.reply);
+        // and the date inside it is Russian too, not an English month name
+        assert!(
+            !ru.reply.contains("Mon")
+                && !ru.reply.contains("Jan")
+                && !ru.reply.contains(" on "),
+            "a russian reply carried english calendar words: {}",
+            ru.reply
+        );
+
+        let ru_list = run("мои напоминания");
+        assert!(ru_list.reply.starts_with("твои напоминания"), "{}", ru_list.reply);
+        let en_list = run("my reminders");
+        assert!(en_list.reply.starts_with("your reminders"), "{}", en_list.reply);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A language nobody has written a pack for must be an ordinary turn,
+    /// not an error: the floor declines, the verdict path takes it, and the
+    /// receipt is terminal like any other.
+    #[test]
+    fn an_unpacked_language_still_completes_a_governed_turn() {
+        let (cell, path) = file_cell("lang_unpacked");
+        let router = Registry::offline();
+        for text in [
+            "今何時ですか",           // Japanese
+            "كم الساعة",              // Arabic
+            "¿me recuerdas algo?",    // Spanish
+            "wie spät ist es",        // German
+            "지금 몇 시야",            // Korean
+        ] {
+            let out =
+                prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap();
+            assert!(out.receipt.status.is_terminal(), "{text}");
+            assert!(!out.reply.is_empty(), "{text}");
+            // no pack, so the deterministic strings render in English --
+            // degraded, never broken
+            assert_eq!(out.lang, "en", "{text}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Law #4 as a test with teeth: no human-language phrase may live in
+    /// code. Every surface word belongs to a pack, so a source file
+    /// containing non-Latin script means someone hard-coded a phrase again.
+    #[test]
+    fn no_surface_vocabulary_lives_in_code() {
+        fn offending(path: &std::path::Path) -> Vec<char> {
+            let src = std::fs::read_to_string(path).unwrap_or_default();
+            // tests may quote any language; only non-test code is scanned
+            let code = match src.find("#[cfg(test)]") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            code.chars()
+                .filter(|c| {
+                    let u = *c as u32;
+                    (0x0400..=0x04FF).contains(&u)      // Cyrillic
+                        || (0x0590..=0x08FF).contains(&u) // Hebrew, Arabic
+                        || (0x3040..=0x30FF).contains(&u) // kana
+                        || (0x4E00..=0x9FFF).contains(&u) // han
+                        || (0xAC00..=0xD7AF).contains(&u) // hangul
+                })
+                .collect()
+        }
+        let mut checked = 0;
+        for dir in ["../prism/src", "../robotd/src", "../mind/src", "../hub/src"] {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+            let mut stack = vec![root];
+            while let Some(p) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&p) else { continue };
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|x| x == "rs") {
+                        checked += 1;
+                        let bad = offending(&path);
+                        assert!(
+                            bad.is_empty(),
+                            "surface vocabulary hard-coded in {}: {bad:?} -- \
+                             it belongs in prism/src/lang/*.toml",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked > 10, "the scan found almost nothing to check");
     }
 
     #[test]

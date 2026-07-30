@@ -4,7 +4,7 @@
 //! that a model spoke and which one, not what it said (arch sec 3).
 
 use super::{failed, note_evidence, spoke, Capability, Ctx};
-use crate::prompts::{persona, BRAIN_OFFLINE};
+use crate::prompts::persona;
 use chrono::Local;
 use hub::gateway::{Msg, Role};
 use prism::types::{Effect, Outcome, Tier};
@@ -55,21 +55,20 @@ impl Capability for ModelAnswer {
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let query = args["query"].as_str().unwrap_or("");
         let Some(gw) = &ctx.services.gateway else {
-            return spoke(note_evidence("brain-offline"), BRAIN_OFFLINE.into());
+            return spoke(note_evidence("brain-offline"), ctx.say("brain_offline", &[]));
         };
 
         // escalation: the verdict's tier merged with deterministic rules
         let vtier: Tier = serde_json::from_value(args["tier"].clone()).unwrap_or(Tier::Fast);
         let mut tier = hub::escalation::merge(vtier, hub::escalation::classify(query));
-        let mut quota_note = "";
+        let mut quota_note = String::new();
         if tier == Tier::Ultra {
             let allowed = ctx
                 .cell
                 .with(|c| Ok(bump_ultra(c, ctx.policy.ultra_daily_cap)))?;
             if !allowed {
                 tier = Tier::Super;
-                quota_note = "\n\n(daily ultra budget exhausted -- answered on super; \
-                              the receipt names it.)";
+                quota_note = ctx.say("ultra_quota_note", &[]);
             }
         }
 
@@ -122,10 +121,7 @@ impl Capability for ModelAnswer {
             ),
             Err(e) => failed(
                 note_evidence("provider-failure"),
-                format!(
-                    "i'm having trouble thinking right now ({e}). \
-                     the deterministic floor still works -- try \"help\"."
-                ),
+                ctx.say("provider_failure", &[("error", &e.to_string())]),
             ),
         }
     }

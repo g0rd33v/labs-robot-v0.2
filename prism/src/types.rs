@@ -49,7 +49,17 @@ pub struct PlanStep {
 pub struct Plan {
     pub plan_id: String,
     pub intent_id: String,
+    /// The language this turn is answered in, resolved once at decision
+    /// time and journaled with the plan so a replayed intent speaks the
+    /// same language the live one did. Defaulted for plans journaled
+    /// before packs existed.
+    #[serde(default = "default_lang")]
+    pub lang: String,
     pub steps: Vec<PlanStep>,
+}
+
+pub(crate) fn default_lang() -> String {
+    "en".into()
 }
 
 // ---------------------------------------------------------------- grant

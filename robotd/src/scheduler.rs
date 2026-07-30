@@ -38,8 +38,9 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
     let due = cell.with(|c| Ok(mind::reminders::due_active(c, now)))??;
     let mut count = 0;
 
+    let pack = crate::robot::cell_pack(cell);
     for rem in due {
-        let text = format!("⏰ reminder: {}", rem.about);
+        let text = prism::lexicon::fill(pack.reply("reminder_fired"), &[("about", &rem.about)]);
         {
             let intent_id = trust::ids::new_id("int");
             let open_json = serde_json::json!({

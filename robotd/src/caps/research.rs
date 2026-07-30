@@ -4,7 +4,7 @@
 //! concluded from them.
 
 use super::{failed, note_evidence, spoke, Capability, Ctx};
-use crate::prompts::{research_system_prompt, BRAIN_OFFLINE};
+use crate::prompts::research_system_prompt;
 use hub::gateway::{Msg, Role};
 use prism::types::{Effect, Evidence, Outcome};
 use prism::PrismError;
@@ -22,11 +22,9 @@ impl Capability for WebResearch {
         let query = args["query"].as_str().unwrap_or("");
         let (Some(gw), Some(rs)) = (&ctx.services.gateway, &ctx.services.research) else {
             let why = if ctx.services.gateway.is_none() {
-                BRAIN_OFFLINE.to_string()
+                ctx.say("brain_offline", &[])
             } else {
-                "web search is off (no SERPER_API_KEY in the environment); \
-                 i can only answer from what i already know."
-                    .to_string()
+                ctx.say("search_offline", &[])
             };
             return spoke(note_evidence("search-offline"), why);
         };
@@ -34,15 +32,12 @@ impl Capability for WebResearch {
         let hits = match rs.search(query) {
             Ok(h) if !h.is_empty() => h,
             Ok(_) => {
-                return spoke(
-                    note_evidence("no-results"),
-                    "the web search came back empty for that.".into(),
-                )
+                return spoke(note_evidence("no-results"), ctx.say("search_empty", &[]))
             }
             Err(e) => {
                 return failed(
                     note_evidence("search-failure"),
-                    format!("the web search failed: {e}"),
+                    ctx.say("search_failed", &[("error", &e.to_string())]),
                 )
             }
         };
@@ -89,7 +84,7 @@ impl Capability for WebResearch {
         // it is a security property left to chance
         match gw.chat_at(Role::Answer, &messages, None, 1200, 0.0) {
             Ok(out) => {
-                let mut sources = String::from("\n\nsources:");
+                let mut sources = format!("\n\n{}", ctx.say("sources_header", &[]));
                 for (i, h) in hits.iter().take(3).enumerate() {
                     sources.push_str(&format!("\n{}. {}", i + 1, h.link));
                 }
@@ -98,7 +93,7 @@ impl Capability for WebResearch {
             }
             Err(e) => failed(
                 note_evidence("provider-failure"),
-                format!("i found sources but couldn't think about them ({e})."),
+                ctx.say("research_failed", &[("error", &e.to_string())]),
             ),
         }
     }

@@ -1,7 +1,6 @@
 //! Reminder capabilities: the commitment ledger's write surface.
 
 use super::{attested, mind_err, note_evidence, row_evidence, Capability, Ctx};
-use prism::lifecycle::format_fire_at;
 use prism::types::{Effect, Outcome};
 use prism::PrismError;
 
@@ -27,10 +26,12 @@ impl Capability for Create {
             .with(|c| mind::reminders::create(c, ctx.intent_id, fire_at, about).map_err(mind_err))?;
         attested(
             row_evidence(&rem.id, &trust::ids::sha256_hex(about.as_bytes())),
-            format!(
-                "done -- i'll remind you at {}: {}",
-                format_fire_at(rem.fire_at),
-                rem.about
+            ctx.say(
+                "reminder_created",
+                &[
+                    ("when", &ctx.pack().datetime_ms("fire_at", rem.fire_at)),
+                    ("about", &rem.about),
+                ],
             ),
         )
     }
@@ -50,14 +51,23 @@ impl Capability for List {
             .cell
             .with(|c| mind::reminders::list_active(c).map_err(mind_err))?;
         let detail = if all.is_empty() {
-            "no active reminders.".to_string()
+            ctx.say("reminder_list_empty", &[])
         } else {
             let lines: Vec<String> = all
                 .iter()
                 .enumerate()
-                .map(|(i, r)| format!("{}. {} -- {}", i + 1, format_fire_at(r.fire_at), r.about))
+                .map(|(i, r)| {
+                    ctx.say(
+                        "reminder_line",
+                        &[
+                            ("n", &(i + 1).to_string()),
+                            ("when", &ctx.pack().datetime_ms("fire_at", r.fire_at)),
+                            ("about", &r.about),
+                        ],
+                    )
+                })
                 .collect();
-            format!("your reminders:\n{}", lines.join("\n"))
+            format!("{}\n{}", ctx.say("reminder_list_header", &[]), lines.join("\n"))
         };
         attested(note_evidence("reminder.list"), detail)
     }
@@ -81,11 +91,11 @@ impl Capability for CancelLast {
         {
             Some(rem) => attested(
                 row_evidence(&rem.id, ""),
-                format!("cancelled: {}", rem.about),
+                ctx.say("reminder_cancelled", &[("about", &rem.about)]),
             ),
             None => attested(
                 note_evidence("reminder.cancel_last"),
-                "nothing to cancel -- no active reminders.".into(),
+                ctx.say("reminder_nothing_to_cancel", &[]),
             ),
         }
     }

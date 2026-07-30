@@ -8,22 +8,13 @@ use prism::types::Tier;
 /// explicit effort requests upgrade; everything else stays where the
 /// verdict put it.
 pub fn classify(text: &str) -> Tier {
-    let lower = text.to_lowercase();
-    let ultra_signals = ["think ultra", "maximum effort", "подумай изо всех сил"];
-    if ultra_signals.iter().any(|s| lower.contains(s)) {
+    // the phrases live in the language packs, in every packed language;
+    // math symbols are language-independent and stay here
+    if prism::lexicon::matches_signal("escalate_ultra", text) {
         return Tier::Ultra;
     }
-    let super_signals = [
-        "```",
-        "think hard",
-        "step by step",
-        "prove",
-        "theorem",
-        "подумай как следует",
-        "докажи",
-    ];
     let mathy = text.chars().filter(|c| "∫∑√≈≠≤≥±".contains(*c)).count() >= 2;
-    if super_signals.iter().any(|s| lower.contains(s)) || mathy {
+    if mathy || prism::lexicon::matches_signal("escalate_super", text) {
         return Tier::Super;
     }
     Tier::Fast

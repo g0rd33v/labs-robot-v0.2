@@ -18,10 +18,6 @@ pub fn persona() -> String {
     )
 }
 
-pub const BRAIN_OFFLINE: &str = "my model brain is offline (no OPENROUTER_API_KEY \
-in the environment). the deterministic floor still works -- time, reminders, \
-memory, registry. try \"help\".";
-
 /// The web-READ framing (sec 7a injection defense). Shared with the eval
 /// runner so the prompt-injection suite tests exactly what production runs
 /// -- if these diverge, the suite stops meaning anything.

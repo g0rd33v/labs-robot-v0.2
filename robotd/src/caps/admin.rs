@@ -36,9 +36,12 @@ impl Capability for Invite {
         }
         attested(
             row_evidence("invite", ""),
-            format!(
-                "one-time invite link (works once, member role, their own sealed cell):\n{}/i/{token}",
-                ctx.instance.public_base
+            ctx.say(
+                "invite_created",
+                &[(
+                    "link",
+                    &format!("{}/i/{token}", ctx.instance.public_base),
+                )],
             ),
         )
     }
@@ -81,11 +84,7 @@ impl Capability for TelegramBindCode {
         }
         attested(
             row_evidence("telegram.bind_code", ""),
-            format!(
-                "telegram bind code: {code}\nsend this code to your bot in telegram \
-                 within 10 minutes and that chat becomes yours. (the bot needs \
-                 TELEGRAM_BOT_TOKEN in the environment.)"
-            ),
+            ctx.say("telegram_bind_code", &[("code", &code)]),
         )
     }
 }
