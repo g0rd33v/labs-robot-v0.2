@@ -41,6 +41,17 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     prism::init_cell_schema(&owner_cell)?;
     mind::init_cell_schema(&owner_cell)?;
 
+    // crash replay (arch sec 3): resume every intent the last run left open;
+    // an intent without a terminal receipt is a bug, never a silent drop
+    let replayed = prism::replay::resume_incomplete(&owner_cell, &crate::robot::Capabilities)?;
+    if replayed.resumed + replayed.closed_failed > 0 {
+        tracing::info!(
+            "crash replay: {} resumed, {} closed failed",
+            replayed.resumed,
+            replayed.closed_failed
+        );
+    }
+
     // tier-3 slug (Q32): stored inside the encrypted core so the URL can be
     // re-printed at every boot; rotation = replacing this row.
     let slug = match schema::meta_get(&core, "slug_token")? {
@@ -154,7 +165,7 @@ mod tests {
             .robot
             .handle_message("hello robot".into())
             .unwrap();
-        assert!(reply.contains("M1"));
+        assert!(reply.contains("M4"), "fallback reply expected, got: {reply}");
 
         // cells are opaque on disk
         assert!(trust::cells::file_looks_encrypted(&dir.join("core.db")).unwrap());
@@ -175,12 +186,16 @@ mod tests {
         assert_eq!(trust::boundary::count(&core).unwrap(), 2);
         assert!(trust::boundary::verify_chain(&core).unwrap());
 
-        // the turn is journaled in the cell: open -> reply.compose -> close
+        // the turn is journaled in the cell: opens with intent_open, closes
+        // with intent_close, and a receipt row exists in between
         let dek = ensure_cell_key(&core, &keys, "owner").unwrap();
         let cell =
             trust::cells::open_encrypted(&dir.join("cells").join("owner.db"), &dek).unwrap();
         let kinds = prism::journal::kinds_for_latest_intent(&cell).unwrap();
-        assert_eq!(kinds, vec!["intent_open", "reply.compose", "intent_close"]);
+        assert_eq!(kinds.first().map(String::as_str), Some("intent_open"));
+        assert_eq!(kinds.last().map(String::as_str), Some("intent_close"));
+        assert!(kinds.iter().any(|k| k == "receipt"));
+        assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
         assert_eq!(mind::message_count(&cell).unwrap(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);

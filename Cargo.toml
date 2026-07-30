@@ -30,6 +30,9 @@ serde_json = "1"
 toml = "0.8"
 # hashing: boundary-log chain, content hashes, dedupe keys
 sha2 = "0.10"
+# local time for the deterministic floor (Q17: time/date answers, "remind me
+# at 18:30") and receipt/reply time rendering
+chrono = "0.4"
 # key material, tokens, ids
 rand = "0.8"
 # AEAD for wrapping per-cell DEKs under the KEK (Q4 envelope encryption)

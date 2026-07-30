@@ -1,8 +1,10 @@
 //! mind: the epistemic memory substrate (arch sec 4).
 //!
-//! M1 ships the message store (the start of the event journal) inside the
-//! cell. Facts with source FKs, FTS5 + sqlite-vec retrieval, and the
-//! Registry arrive with M3.
+//! M2 ships the message store and the reminders ledger (the first
+//! commitment-ledger entries). Facts with source FKs, FTS5 + sqlite-vec
+//! retrieval, and the Registry arrive with M3.
+
+pub mod reminders;
 
 use rusqlite::{params, Connection};
 use thiserror::Error;
@@ -25,6 +27,15 @@ CREATE TABLE IF NOT EXISTS messages (
     lang      TEXT,
     content   TEXT NOT NULL,
     media_ref TEXT
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id         TEXT PRIMARY KEY,
+    intent_id  TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    fire_at    INTEGER NOT NULL,
+    about      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'active'
+               CHECK (status IN ('active','cancelled','fired'))
 );
 CREATE TABLE IF NOT EXISTS cell_meta (
     key   TEXT PRIMARY KEY,
@@ -51,7 +62,7 @@ pub fn record_message(
     Ok(id)
 }
 
-/// Number of stored messages. Used by tests and the M1 gate demo.
+/// Number of stored messages. Used by tests and gate demos.
 pub fn message_count(conn: &Connection) -> Result<i64, MindError> {
     Ok(conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
 }
