@@ -5,6 +5,113 @@ dependencies introduced. Newest first.
 
 ---
 
+## Review phases C & D (2026-07-30)
+
+Phases A and B (below) fixed panics, silent data loss, and the two laws
+that were implemented as discipline. C and D close the concurrency defect
+and the structural items worth doing now.
+
+### Phase C — the turn no longer holds the cell open while it thinks
+
+`RobotCore::turn` ran the whole governed lifecycle under one cell mutex
+guard, model calls included. A `web.research` turn could hold it for ~2
+minutes (verdict hedge 10.5s + search 12s + two fetches 24s + two model
+calls 90s). For the whole of that: that person's history, dashboard, SSE
+and reminders blocked on the same lock, and each blocked request pinned a
+`spawn_blocking` thread. `handle_media` had it right; `turn` did not.
+
+**And the watchdog could never fire.** Its job is to alert on turns hung
+>60s, but `sweep()` must take the cell lock to read `open_intents` — the
+exact lock a hung turn holds. It blocked, and by the time it got in the
+turn had closed and the list was empty. M6 shipped it, tested it against
+synthetic rows nothing was holding, and called the gate passed.
+
+Fix: `prism::Cell`, a lockable handle rather than a held `&Connection`.
+Every journal/receipt/outbox write is a short `with(...)` burst; slow work
+happens between them. lifecycle, replay, the capability router, scheduler
+and maintenance all converted; maintenance additionally takes short locks
+per intent instead of holding a cell for its whole per-principal loop.
+
+Also: sessions capped (512) and aged (30d) with LRU eviction — they grew
+forever and every cookie ever issued stayed valid until restart; a poisoned
+sessions lock no longer bricks the web surface; SSE `Lagged` is surfaced as
+a `resync` event so a backgrounded tab reloads instead of sitting stale.
+
+**Gate.** New test `a_slow_capability_does_not_block_the_cell`: a turn whose
+capability sleeps 600 ms, asserting the cell stays readable within 250 ms.
+Under the old code the probe blocked for the full sleep — and nothing
+existing could catch it, since every test was single-threaded with a mocked
+gateway. Live, during an in-flight research turn: history fetches 10 ms,
+dashboard 20 ms.
+
+### Phase D — routing, authorization, CLI, duplication
+
+- **Search routing.** Phase C's live run exposed it: "search the web: …"
+  routed to a plain model answer that replied "I can't search the web."
+  The same class of question reached research in M4 and not in C — the
+  decision was left to a stochastic verdict. Explicit search is now a
+  deterministic floor command (EN + RU), which is what Q17 is for. Token
+  normalization also strips `:`/`;` so "search the web:" and "remember:"
+  match their spaced forms.
+- **Authorization.** The owner check in `member.invite` /
+  `telegram.bind_code` sat behind an availability check, and every test
+  built the router with `core: None` — so the two cases annotated
+  "owner-only refusal path" short-circuited and never ran the comparison.
+  Inverting or deleting the check broke no test. It is the only
+  authorization boundary in the product. The role check now runs first
+  behind one `require_owner` helper, and a new test drives a real owner and
+  a real member through `bootstrap`, asserting the **absence of the effect**
+  (no `invites` row, no stored bind code) rather than the refusal string.
+  Mutation-checked: inverting the comparison now fails the suite.
+- **CLI** extracted to `cli.rs` as a pure `argv -> Cmd` function with its
+  own tests. Fixes: config was loaded (and a default `robot.toml`
+  **written**) before dispatch, so `robotd restore … --into /Volumes/stick`
+  littered a config into the working directory; flags were scanned globally
+  so `--config` could bind twice; the subcommand was only read at `argv[1]`
+  so `robotd --config x backup` silently started a server; an unknown
+  subcommand booted the daemon (`robotd bakup` served on 7777). Adds
+  `--help` / `--version`; `restore` deliberately loads no config.
+- **Archive.** `backup.rs` and `package.rs` were the same ~80-line
+  algorithm twice; both now stage/seal/unseal through `archive.rs`. The
+  backup test additionally asserts the sealed blob contains neither the
+  plaintext fact nor a tar header, and that a foreign key cannot open it.
+
+**Gate (C+D).** 80 tests (was 50 at M7); clippy -D warnings clean; eval
+PASS — 59 routing MISROUTE-0, 12/12 kill scenarios, floor p95 1.6 ms,
+60/60 injection calls. Live: the request that failed in Phase C now
+searches, reads and cites three sources.
+
+### Deliberately not done
+
+- **`robot.rs` decomposition** (1,261 lines, one 390-line match, `Effect`
+  classified in `prism` while implemented in `robotd`). The largest and
+  riskiest change with zero user-visible benefit, and the reviewer's own
+  sequencing puts HTTP integration tests first as the safety net — which
+  needs `robotd` split into lib+bin. Not something to start at the tail of
+  a long session on a kernel that currently passes every gate.
+- **HTTP integration tests.** `surfaces` tests run entirely against a test
+  double, so nothing covers upload→vault→receipt→history end to end, or
+  `/dash` 403 against a real `RobotCore`, or session A reading session B's
+  history. Blocked on the same lib/bin split.
+
+### Known gaps, carried forward
+
+- The boundary chain is **unkeyed SHA-256**. Append-only triggers,
+  transactional appends and boot/dashboard verification stop accidental and
+  casual tampering; an adversary who can write the database *and* alter its
+  schema can still recompute it. Real tamper-proofing needs an HMAC under a
+  key held outside `core.db`. The dashboard says "chain verified" and
+  should not be read as more than that.
+- Telegram marks `confirmed` before the provider returns a message_id.
+- **Law 4 is inverted**: Russian literals live inside `prism` while replies
+  are English-only. A product change (user-language rendering), not a
+  review fix.
+- `/api/history`, `/dash`, SSE and the inbound listener move bytes with no
+  crossings; the law reads as outbound-oriented but the code should say so.
+- Q20's golden-corpus retrieval bar still needs Akita's corpus (owner).
+
+---
+
 ## Review phase B — the laws (2026-07-30)
 
 Four independent reviewers audited the MVP after M7. Phase A fixed panics
