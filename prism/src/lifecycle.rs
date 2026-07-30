@@ -97,7 +97,7 @@ pub fn run_turn(
     journal::step(cell, &intent_id, "decision", &serde_json::to_string(&decision)?, None)?;
     crash_check(deps, "after_decision")?;
 
-    let plan = plan_from_decision(&intent_id, &decision);
+    let plan = plan_from_decision(&intent_id, &decision, &env.content);
     journal::step(cell, &intent_id, "plan", &serde_json::to_string(&plan)?, None)?;
     crash_check(deps, "after_plan")?;
 
@@ -199,7 +199,7 @@ pub(crate) fn finish_planned_intent(
     })
 }
 
-pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision) -> Plan {
+pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: &str) -> Plan {
     let step = |capability: &str, args: serde_json::Value, effect: Effect| PlanStep {
         step_id: ids::new_id("pstep"),
         capability: capability.into(),
@@ -251,8 +251,30 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision) -> Plan {
                 Effect::ReversibleWrite,
             )],
         },
-        Decision::Verdict { .. } => {
-            vec![step("answer.fallback", serde_json::json!({}), Effect::Read)]
+        Decision::Verdict { v } => {
+            // the verdict routes; capabilities execute. chitchat with a
+            // ready one-liner answers directly (Q16's reply field); search
+            // or a web door goes through research; everything else is a
+            // model answer with memory context.
+            if v.action == VerdictAction::Chitchat && v.reply.is_some() {
+                vec![step(
+                    "answer.direct",
+                    serde_json::json!({ "reply": v.reply.clone().unwrap_or_default() }),
+                    Effect::Read,
+                )]
+            } else if v.action == VerdictAction::Search || v.door == Door::Web {
+                vec![step(
+                    "web.research",
+                    serde_json::json!({ "query": content }),
+                    Effect::Read,
+                )]
+            } else {
+                vec![step(
+                    "answer.model",
+                    serde_json::json!({ "query": content, "tier": v.tier }),
+                    Effect::Read,
+                )]
+            }
         }
     };
     Plan {
@@ -314,6 +336,10 @@ fn execute_step(
         "answer.self" => Ok(deterministic(SELF_TEXT.into())),
         "answer.help" => Ok(deterministic(HELP_TEXT.into())),
         "answer.fallback" => Ok(deterministic(FALLBACK_TEXT.into())),
+        // the verdict's own chitchat one-liner (Q16 reply field)
+        "answer.direct" => Ok(deterministic(
+            step.args["reply"].as_str().unwrap_or("hi.").to_string(),
+        )),
         _ => {
             let mut outcome = router.execute(cell, &step.capability, &step.args, intent_id)?;
             outcome.step_id = step.step_id.clone();
@@ -322,7 +348,9 @@ fn execute_step(
     }
 }
 
-pub(crate) fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
+/// Compile a receipt from outcomes -- also used by system intents (e.g. the
+/// reminder scheduler) so their fires carry receipts like any other action.
+pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
     let all_ok = !outcomes.is_empty() && outcomes.iter().all(|o| o.ok);
     let any_ok = outcomes.iter().any(|o| o.ok);
     let status = if all_ok {
@@ -332,6 +360,15 @@ pub(crate) fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
     } else {
         ReceiptStatus::Failed
     };
+    // receipts name the models that acted (arch sec 0a): collected from
+    // provider_response evidence, never from narration
+    let mut models_used: Vec<String> = outcomes
+        .iter()
+        .flat_map(|o| o.evidence.iter())
+        .filter(|e| e.kind == "provider_response")
+        .map(|e| e.external_id.clone())
+        .collect();
+    models_used.dedup();
     Receipt {
         receipt_id: ids::new_id("rcpt"),
         intent_id: intent_id.into(),
@@ -343,7 +380,7 @@ pub(crate) fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
                 evidence: o.evidence.clone(),
             })
             .collect(),
-        models_used: vec![],
+        models_used,
         data_disclosures: vec![],
     }
 }

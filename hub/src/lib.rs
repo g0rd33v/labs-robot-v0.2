@@ -8,6 +8,15 @@
 //! -- is boundary-logged in both directions. M4 fills in OpenRouter, Serper,
 //! and the fetch/READ loop.
 
+pub mod escalation;
+pub mod gateway;
+pub mod research;
+pub mod verdicts;
+
+pub use gateway::{BoundarySink, Cast, ChatApi, ChatOut, GatewayConfig, ModelGateway, Msg, Role, UreqApi};
+pub use research::Research;
+pub use verdicts::GatewayVerdicts;
+
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use rusqlite::Connection;
 use std::path::Path;
@@ -19,25 +28,10 @@ use trust::boundary::{self, Crossing, Direction};
 pub enum HubError {
     #[error("embed: {0}")]
     Embed(String),
+    #[error("gateway: {0}")]
+    Gateway(String),
     #[error("trust: {0}")]
     Trust(#[from] trust::TrustError),
-}
-
-#[derive(Default)]
-pub struct Gateway {
-    _sealed: (),
-}
-
-impl Gateway {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Number of external endpoints configured. Still zero in M3: the
-    /// embedder is local inference, not an external relationship.
-    pub fn endpoints(&self) -> usize {
-        0
-    }
 }
 
 /// The local embedding seat (Q24): multilingual, retrieval-tuned, CPU-fast.
@@ -146,12 +140,3 @@ fn dir_size(dir: &Path) -> i64 {
     total
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn m3_gateway_still_has_zero_external_endpoints() {
-        assert_eq!(Gateway::new().endpoints(), 0);
-    }
-}

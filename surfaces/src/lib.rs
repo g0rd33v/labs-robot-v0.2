@@ -23,6 +23,9 @@ use std::{
 /// implementation (robotd's RobotCore) owns boundary logging and journaling.
 pub trait Robot: Send + Sync {
     fn handle_message(&self, text: String) -> anyhow::Result<String>;
+    /// Messages after a timestamp: (ts, direction, content). Lets the chat
+    /// render history and receive scheduler-fired messages by polling.
+    fn history(&self, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>>;
 }
 
 pub struct WebState {
@@ -60,6 +63,7 @@ pub fn router(state: Arc<WebState>) -> Router {
         .route("/a/{token}", get(open_slug))
         .route("/chat", get(chat_page))
         .route("/api/message", post(api_message))
+        .route("/api/history", get(api_history))
         .with_state(state)
 }
 
@@ -118,6 +122,50 @@ struct MsgOut {
     reply: String,
 }
 
+#[derive(serde::Deserialize)]
+struct HistoryQ {
+    #[serde(default)]
+    after: i64,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryRow {
+    ts: i64,
+    direction: String,
+    content: String,
+}
+
+async fn api_history(
+    State(st): State<Arc<WebState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<HistoryQ>,
+) -> Response {
+    if !st.session_valid(&headers) {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    }
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.history(q.after)).await {
+        Ok(Ok(rows)) => Json(
+            rows.into_iter()
+                .map(|(ts, direction, content)| HistoryRow {
+                    ts,
+                    direction,
+                    content,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("history failed: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "history failed").into_response()
+        }
+        Err(e) => {
+            tracing::error!("history join error: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "history failed").into_response()
+        }
+    }
+}
+
 async fn api_message(
     State(st): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -151,6 +199,9 @@ mod tests {
     impl Robot for Echo {
         fn handle_message(&self, t: String) -> anyhow::Result<String> {
             Ok(format!("echo: {t}"))
+        }
+        fn history(&self, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
+            Ok(vec![(after_ts + 1, "out".into(), "from history".into())])
         }
     }
 

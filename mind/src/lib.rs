@@ -140,6 +140,43 @@ pub fn message_count(conn: &Connection) -> Result<i64, MindError> {
     Ok(conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)
 }
 
+/// The last `limit` messages in chronological order: (direction, content).
+/// Feeds the model's conversation context.
+pub fn recent_messages(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(String, String)>, MindError> {
+    let mut stmt = conn.prepare(
+        "SELECT direction, content FROM (\
+             SELECT direction, content, ts, rowid FROM messages \
+             ORDER BY ts DESC, rowid DESC LIMIT ?1\
+         ) ORDER BY ts ASC, rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Messages after a timestamp, chronological: (ts, direction, content).
+/// Feeds the chat history/poll endpoint.
+pub fn messages_after(
+    conn: &Connection,
+    after_ts: i64,
+    limit: usize,
+) -> Result<Vec<(i64, String, String)>, MindError> {
+    let mut stmt = conn.prepare(
+        "SELECT ts, direction, content FROM messages WHERE ts > ?1 \
+         ORDER BY ts ASC, rowid ASC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![after_ts, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

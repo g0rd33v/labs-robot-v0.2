@@ -23,6 +23,19 @@ port = 7777
 # the vector door -- recall degrades to FTS + recency.
 embeddings = true
 model_cache = "./data/models"
+
+[hub]
+# the intelligence gateway (arch sec 6). the API keys are NOT here -- they
+# come from the environment (OPENROUTER_API_KEY, SERPER_API_KEY), pulled
+# from the OS keychain at launch. no key = the deterministic floor still
+# works and the robot says so honestly.
+base_url = "https://openrouter.ai/api/v1"
+hedge_after_ms = 2500
+ultra_daily_cap = 20
+# the cast (sec 6a / Q28) is overridable per role:
+# [hub.cast]
+# verdict = "google/gemma-4-26b-a4b-it"
+# answer  = "google/gemma-4-31b-it"
 "#;
 
 #[derive(Debug, Deserialize, Default)]
@@ -31,6 +44,7 @@ pub struct RobotConfig {
     pub robot: RobotSection,
     pub server: ServerSection,
     pub mind: MindSection,
+    pub hub: HubSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +91,26 @@ impl Default for MindSection {
         Self {
             embeddings: true,
             model_cache: "./data/models".into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct HubSection {
+    pub base_url: String,
+    pub hedge_after_ms: u64,
+    pub ultra_daily_cap: u32,
+    pub cast: hub::Cast,
+}
+
+impl Default for HubSection {
+    fn default() -> Self {
+        Self {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            hedge_after_ms: 2500,
+            ultra_daily_cap: 20,
+            cast: hub::Cast::default(),
         }
     }
 }

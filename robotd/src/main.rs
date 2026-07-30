@@ -4,6 +4,7 @@
 mod boot;
 mod config;
 mod robot;
+mod scheduler;
 
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -26,6 +27,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::load(&config_path)?;
     let booted = boot::bootstrap(&cfg)?;
+
+    // the commitment ledger's background lane: due reminders fire
+    scheduler::spawn(booted.robot.clone());
 
     tracing::info!(
         "robot '{}' is up; data in {}",

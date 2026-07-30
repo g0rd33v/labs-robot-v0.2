@@ -5,6 +5,71 @@ dependencies introduced. Newest first.
 
 ---
 
+## M4 — Hub: the intelligence gateway (2026-07-30) · gate PASSED
+
+**Shipped.** The gateway (arch §6) with Akita's paid-for laws baked in:
+hard connect+total timeouts on every call (verdict 3s → one 5s retry →
+deterministic fallback; the doorman may be wrong, never absent), a
+fallback chain per role (13d), Q19 hedging for the verdict class (deadline
+2.5s, both calls boundary-logged), and every request/response crossing in
+the Boundary Log naming the exact model. The §6a cast wired per Q28:
+gemma-4-26b-a4b verdicts (one Q16 structured-output call with salvage
+fallback), gemma-4-31b answers, nemotron super/ultra escalation via
+deterministic Q18 rules (code fences, math markers, explicit effort;
+per-day ultra quota with visible degradation), qwen3-vl vision + parakeet
+STT seats configured (exercised when M5 brings uploads). Answers are
+context-compiled-lite: static persona directive + recalled facts (with
+their provenance intact in the registry) + recent turns; receipts name the
+models that acted (`models_used` from provider evidence, never narration).
+Serper search + fetch→READ: SERP top-5, top-2 pages fetched (800KB cap,
+naive extraction, no new deps), fetched text framed as UNTRUSTED DATA in
+the prompt (§7a injection defense), answers cite sources. The reminder
+scheduler: a 5s background lane fires due reminders as their own journaled
+system intents through the transactional outbox — receipts, boundary
+crossing, message delivery; the chat polls history (4s) so fires arrive
+live; on boot, overdue commitments fire immediately (the Second Law: never
+silently drop). Keys come from the environment at launch (pulled from the
+macOS Keychain), live in memory only, never on disk, never in a prompt.
+
+**Gate demo (live, real keys).**
+- Verdict routing: RU chitchat answered warmly by the verdict's one-liner
+  path; a memory question routed to answer.model and grounded itself in
+  the corrected fact ("демо перенесли на понедельник" → computed the
+  actual date); a currency question routed to search.
+- Web research: "latest stable Rust version" → Serper → fetch/READ →
+  "1.97.1" with three numbered sources.
+- Scheduler: on first boot it immediately fired the M2-era overdue
+  reminder (hours late, never dropped); a live "remind me in 1 minute"
+  fired on time through the outbox and arrived in the chat via polling.
+- No-key degradation honest by test: floor works, model turns say the
+  brain is offline. 48 tests green; clippy -D warnings clean.
+
+**Assumptions** (spec-silent or MVP-scoped):
+- Chat replies are not yet streamed (SSE is M5); answer-class calls are
+  single-shot with a 45s ceiling.
+- Hedging applies to the verdict class only in the MVP (Q19's p95-rolling
+  deadline simplified to a fixed configurable 2.5s).
+- Vision/STT seats are wired in the cast but unexercised until M5 uploads;
+  Q28's calendar/email connectors are out of MVP scope.
+- Escalation quota is per-cell per-day in cell_meta (config
+  `hub.ultra_daily_cap`, default 20; 0 disables ultra).
+- Deleted facts stay deleted in the registry, but the conversation
+  transcript (the immutable event journal, §4) retains the words spoken —
+  by design; cell crypto-shredding remains the real erase for the whole
+  transcript.
+- Model IDs are the frozen spec's cast; if a provider retires one, the
+  fallback chain carries the turn and the receipt names what acted.
+
+**Dependencies introduced**: ureq 2 (json) — the gateway's HTTP client;
+all external I/O now flows through hub and nowhere else.
+
+**Next.** M5 — people + surfaces: invite links, per-member cells,
+owner/member roles, SSE streaming, voice-note upload + STT, file drop,
+Dashboard-lite (Overview, Registry, Boundary), Telegram behind a config
+flag.
+
+---
+
 ## M3 — Mind (2026-07-30) · gate PASSED
 
 **Shipped.** The epistemic memory substrate (arch §4). Facts carry a

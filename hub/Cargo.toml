@@ -7,6 +7,10 @@ rust-version.workspace = true
 [dependencies]
 fastembed = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+ureq = { workspace = true }
 trust = { workspace = true }
+prism = { workspace = true }

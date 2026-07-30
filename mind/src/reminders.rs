@@ -90,6 +90,27 @@ pub fn cancel_latest(conn: &Connection) -> Result<Option<Reminder>, MindError> {
     }))
 }
 
+/// Reminders whose time has come: active with fire_at <= now.
+pub fn due_active(conn: &Connection, now_ms: i64) -> Result<Vec<Reminder>, MindError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM reminders WHERE status = 'active' AND fire_at <= ?1 \
+         ORDER BY fire_at ASC"
+    ))?;
+    let rows = stmt
+        .query_map(params![now_ms], row_to_reminder)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The commitment closed: it fired.
+pub fn mark_fired(conn: &Connection, id: &str) -> Result<(), MindError> {
+    conn.execute(
+        "UPDATE reminders SET status = 'fired' WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
 pub fn count_active(conn: &Connection) -> Result<i64, MindError> {
     Ok(conn.query_row(
         "SELECT count(*) FROM reminders WHERE status = 'active'",

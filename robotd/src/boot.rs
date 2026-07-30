@@ -1,8 +1,9 @@
-//! First boot and every boot: keys, core, owner cell, slug. One directory --
-//! `core.db + cells/ + media/` -- is the whole Robot (decisions Q9).
+//! First boot and every boot: keys, core, owner cell, gateway, slug. One
+//! directory -- `core.db + cells/ + media/ + models/` -- is the whole Robot
+//! (decisions Q9).
 
 use crate::config::RobotConfig;
-use crate::robot::RobotCore;
+use crate::robot::{Capabilities, RobotCore};
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::net::SocketAddr;
@@ -12,6 +13,7 @@ use trust::keys::KeyChain;
 use trust::schema;
 
 pub struct BootResult {
+    pub robot: Arc<RobotCore>,
     pub state: Arc<surfaces::WebState>,
     pub slug_url: String,
     pub addr: SocketAddr,
@@ -44,35 +46,6 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     prism::init_cell_schema(&owner_cell)?;
     mind::init_cell_schema(&owner_cell)?;
 
-    // the local embedding seat (Q24): weights fetched through the hub
-    // gateway on first run, boundary-logged; offline or disabled -> the
-    // robot still boots, recall degrades to FTS + recency
-    let embedder = if cfg.mind.embeddings {
-        match hub::Embedder::init(Path::new(&cfg.mind.model_cache), Some(&core)) {
-            Ok(e) => Some(std::sync::Arc::new(e)),
-            Err(e) => {
-                tracing::warn!("embedder unavailable, vector door closed: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // crash replay (arch sec 3): resume every intent the last run left open;
-    // an intent without a terminal receipt is a bug, never a silent drop
-    let router = crate::robot::Capabilities {
-        embedder: embedder.clone(),
-    };
-    let replayed = prism::replay::resume_incomplete(&owner_cell, &router)?;
-    if replayed.resumed + replayed.closed_failed > 0 {
-        tracing::info!(
-            "crash replay: {} resumed, {} closed failed",
-            replayed.resumed,
-            replayed.closed_failed
-        );
-    }
-
     // tier-3 slug (Q32): stored inside the encrypted core so the URL can be
     // re-printed at every boot; rotation = replacing this row.
     let slug = match schema::meta_get(&core, "slug_token")? {
@@ -85,31 +58,104 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     };
     let slug_hash = trust::ids::sha256_hex(slug.as_bytes());
 
-    // the hub gateway exists from M1 on; zero endpoints is the honest default
-    let gateway = hub::Gateway::new();
+    // the local embedding seat (Q24): weights fetched through the hub
+    // gateway on first run, boundary-logged; offline or disabled -> the
+    // robot still boots, recall degrades to FTS + recency
+    let embedder = if cfg.mind.embeddings {
+        match hub::Embedder::init(Path::new(&cfg.mind.model_cache), Some(&core)) {
+            Ok(e) => Some(Arc::new(e)),
+            Err(e) => {
+                tracing::warn!("embedder unavailable, vector door closed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     schema::core_journal(
         &core,
         "boot",
         &serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "name": cfg.robot.name,
-            "hub_endpoints": gateway.endpoints(),
         })
         .to_string(),
     )?;
 
+    // from here core is shared: the boundary sink for every gateway call
+    let core = Arc::new(Mutex::new(core));
+
+    // the model gateway (sec 6): key from the environment (pulled from the
+    // OS keychain at launch), held in memory only. no key = honest floor.
+    let gateway = match std::env::var("OPENROUTER_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => {
+            let gw_cfg = hub::GatewayConfig {
+                base_url: cfg.hub.base_url.clone(),
+                hedge_after_ms: cfg.hub.hedge_after_ms,
+                ..Default::default()
+            };
+            let api = Arc::new(hub::UreqApi::new(
+                key.trim().to_string(),
+                cfg.hub.base_url.clone(),
+            ));
+            tracing::info!("model gateway online (openrouter; cast per sec 6a)");
+            Some(Arc::new(hub::ModelGateway::new(
+                api,
+                cfg.hub.cast.clone(),
+                gw_cfg,
+                Some(core.clone()),
+            )))
+        }
+        _ => {
+            tracing::warn!("OPENROUTER_API_KEY not set -- model brain offline, floor only");
+            None
+        }
+    };
+    let research = match std::env::var("SERPER_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => Some(Arc::new(hub::Research::new(
+            Some(key.trim().to_string()),
+            Some(core.clone()),
+        ))),
+        _ => {
+            tracing::warn!("SERPER_API_KEY not set -- web search off");
+            None
+        }
+    };
+
+    // crash replay (arch sec 3): resume every intent the last run left open;
+    // an intent without a terminal receipt is a bug, never a silent drop
+    let router = Capabilities {
+        embedder: embedder.clone(),
+        gateway: gateway.clone(),
+        research: research.clone(),
+        ultra_daily_cap: cfg.hub.ultra_daily_cap,
+    };
+    let replayed = prism::replay::resume_incomplete(&owner_cell, &router)?;
+    if replayed.resumed + replayed.closed_failed > 0 {
+        tracing::info!(
+            "crash replay: {} resumed, {} closed failed",
+            replayed.resumed,
+            replayed.closed_failed
+        );
+    }
+
     let robot = Arc::new(RobotCore {
         owner_principal,
-        core: Mutex::new(core),
+        core,
         owner_cell: Mutex::new(owner_cell),
         embedder,
+        gateway,
+        research,
+        ultra_daily_cap: cfg.hub.ultra_daily_cap,
     });
-    let state = Arc::new(surfaces::WebState::new(robot, slug_hash));
+    let state = Arc::new(surfaces::WebState::new(robot.clone(), slug_hash));
     let addr = SocketAddr::new(
         cfg.server.host.parse().context("server.host")?,
         cfg.server.port,
     );
     Ok(BootResult {
+        robot,
         state,
         slug_url: format!("http://{addr}/a/{slug}"),
         addr,
@@ -158,7 +204,7 @@ fn ensure_cell_key(core: &Connection, keys: &KeyChain, cell_id: &str) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RobotConfig, RobotSection, ServerSection};
+    use crate::config::{MindSection, RobotConfig, RobotSection, ServerSection};
 
     fn test_cfg() -> (RobotConfig, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("robotd-test-{}", trust::ids::random_hex(6)));
@@ -171,27 +217,32 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 0,
             },
-            mind: crate::config::MindSection {
+            mind: MindSection {
                 embeddings: false, // hermetic tests: no downloads
                 model_cache: dir.join("models").to_string_lossy().into_owned(),
             },
+            hub: Default::default(),
         };
         (cfg, dir)
     }
 
     #[test]
-    fn m1_gate_boot_encrypt_journal_boundary() {
+    fn gate_boot_encrypt_journal_boundary() {
+        // hermetic: even if the developer shell has keys, tests must not
+        // call the network -- the gateway is constructed but never used by
+        // the floor-only turns below when the env is clean in CI; the floor
+        // path itself never touches the gateway by construction (Q17).
         let (cfg, dir) = test_cfg();
         let boot = bootstrap(&cfg).unwrap();
         assert!(boot.slug_url.starts_with("http://127.0.0.1:0/a/"));
 
-        // one full turn through the robot
+        // one full floor turn through the robot (deterministic, no network)
         let reply = boot
             .state
             .robot
-            .handle_message("hello robot".into())
+            .handle_message("what time is it?".into())
             .unwrap();
-        assert!(reply.contains("M4"), "fallback reply expected, got: {reply}");
+        assert!(reply.contains("it's"), "floor time answer expected: {reply}");
 
         // cells are opaque on disk
         assert!(trust::cells::file_looks_encrypted(&dir.join("core.db")).unwrap());
@@ -212,8 +263,7 @@ mod tests {
         assert_eq!(trust::boundary::count(&core).unwrap(), 2);
         assert!(trust::boundary::verify_chain(&core).unwrap());
 
-        // the turn is journaled in the cell: opens with intent_open, closes
-        // with intent_close, and a receipt row exists in between
+        // the turn is journaled with a receipt, and history serves it
         let dek = ensure_cell_key(&core, &keys, "owner").unwrap();
         let cell =
             trust::cells::open_encrypted(&dir.join("cells").join("owner.db"), &dek).unwrap();
@@ -223,6 +273,8 @@ mod tests {
         assert!(kinds.iter().any(|k| k == "receipt"));
         assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
         assert_eq!(mind::message_count(&cell).unwrap(), 2);
+        let history = boot.state.robot.history(0).unwrap();
+        assert_eq!(history.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

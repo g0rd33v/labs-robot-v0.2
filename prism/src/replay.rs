@@ -55,7 +55,12 @@ pub fn resume_incomplete(
             None => match journal::payload_of(cell, &intent_id, "decision")? {
                 Some(d) => {
                     let decision: Decision = serde_json::from_str(&d)?;
-                    let plan = plan_from_decision(&intent_id, &decision);
+                    // the original content travels in the intent_open payload
+                    let content = journal::payload_of(cell, &intent_id, "intent_open")?
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+                        .and_then(|v| v["content"].as_str().map(String::from))
+                        .unwrap_or_default();
+                    let plan = plan_from_decision(&intent_id, &decision, &content);
                     journal::step(
                         cell,
                         &intent_id,
