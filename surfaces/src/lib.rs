@@ -46,11 +46,22 @@ pub trait Robot: Send + Sync {
     fn owner_principal(&self) -> i64;
 }
 
+/// Sessions live in memory only. They are capped and aged so a long-lived
+/// robot cannot accumulate every cookie it ever issued (each visit to the
+/// bookmarked slug URL mints a new one, and nothing ever removed them).
+const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000; // 30 days
+const MAX_SESSIONS: usize = 512;
+
+struct Session {
+    principal: i64,
+    last_seen: i64,
+}
+
 pub struct WebState {
     pub robot: Arc<dyn Robot>,
     pub slug_hash: String,
-    /// sid -> principal
-    sessions: Mutex<HashMap<String, i64>>,
+    /// sid -> session
+    sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl WebState {
@@ -64,10 +75,30 @@ impl WebState {
 
     fn mint_session(&self, principal: i64) -> String {
         let sid = trust::ids::random_hex(32);
-        self.sessions
-            .lock()
-            .expect("sessions lock")
-            .insert(sid.clone(), principal);
+        let now = trust::ids::ts_ms();
+        // a poisoned sessions lock must not brick the whole web surface
+        let mut sessions = match self.sessions.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sessions.retain(|_, s| now - s.last_seen < SESSION_TTL_MS);
+        if sessions.len() >= MAX_SESSIONS {
+            // drop the least recently used
+            if let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, s)| s.last_seen)
+                .map(|(k, _)| k.clone())
+            {
+                sessions.remove(&oldest);
+            }
+        }
+        sessions.insert(
+            sid.clone(),
+            Session {
+                principal,
+                last_seen: now,
+            },
+        );
         sid
     }
 
@@ -77,7 +108,18 @@ impl WebState {
             .split(';')
             .filter_map(|p| p.trim().strip_prefix("sid="))
             .next()?;
-        self.sessions.lock().expect("sessions lock").get(sid).copied()
+        let mut sessions = match self.sessions.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now = trust::ids::ts_ms();
+        let session = sessions.get_mut(sid)?;
+        if now - session.last_seen >= SESSION_TTL_MS {
+            sessions.remove(sid);
+            return None;
+        }
+        session.last_seen = now;
+        Some(session.principal)
     }
 }
 
@@ -280,10 +322,17 @@ async fn api_stream(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Resp
     let rx = st.robot.subscribe();
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |item| {
         match item {
-            Ok(p) if p == principal => {
-                Some(Ok::<Event, std::convert::Infallible>(Event::default().data("new")))
+            Ok(p) if p == principal => Some(Ok::<Event, std::convert::Infallible>(
+                Event::default().data("new"),
+            )),
+            Ok(_) => None, // another principal's news is not ours
+            // The receiver fell behind and messages were dropped. Saying
+            // nothing leaves a backgrounded tab silently stale forever;
+            // "resync" tells the client to refetch history.
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!("sse receiver lagged by {n} events; asking client to resync");
+                Some(Ok(Event::default().data("resync")))
             }
-            _ => None,
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()

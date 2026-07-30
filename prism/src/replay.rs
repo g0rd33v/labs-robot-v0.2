@@ -8,7 +8,7 @@ use crate::lifecycle::{
 };
 use crate::types::Plan;
 use crate::verdict::VerdictProvider;
-use crate::{journal, lifecycle::CapabilityRouter, outbox, receipts, PrismError};
+use crate::{journal, lifecycle::CapabilityRouter, outbox, receipts, Cell, PrismError};
 use rusqlite::Connection;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -30,7 +30,7 @@ impl VerdictProvider for NoReDecide {
 
 /// Resume every open intent. Idempotent: a second call finds nothing to do.
 pub fn resume_incomplete(
-    cell: &Connection,
+    cell: &Cell,
     router: &dyn CapabilityRouter,
 ) -> Result<ReplaySummary, PrismError> {
     let mut summary = ReplaySummary::default();
@@ -40,34 +40,30 @@ pub fn resume_incomplete(
         crash: None,
     };
 
-    for intent_id in journal::open_intents(cell)? {
+    for intent_id in cell.with(journal::open_intents)? {
         // receipt already exists -> just close honestly on it
-        if let Some(r) = receipts::get(cell, &intent_id)? {
-            fail_undelivered_replies(cell, &intent_id)?;
-            journal::intent_close(cell, &intent_id, r.status.as_str())?;
+        if let Some(r) = cell.with(|c| receipts::get(c, &intent_id))? {
+            cell.with(|c| fail_undelivered_replies(c, &intent_id))?;
+            cell.with(|c| journal::intent_close(c, &intent_id, r.status.as_str()))?;
             summary.resumed += 1;
             continue;
         }
 
         // a plan (journaled or rebuildable from the journaled decision)?
-        let plan: Option<Plan> = match journal::payload_of(cell, &intent_id, "plan")? {
+        let plan: Option<Plan> = match cell.with(|c| journal::payload_of(c, &intent_id, "plan"))? {
             Some(p) => Some(serde_json::from_str(&p)?),
-            None => match journal::payload_of(cell, &intent_id, "decision")? {
+            None => match cell.with(|c| journal::payload_of(c, &intent_id, "decision"))? {
                 Some(d) => {
                     let decision: Decision = serde_json::from_str(&d)?;
                     // the original content travels in the intent_open payload
-                    let content = journal::payload_of(cell, &intent_id, "intent_open")?
+                    let content = cell
+                        .with(|c| journal::payload_of(c, &intent_id, "intent_open"))?
                         .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
                         .and_then(|v| v["content"].as_str().map(String::from))
                         .unwrap_or_default();
                     let plan = plan_from_decision(&intent_id, &decision, &content);
-                    journal::step(
-                        cell,
-                        &intent_id,
-                        "plan",
-                        &serde_json::to_string(&plan)?,
-                        None,
-                    )?;
+                    let plan_json = serde_json::to_string(&plan)?;
+                    cell.with(|c| journal::step(c, &intent_id, "plan", &plan_json, None))?;
                     Some(plan)
                 }
                 None => None,
@@ -83,19 +79,17 @@ pub fn resume_incomplete(
             }
             None => {
                 // died before any decision: no effect ran; close honestly
-                let receipt = receipts::store(cell, &interrupted_receipt(&intent_id))?;
-                journal::step(
-                    cell,
-                    &intent_id,
-                    "receipt",
-                    &serde_json::json!({
-                        "receipt_id": receipt.receipt_id,
-                        "status": receipt.status.as_str()
-                    })
-                    .to_string(),
-                    None,
-                )?;
-                journal::intent_close(cell, &intent_id, receipt.status.as_str())?;
+                let receipt =
+                    cell.with(|c| receipts::store(c, &interrupted_receipt(&intent_id)))?;
+                // effects enqueued before the crash never reached anyone
+                cell.with(|c| fail_undelivered_replies(c, &intent_id))?;
+                let receipt_json = serde_json::json!({
+                    "receipt_id": receipt.receipt_id,
+                    "status": receipt.status.as_str()
+                })
+                .to_string();
+                cell.with(|c| journal::step(c, &intent_id, "receipt", &receipt_json, None))?;
+                cell.with(|c| journal::intent_close(c, &intent_id, receipt.status.as_str()))?;
                 summary.closed_failed += 1;
             }
         }

@@ -162,11 +162,7 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     let router = robot.router();
     for principal in robot.principals_active()? {
         let handle = robot.cell(principal)?;
-        let cell = handle
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
-        let replayed = prism::replay::resume_incomplete(&cell, &router)?;
+        let replayed = prism::replay::resume_incomplete(&handle.cell, &router)?;
         if replayed.resumed + replayed.closed_failed > 0 {
             tracing::info!(
                 "crash replay (principal {principal}): {} resumed, {} closed failed",
@@ -270,15 +266,18 @@ mod tests {
 
         // the turn is journaled with a receipt, and history serves it
         let handle = boot.robot.cell(owner).unwrap();
-        {
-            let cell = handle.conn.lock().unwrap();
-            let kinds = prism::journal::kinds_for_latest_intent(&cell).unwrap();
-            assert_eq!(kinds.first().map(String::as_str), Some("intent_open"));
-            assert_eq!(kinds.last().map(String::as_str), Some("intent_close"));
-            assert!(kinds.iter().any(|k| k == "receipt"));
-            assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
-            assert_eq!(mind::message_count(&cell).unwrap(), 2);
-        }
+        handle
+            .cell
+            .with(|c| {
+                let kinds = prism::journal::kinds_for_latest_intent(c).unwrap();
+                assert_eq!(kinds.first().map(String::as_str), Some("intent_open"));
+                assert_eq!(kinds.last().map(String::as_str), Some("intent_close"));
+                assert!(kinds.iter().any(|k| k == "receipt"));
+                assert_eq!(prism::receipts::count(c).unwrap(), 1);
+                assert_eq!(mind::message_count(c).unwrap(), 2);
+                Ok(())
+            })
+            .unwrap();
         let history = boot.state.robot.history(owner, 0).unwrap();
         assert_eq!(history.len(), 2);
 

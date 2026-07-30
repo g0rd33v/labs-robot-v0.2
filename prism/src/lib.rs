@@ -19,7 +19,54 @@ pub use types::*;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
+
+/// A principal's cell, lockable in short bursts.
+///
+/// The kernel used to receive a `&Connection`, which meant the caller held
+/// the cell's mutex for the whole turn -- including model calls. One
+/// `web.research` turn could hold it for two minutes, during which that
+/// person's history, dashboard, SSE and reminders all blocked on the same
+/// lock, and the watchdog could not even observe the hang because it needed
+/// that lock to look.
+///
+/// Journal writes are milliseconds of NVMe; model calls are seconds of
+/// network. `Cell` keeps them apart: every database touch is a short
+/// `with(...)`, and everything slow happens between them, unlocked.
+#[derive(Clone)]
+pub struct Cell(Arc<Mutex<Connection>>);
+
+impl Cell {
+    pub fn new(conn: Connection) -> Self {
+        Self(Arc::new(Mutex::new(conn)))
+    }
+
+    pub fn from_shared(inner: Arc<Mutex<Connection>>) -> Self {
+        Self(inner)
+    }
+
+    /// Run one short unit of database work with the cell locked. Do not
+    /// perform network or other slow IO inside `f`.
+    pub fn with<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, PrismError>,
+    ) -> Result<T, PrismError> {
+        let conn = self
+            .0
+            .lock()
+            .map_err(|_| PrismError::CellUnavailable)?;
+        f(&conn)
+    }
+
+    /// As `with`, for rusqlite-native calls.
+    pub fn sql<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, rusqlite::Error>,
+    ) -> Result<T, PrismError> {
+        self.with(|c| f(c).map_err(PrismError::from))
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PrismError {
@@ -31,6 +78,8 @@ pub enum PrismError {
     Json(#[from] serde_json::Error),
     #[error("capability: {0}")]
     Capability(String),
+    #[error("this cell is unavailable (a previous turn panicked while holding it)")]
+    CellUnavailable,
     #[error("simulated crash at {0}")]
     SimulatedCrash(String),
 }

@@ -6,19 +6,22 @@
 use crate::floor::{self, FloorMatch};
 use crate::types::*;
 use crate::verdict::VerdictProvider;
-use crate::{journal, outbox, receipts, Envelope, PrismError};
+use crate::{journal, outbox, receipts, Cell, Envelope, PrismError};
 use chrono::{Local, TimeZone};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use trust::ids;
 
 /// Executes one capability step inside the member's cell. Implementations
 /// MUST be idempotent per intent: re-execution after a crash must not
 /// duplicate the effect.
+///
+/// The cell arrives as a `Cell`, not a locked connection: an implementation
+/// that makes a network call must do so BETWEEN `cell.with(...)` bursts, so
+/// the person's cell stays usable while their turn is thinking.
 pub trait CapabilityRouter: Send + Sync {
     fn execute(
         &self,
-        cell: &Connection,
+        cell: &Cell,
         capability: &str,
         args: &serde_json::Value,
         intent_id: &str,
@@ -70,7 +73,7 @@ fn crash_check(deps: &TurnDeps, point: &str) -> Result<(), PrismError> {
 
 /// Run one full governed turn.
 pub fn run_turn(
-    cell: &Connection,
+    cell: &Cell,
     env: &Envelope,
     deps: &TurnDeps,
 ) -> Result<TurnOutput, PrismError> {
@@ -84,7 +87,7 @@ pub fn run_turn(
         "device_trust": env.device_trust,
         "source_msg_id": env.source_msg_id,
     });
-    journal::intent_open(cell, &intent_id, &opened.to_string())?;
+    cell.with(|c| journal::intent_open(c, &intent_id, &opened.to_string()))?;
     crash_check(deps, "after_open")?;
 
     // decision: the deterministic floor runs first and wins unconditionally (Q17)
@@ -94,11 +97,13 @@ pub fn run_turn(
             v: deps.verdicts.verdict(&env.content),
         },
     };
-    journal::step(cell, &intent_id, "decision", &serde_json::to_string(&decision)?, None)?;
+    let decision_json = serde_json::to_string(&decision)?;
+    cell.with(|c| journal::step(c, &intent_id, "decision", &decision_json, None))?;
     crash_check(deps, "after_decision")?;
 
     let plan = plan_from_decision(&intent_id, &decision, &env.content);
-    journal::step(cell, &intent_id, "plan", &serde_json::to_string(&plan)?, None)?;
+    let plan_json = serde_json::to_string(&plan)?;
+    cell.with(|c| journal::step(c, &intent_id, "plan", &plan_json, None))?;
     crash_check(deps, "after_plan")?;
 
     finish_planned_intent(cell, &intent_id, &plan, deps, true)
@@ -107,7 +112,7 @@ pub fn run_turn(
 /// Everything after the plan is journaled. Shared verbatim with replay so a
 /// resumed intent takes exactly the code path a live one does.
 pub(crate) fn finish_planned_intent(
-    cell: &Connection,
+    cell: &Cell,
     intent_id: &str,
     plan: &Plan,
     deps: &TurnDeps,
@@ -115,7 +120,8 @@ pub(crate) fn finish_planned_intent(
 ) -> Result<TurnOutput, PrismError> {
     // execute steps, reusing journaled outcomes on replay (never re-run a
     // completed effect)
-    let prior: Vec<Outcome> = journal::payloads_of(cell, intent_id, "outcome")?
+    let prior: Vec<Outcome> = cell
+        .with(|c| journal::payloads_of(c, intent_id, "outcome"))?
         .iter()
         .filter_map(|p| serde_json::from_str(p).ok())
         .collect();
@@ -135,30 +141,26 @@ pub(crate) fn finish_planned_intent(
                 expires_at: ids::ts_ms() + 5 * 60_000,
                 issued_by: "policy:auto".into(),
             };
-            journal::step(cell, intent_id, "grant", &serde_json::to_string(&grant)?, None)?;
+            let grant_json = serde_json::to_string(&grant)?;
+            cell.with(|c| journal::step(c, intent_id, "grant", &grant_json, None))?;
             crash_check(deps, "after_grant")?;
         }
+        // the cell is NOT locked here: a capability may spend seconds in a
+        // model call, and the person's other requests must not queue on it
         let outcome = execute_step(cell, deps.router, step, intent_id)?;
-        journal::step(
-            cell,
-            intent_id,
-            "outcome",
-            &serde_json::to_string(&outcome)?,
-            Some(&ids::sha256_hex(outcome.detail.as_bytes())),
-        )?;
+        let outcome_json = serde_json::to_string(&outcome)?;
+        let outcome_hash = ids::sha256_hex(outcome.detail.as_bytes());
+        cell.with(|c| {
+            journal::step(c, intent_id, "outcome", &outcome_json, Some(&outcome_hash))
+        })?;
         crash_check(deps, "after_execute")?;
         outcomes.push(outcome);
     }
 
     // verification is deterministic here: outcomes carry row-level evidence
     let all_ok = outcomes.iter().all(|o| o.ok);
-    journal::step(
-        cell,
-        intent_id,
-        "verify",
-        &serde_json::json!({ "ok": all_ok }).to_string(),
-        None,
-    )?;
+    let verify_json = serde_json::json!({ "ok": all_ok }).to_string();
+    cell.with(|c| journal::step(c, intent_id, "verify", &verify_json, None))?;
 
     // receipt: compiled from evidence, never narrated by a model
     let mut receipt = build_receipt(intent_id, &outcomes);
@@ -183,23 +185,17 @@ pub(crate) fn finish_planned_intent(
                 ts: ids::ts_ms(),
             }],
         });
-        journal::step(
-            cell,
-            intent_id,
-            "expression.flagged",
-            &serde_json::json!({ "reason": "unsupported effect claim" }).to_string(),
-            None,
-        )?;
+        let flag_json =
+            serde_json::json!({ "reason": "unsupported effect claim" }).to_string();
+        cell.with(|c| journal::step(c, intent_id, "expression.flagged", &flag_json, None))?;
     }
-    let receipt = receipts::store(cell, &receipt)?;
-    journal::step(
-        cell,
-        intent_id,
-        "receipt",
-        &serde_json::json!({ "receipt_id": receipt.receipt_id, "status": receipt.status.as_str() })
-            .to_string(),
-        None,
-    )?;
+    let receipt = cell.with(|c| receipts::store(c, &receipt))?;
+    let receipt_json = serde_json::json!({
+        "receipt_id": receipt.receipt_id,
+        "status": receipt.status.as_str()
+    })
+    .to_string();
+    cell.with(|c| journal::step(c, intent_id, "receipt", &receipt_json, None))?;
     crash_check(deps, "after_receipt")?;
 
     // reply through the transactional outbox (Q11): enqueued before it can
@@ -208,20 +204,23 @@ pub(crate) fn finish_planned_intent(
     if unsupported {
         reply.push_str(UNSUPPORTED_NOTE);
     }
-    let (reply_effect_id, _fresh) = outbox::enqueue(cell, intent_id, "surface:chat", &reply)?;
+    let (reply_effect_id, _fresh) =
+        cell.with(|c| outbox::enqueue(c, intent_id, "surface:chat", &reply))?;
     if !live {
         // resumed after a crash: the session that asked is gone; the honest
         // state is failed-delivery, the material effect stands
-        outbox::mark(cell, &reply_effect_id, "failed", Some("crash before delivery; no live session"))?;
+        cell.with(|c| {
+            outbox::mark(
+                c,
+                &reply_effect_id,
+                "failed",
+                Some("crash before delivery; no live session"),
+            )
+        })?;
     }
-    journal::step(
-        cell,
-        intent_id,
-        "reply.enqueue",
-        &serde_json::json!({ "effect_id": reply_effect_id }).to_string(),
-        None,
-    )?;
-    journal::intent_close(cell, intent_id, receipt.status.as_str())?;
+    let enq_json = serde_json::json!({ "effect_id": reply_effect_id }).to_string();
+    cell.with(|c| journal::step(c, intent_id, "reply.enqueue", &enq_json, None))?;
+    cell.with(|c| journal::intent_close(c, intent_id, receipt.status.as_str()))?;
 
     Ok(TurnOutput {
         intent_id: intent_id.to_string(),
@@ -350,7 +349,7 @@ arrives with M4. today i can tell the time, and set, list, or cancel \
 reminders. try \"help\".";
 
 fn execute_step(
-    cell: &Connection,
+    cell: &Cell,
     router: &dyn CapabilityRouter,
     step: &PlanStep,
     intent_id: &str,

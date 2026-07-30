@@ -35,17 +35,19 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
     let mut closed = 0;
     for principal in robot.principals_active()? {
         let handle = robot.cell(principal)?;
-        let cell = handle
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
+        let cell = &handle.cell;
         let now = trust::ids::ts_ms();
-        for intent_id in prism::journal::open_intents(&cell)? {
-            let opened_at: i64 = cell.query_row(
-                "SELECT min(started_at) FROM journal WHERE intent_id = ?1",
-                rusqlite::params![intent_id],
-                |r| r.get(0),
-            )?;
+        // short locks only: the whole point of this lane is to observe turns
+        // that are stuck, and it cannot do that while holding their cell
+        let open = cell.with(prism::journal::open_intents)?;
+        for intent_id in open {
+            let opened_at: i64 = cell.sql(|c| {
+                c.query_row(
+                    "SELECT min(started_at) FROM journal WHERE intent_id = ?1",
+                    rusqlite::params![intent_id],
+                    |r| r.get(0),
+                )
+            })?;
             let age = now - opened_at;
 
             if age > ZOMBIE_TTL_MS {
@@ -59,18 +61,16 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
                     ),
                     "zombie-sweeper",
                 );
-                let receipt = prism::receipts::store(&cell, &receipt)?;
-                prism::journal::intent_close(&cell, &intent_id, receipt.status.as_str())?;
-                mind::record_message(
-                    &cell,
-                    "out",
-                    "chat",
-                    &format!(
-                        "⚠️ a turn of mine ({}) hung past its time limit and was closed \
-                         honestly -- nothing was silently dropped, the receipt records it.",
-                        &intent_id[..12.min(intent_id.len())]
-                    ),
-                )?;
+                let receipt = cell.with(|c| prism::receipts::store(c, &receipt))?;
+                cell.with(|c| {
+                    prism::journal::intent_close(c, &intent_id, receipt.status.as_str())
+                })?;
+                let note = format!(
+                    "⚠️ a turn of mine ({}) hung past its time limit and was closed \
+                     honestly -- nothing was silently dropped, the receipt records it.",
+                    &intent_id[..12.min(intent_id.len())]
+                );
+                cell.with(|c| Ok(mind::record_message(c, "out", "chat", &note)))??;
                 tracing::error!("zombie sweeper closed {intent_id} (age {age}ms)");
                 closed += 1;
                 robot.notify(principal);
@@ -78,17 +78,21 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
                 // watchdog: alert once per intent
                 let marker = format!("watchdog:{intent_id}");
                 let seen: Option<String> = cell
-                    .query_row(
-                        "SELECT value FROM cell_meta WHERE key = ?1",
-                        rusqlite::params![marker],
-                        |r| r.get(0),
-                    )
+                    .sql(|c| {
+                        c.query_row(
+                            "SELECT value FROM cell_meta WHERE key = ?1",
+                            rusqlite::params![marker],
+                            |r| r.get(0),
+                        )
+                    })
                     .ok();
                 if seen.is_none() {
-                    cell.execute(
-                        "INSERT OR IGNORE INTO cell_meta(key, value) VALUES (?1, '1')",
-                        rusqlite::params![marker],
-                    )?;
+                    cell.sql(|c| {
+                        c.execute(
+                            "INSERT OR IGNORE INTO cell_meta(key, value) VALUES (?1, '1')",
+                            rusqlite::params![marker],
+                        )
+                    })?;
                     tracing::error!(
                         "WATCHDOG: intent {intent_id} open {age}ms without a terminal receipt"
                     );
@@ -139,23 +143,23 @@ mod tests {
     fn sweeper_closes_zombies_and_watchdog_alerts_once() {
         let (robot, dir) = test_robot();
         let handle = robot.cell(robot.owner_principal).unwrap();
-        {
-            let cell = handle.conn.lock().unwrap();
-            // a synthetic hung intent, 2 minutes old: watchdog territory
-            cell.execute(
-                "INSERT INTO journal(step_id, intent_id, seq, kind, payload_json, started_at, completed_at) \
-                 VALUES ('step_w', 'int_watch', 0, 'intent_open', '{}', ?1, ?1)",
-                params![trust::ids::ts_ms() - 2 * 60_000],
-            )
+        handle
+            .cell
+            .sql(|c| {
+                // a synthetic hung intent, 2 minutes old: watchdog territory
+                c.execute(
+                    "INSERT INTO journal(step_id, intent_id, seq, kind, payload_json, started_at, completed_at) \
+                     VALUES ('step_w', 'int_watch', 0, 'intent_open', '{}', ?1, ?1)",
+                    params![trust::ids::ts_ms() - 2 * 60_000],
+                )?;
+                // a synthetic zombie, 6 minutes old: sweeper territory
+                c.execute(
+                    "INSERT INTO journal(step_id, intent_id, seq, kind, payload_json, started_at, completed_at) \
+                     VALUES ('step_z', 'int_zombie', 0, 'intent_open', '{}', ?1, ?1)",
+                    params![trust::ids::ts_ms() - 6 * 60_000],
+                )
+            })
             .unwrap();
-            // a synthetic zombie, 6 minutes old: sweeper territory
-            cell.execute(
-                "INSERT INTO journal(step_id, intent_id, seq, kind, payload_json, started_at, completed_at) \
-                 VALUES ('step_z', 'int_zombie', 0, 'intent_open', '{}', ?1, ?1)",
-                params![trust::ids::ts_ms() - 6 * 60_000],
-            )
-            .unwrap();
-        }
 
         let (alerted, closed) = sweep(&robot).unwrap();
         assert_eq!(alerted, 1, "watchdog alerts the 2-minute intent");
@@ -165,16 +169,20 @@ mod tests {
         let (alerted2, closed2) = sweep(&robot).unwrap();
         assert_eq!((alerted2, closed2), (0, 0));
 
-        let cell = handle.conn.lock().unwrap();
-        // the zombie is closed with an honest failed receipt
-        let receipt = prism::receipts::get(&cell, "int_zombie").unwrap().unwrap();
-        assert_eq!(receipt.status.as_str(), "failed");
-        assert!(receipt.claims[0].claim.contains("zombie"));
-        // the watchdog intent is still open (alerted, not killed yet)
-        assert!(prism::journal::open_intents(&cell)
-            .unwrap()
-            .contains(&"int_watch".to_string()));
-        drop(cell);
+        handle
+            .cell
+            .with(|c| {
+                // the zombie is closed with an honest failed receipt
+                let receipt = prism::receipts::get(c, "int_zombie").unwrap().unwrap();
+                assert_eq!(receipt.status.as_str(), "failed");
+                assert!(receipt.claims[0].claim.contains("zombie"));
+                // the watchdog intent is still open (alerted, not killed yet)
+                assert!(prism::journal::open_intents(c)
+                    .unwrap()
+                    .contains(&"int_watch".to_string()));
+                Ok(())
+            })
+            .unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

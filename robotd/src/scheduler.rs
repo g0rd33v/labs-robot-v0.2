@@ -34,37 +34,25 @@ fn fire_all_due(robot: &RobotCore) -> anyhow::Result<usize> {
 fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
     let now = trust::ids::ts_ms();
     let handle = robot.cell(principal)?;
-    let due = {
-        let cell = handle
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
-        mind::reminders::due_active(&cell, now)?
-    };
+    let cell = &handle.cell;
+    let due = cell.with(|c| Ok(mind::reminders::due_active(c, now)))??;
     let mut count = 0;
 
     for rem in due {
         let text = format!("⏰ reminder: {}", rem.about);
         {
-            let cell = handle
-                .conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
             let intent_id = trust::ids::new_id("int");
-            prism::journal::intent_open(
-                &cell,
-                &intent_id,
-                &serde_json::json!({
-                    "system": "reminder.fire",
-                    "reminder_id": rem.id,
-                    "about": rem.about,
-                    "fire_at": rem.fire_at,
-                })
-                .to_string(),
-            )?;
+            let open_json = serde_json::json!({
+                "system": "reminder.fire",
+                "reminder_id": rem.id,
+                "about": rem.about,
+                "fire_at": rem.fire_at,
+            })
+            .to_string();
+            cell.with(|c| prism::journal::intent_open(c, &intent_id, &open_json))?;
             let (effect_id, _) =
-                prism::outbox::enqueue(&cell, &intent_id, "surface:chat", &text)?;
-            mind::reminders::mark_fired(&cell, &rem.id)?;
+                cell.with(|c| prism::outbox::enqueue(c, &intent_id, "surface:chat", &text))?;
+            cell.with(|c| Ok(mind::reminders::mark_fired(c, &rem.id)))??;
             // the commitment really closed: the row moved to `fired`
             let outcome = prism::types::Outcome::attested(
                 trust::ids::new_id("pstep"),
@@ -77,30 +65,20 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
                 }],
                 format!("reminder fired: {}", rem.about),
             );
-            prism::journal::step(
-                &cell,
-                &intent_id,
-                "outcome",
-                &serde_json::to_string(&outcome)?,
-                None,
-            )?;
+            let outcome_json = serde_json::to_string(&outcome)?;
+            cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;
             let receipt = prism::lifecycle::build_receipt(&intent_id, &[outcome]);
-            let receipt = prism::receipts::store(&cell, &receipt)?;
-            prism::journal::step(
-                &cell,
-                &intent_id,
-                "receipt",
-                &serde_json::json!({
-                    "receipt_id": receipt.receipt_id,
-                    "status": receipt.status.as_str()
-                })
-                .to_string(),
-                None,
-            )?;
-            mind::record_message(&cell, "out", "chat", &text)?;
-            prism::outbox::mark(&cell, &effect_id, "sent", None)?;
-            prism::outbox::mark(&cell, &effect_id, "confirmed", None)?;
-            prism::journal::intent_close(&cell, &intent_id, receipt.status.as_str())?;
+            let receipt = cell.with(|c| prism::receipts::store(c, &receipt))?;
+            let receipt_json = serde_json::json!({
+                "receipt_id": receipt.receipt_id,
+                "status": receipt.status.as_str()
+            })
+            .to_string();
+            cell.with(|c| prism::journal::step(c, &intent_id, "receipt", &receipt_json, None))?;
+            cell.with(|c| prism::outbox::mark(c, &effect_id, "sent", None))?;
+            cell.with(|c| Ok(mind::record_message(c, "out", "chat", &text)))??;
+            cell.with(|c| prism::outbox::mark(c, &effect_id, "confirmed", None))?;
+            cell.with(|c| prism::journal::intent_close(c, &intent_id, receipt.status.as_str()))?;
         }
         {
             let core = robot
@@ -169,30 +147,32 @@ mod tests {
         let (robot, dir) = test_robot();
         let owner = robot.owner_principal;
         let handle = robot.cell(owner).unwrap();
-        {
-            let cell = handle.conn.lock().unwrap();
-            mind::reminders::create(&cell, "int_past", trust::ids::ts_ms() - 1000, "call mark")
-                .unwrap();
-            mind::reminders::create(
-                &cell,
-                "int_future",
-                trust::ids::ts_ms() + 3_600_000,
-                "later",
-            )
+        handle
+            .cell
+            .with(|c| {
+                mind::reminders::create(c, "int_past", trust::ids::ts_ms() - 1000, "call mark")
+                    .unwrap();
+                mind::reminders::create(c, "int_future", trust::ids::ts_ms() + 3_600_000, "later")
+                    .unwrap();
+                Ok(())
+            })
             .unwrap();
-        }
 
         assert_eq!(fire_all_due(&robot).unwrap(), 1);
         assert_eq!(fire_all_due(&robot).unwrap(), 0);
 
-        let cell = handle.conn.lock().unwrap();
-        assert_eq!(mind::reminders::count_active(&cell).unwrap(), 1);
-        let msgs = mind::messages_after(&cell, 0, 10).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].2.contains("call mark"));
-        assert!(prism::journal::open_intents(&cell).unwrap().is_empty());
-        assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
-        drop(cell);
+        handle
+            .cell
+            .with(|c| {
+                assert_eq!(mind::reminders::count_active(c).unwrap(), 1);
+                let msgs = mind::messages_after(c, 0, 10).unwrap();
+                assert_eq!(msgs.len(), 1);
+                assert!(msgs[0].2.contains("call mark"));
+                assert!(prism::journal::open_intents(c).unwrap().is_empty());
+                assert_eq!(prism::receipts::count(c).unwrap(), 1);
+                Ok(())
+            })
+            .unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

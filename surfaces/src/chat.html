@@ -130,7 +130,12 @@
   // a slow poll stays on as the fallback when the stream reconnects.
   try {
     const es = new EventSource('/api/stream');
-    es.onmessage = () => poll();
+    es.onmessage = (e) => {
+      // 'resync' means the server dropped events for this client; refetch
+      // everything rather than sit silently stale
+      if (e.data === 'resync') { lastTs = 0; seen.clear(); log.innerHTML = ''; }
+      poll();
+    };
   } catch (_) {}
   poll();
   setInterval(poll, 15000);

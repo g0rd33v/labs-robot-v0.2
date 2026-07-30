@@ -8,7 +8,6 @@ use crate::robot::{research_system_prompt, Capabilities};
 use hub::gateway::{Msg, Role};
 use prism::verdict::FallbackVerdict;
 use prism::{Envelope, PrismError, TurnDeps, CRASH_POINTS};
-use rusqlite::Connection;
 use std::time::Instant;
 
 pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> anyhow::Result<i32> {
@@ -71,18 +70,18 @@ fn eval_routing() -> anyhow::Result<i32> {
 
 // ------------------------------------------------------------- kill-suite
 
-fn temp_cell(name: &str) -> anyhow::Result<(Connection, std::path::PathBuf)> {
+fn temp_cell(name: &str) -> anyhow::Result<(prism::Cell, std::path::PathBuf)> {
     mind::install_vec();
     let path = std::env::temp_dir().join(format!("eval-{}-{name}.db", trust::ids::random_hex(6)));
     let key = trust::keys::KeyChain::new_dek();
     let conn = trust::cells::open_encrypted(&path, &key)?;
     prism::init_cell_schema(&conn)?;
     mind::init_cell_schema(&conn)?;
-    Ok((conn, path))
+    Ok((prism::Cell::new(conn), path))
 }
 
-fn envelope(cell: &Connection, content: &str) -> anyhow::Result<Envelope> {
-    let msg_id = mind::record_message(cell, "in", "chat", content)?;
+fn envelope(cell: &prism::Cell, content: &str) -> anyhow::Result<Envelope> {
+    let msg_id = cell.with(|c| Ok(mind::record_message(c, "in", "chat", content)))??;
     Ok(Envelope {
         surface: "chat".into(),
         principal_id: 1,
@@ -120,17 +119,19 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
                 );
                 let s1 = prism::replay::resume_incomplete(&cell, &router)?;
                 let s2 = prism::replay::resume_incomplete(&cell, &router)?;
-                let count = if kind == "reminder" {
-                    mind::reminders::count_active(&cell)?
-                } else {
-                    mind::facts::count_active(&cell)?
-                };
+                let count = cell.with(|c| {
+                    Ok(if kind == "reminder" {
+                        mind::reminders::count_active(c)
+                    } else {
+                        mind::facts::count_active(c)
+                    })
+                })??;
                 let expected = if point == "after_open" { 0 } else { 1 };
                 let clean = crashed
                     && s1.resumed + s1.closed_failed == 1
                     && s2.resumed + s2.closed_failed == 0
                     && count == expected
-                    && prism::journal::open_intents(&cell)?.is_empty();
+                    && cell.with(prism::journal::open_intents)?.is_empty();
                 let _ = std::fs::remove_file(path);
                 Ok(clean)
             })()?;

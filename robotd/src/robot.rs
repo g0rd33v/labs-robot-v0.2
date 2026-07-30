@@ -9,7 +9,7 @@ use hub::gateway::{Msg, Role};
 use prism::lifecycle::format_fire_at;
 use prism::types::Tier;
 use prism::verdict::{FallbackVerdict, VerdictProvider};
-use prism::{CapabilityRouter, Envelope, Evidence, Outcome, PrismError, TurnDeps};
+use prism::{Cell, CapabilityRouter, Envelope, Evidence, Outcome, PrismError, TurnDeps};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -162,8 +162,9 @@ pub struct Capabilities {
 impl Capabilities {
     /// Provenance anchor (law #5): the source message id journaled at
     /// intent_open.
-    fn source_msg_of(cell: &Connection, intent_id: &str) -> Result<String, PrismError> {
-        let payload = prism::journal::payload_of(cell, intent_id, "intent_open")?
+    fn source_msg_of(cell: &Cell, intent_id: &str) -> Result<String, PrismError> {
+        let payload = cell
+            .with(|c| prism::journal::payload_of(c, intent_id, "intent_open"))?
             .ok_or_else(|| PrismError::Capability("no intent_open journaled".into()))?;
         let v: serde_json::Value = serde_json::from_str(&payload)?;
         v["source_msg_id"]
@@ -178,8 +179,8 @@ impl Capabilities {
     }
 
     /// The acting principal, from the journaled intent (role checks).
-    fn principal_of(cell: &Connection, intent_id: &str) -> i64 {
-        prism::journal::payload_of(cell, intent_id, "intent_open")
+    fn principal_of(cell: &Cell, intent_id: &str) -> i64 {
+        cell.with(|c| prism::journal::payload_of(c, intent_id, "intent_open"))
             .ok()
             .flatten()
             .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
@@ -203,7 +204,7 @@ impl Capabilities {
 impl CapabilityRouter for Capabilities {
     fn execute(
         &self,
-        cell: &Connection,
+        cell: &Cell,
         capability: &str,
         args: &serde_json::Value,
         intent_id: &str,
@@ -244,8 +245,11 @@ impl CapabilityRouter for Capabilities {
                 let about = args["about"].as_str().ok_or_else(|| {
                     PrismError::Capability("reminder.create: about missing".into())
                 })?;
-                let rem = mind::reminders::create(cell, intent_id, fire_at, about)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let rem = cell
+                    .with(|c| {
+                        mind::reminders::create(c, intent_id, fire_at, about)
+                            .map_err(|e| PrismError::Capability(e.to_string()))
+                    })?;
                 ok(
                     vec![evidence(&rem.id, &trust::ids::sha256_hex(about.as_bytes()))],
                     format!(
@@ -256,8 +260,10 @@ impl CapabilityRouter for Capabilities {
                 )
             }
             "reminder.list" => {
-                let all = mind::reminders::list_active(cell)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let all = cell.with(|c| {
+                    mind::reminders::list_active(c)
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?;
                 let detail = if all.is_empty() {
                     "no active reminders.".to_string()
                 } else {
@@ -273,8 +279,10 @@ impl CapabilityRouter for Capabilities {
                 ok(vec![evidence("reminder.list", "")], detail)
             }
             "reminder.cancel_last" => {
-                match mind::reminders::cancel_latest(cell, intent_id)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?
+                match cell.with(|c| {
+                    mind::reminders::cancel_latest(c, intent_id)
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?
                 {
                     Some(rem) => ok(
                         vec![evidence(&rem.id, "")],
@@ -292,8 +300,10 @@ impl CapabilityRouter for Capabilities {
                 })?;
                 let source = Self::source_msg_of(cell, intent_id)?;
                 let emb = self.passage_embedding(content);
-                let fact = mind::facts::remember(cell, content, &source, intent_id, emb.as_deref())
-                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let fact = cell.with(|c| {
+                    mind::facts::remember(c, content, &source, intent_id, emb.as_deref())
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?;
                 ok(
                     vec![evidence(&fact.id, &trust::ids::sha256_hex(content.as_bytes()))],
                     format!(
@@ -309,8 +319,10 @@ impl CapabilityRouter for Capabilities {
                 } else {
                     self.query_embedding(query)
                 };
-                let found = mind::facts::recall(cell, query, emb.as_deref(), 5)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let found = cell.with(|c| {
+                    mind::facts::recall(c, query, emb.as_deref(), 5)
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?;
                 let detail = if found.is_empty() {
                     "nothing in memory yet -- tell me \"remember ...\" and i'll keep it, \
                      with its source."
@@ -328,8 +340,10 @@ impl CapabilityRouter for Capabilities {
                 ok(vec![evidence("memory.recall", "")], detail)
             }
             "registry.list" => {
-                let listed = mind::facts::registry_list(cell, 50)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                let listed = cell.with(|c| {
+                    mind::facts::registry_list(c, 50)
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?;
                 let detail = if listed.is_empty() {
                     "registry is empty -- no facts stored about you.".to_string()
                 } else {
@@ -357,8 +371,10 @@ impl CapabilityRouter for Capabilities {
             }
             "memory.forget" => {
                 let index = args["index"].as_u64().unwrap_or(0) as usize;
-                match mind::facts::forget_by_index(cell, index, intent_id)
-                    .map_err(|e| PrismError::Capability(e.to_string()))?
+                match cell.with(|c| {
+                    mind::facts::forget_by_index(c, index, intent_id)
+                        .map_err(|e| PrismError::Capability(e.to_string()))
+                })?
                 {
                     Some(content) => ok(
                         vec![evidence("memory.forget", "")],
@@ -377,15 +393,17 @@ impl CapabilityRouter for Capabilities {
                 })?;
                 let source = Self::source_msg_of(cell, intent_id)?;
                 let emb = self.passage_embedding(content);
-                match mind::facts::correct_by_index(
-                    cell,
-                    index,
-                    content,
-                    &source,
-                    intent_id,
-                    emb.as_deref(),
-                )
-                .map_err(|e| PrismError::Capability(e.to_string()))?
+                match cell.with(|c| {
+                    mind::facts::correct_by_index(
+                        c,
+                        index,
+                        content,
+                        &source,
+                        intent_id,
+                        emb.as_deref(),
+                    )
+                    .map_err(|e| PrismError::Capability(e.to_string()))
+                })?
                 {
                     Some((old_content, new)) => ok(
                         vec![evidence(&new.id, "")],
@@ -488,14 +506,19 @@ impl CapabilityRouter for Capabilities {
                     serde_json::from_value(args["tier"].clone()).unwrap_or(Tier::Fast);
                 let mut tier = hub::escalation::merge(vtier, hub::escalation::classify(query));
                 let mut quota_note = "";
-                if tier == Tier::Ultra && !bump_ultra(cell, self.ultra_daily_cap) {
+                let ultra_allowed = tier != Tier::Ultra
+                    || cell.with(|c| Ok(bump_ultra(c, self.ultra_daily_cap)))?;
+                if tier == Tier::Ultra && !ultra_allowed {
                     tier = Tier::Super;
                     quota_note =
                         "\n\n(daily ultra budget exhausted -- answered on super; the receipt names it.)";
                 }
                 let emb = self.query_embedding(query);
-                let facts =
-                    mind::facts::recall(cell, query, emb.as_deref(), 5).unwrap_or_default();
+                // read the context under a short lock, then let go: the
+                // model call below must not hold this person's cell
+                let facts = cell
+                    .with(|c| Ok(mind::facts::recall(c, query, emb.as_deref(), 5)))?
+                    .unwrap_or_default();
                 let mut system = persona();
                 if !facts.is_empty() {
                     system.push_str(
@@ -509,7 +532,9 @@ impl CapabilityRouter for Capabilities {
                     role: "system",
                     content: system,
                 }];
-                let mut history = mind::recent_messages(cell, 10).unwrap_or_default();
+                let mut history = cell
+                    .with(|c| Ok(mind::recent_messages(c, 10)))?
+                    .unwrap_or_default();
                 if history.last().map(|(d, c)| d == "in" && c == query) == Some(true) {
                     history.pop();
                 }
@@ -638,7 +663,8 @@ impl CapabilityRouter for Capabilities {
 
 #[derive(Clone)]
 pub struct CellHandle {
-    pub conn: Arc<Mutex<Connection>>,
+    /// Lockable in short bursts -- never held across a model call.
+    pub cell: Cell,
     pub vault: Arc<mind::vault::MediaVault>,
 }
 
@@ -748,7 +774,7 @@ impl RobotCore {
             trust::keys::derive_key(&dek, b"media"),
         );
         let handle = CellHandle {
-            conn: Arc::new(Mutex::new(conn)),
+            cell: Cell::new(conn),
             vault: Arc::new(vault),
         };
         self.cells
@@ -830,11 +856,8 @@ impl RobotCore {
         self.boundary_crossing(Direction::In, surface, &text)?;
         let handle = self.cell(principal)?;
         let reply = {
-            let cell = handle
-                .conn
-                .lock()
-                .map_err(|_| anyhow!("cell lock poisoned"))?;
-            let msg_id = mind::record_message(&cell, "in", surface, &text)?;
+            let cell = &handle.cell;
+            let msg_id = cell.with(|c| Ok(mind::record_message(c, "in", surface, &text)))??;
             let env = Envelope {
                 surface: surface.into(),
                 principal_id: principal,
@@ -854,15 +877,17 @@ impl RobotCore {
                 verdicts: verdicts.as_ref(),
                 crash: None,
             };
-            let out = prism::run_turn(&cell, &env, &deps)?;
+            // the cell is locked only in short bursts inside run_turn; the
+            // model call in the middle happens with it free
+            let out = prism::run_turn(cell, &env, &deps)?;
             // `confirmed` must follow the delivery it claims. For the local
             // chat the message store IS the delivery channel (the surface
             // renders from history), so recording it is the confirmation.
             // Telegram confirms on the provider's message_id, which the send
             // path owns -- tracked in BUILD-LOG, not silently conflated.
-            prism::outbox::mark(&cell, &out.reply_effect_id, "sent", None)?;
-            mind::record_message(&cell, "out", surface, &out.reply)?;
-            prism::outbox::mark(&cell, &out.reply_effect_id, "confirmed", None)?;
+            cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
+            cell.with(|c| Ok(mind::record_message(c, "out", surface, &out.reply)))??;
+            cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
             out.reply
         };
         self.boundary_crossing(Direction::Out, surface, &reply)?;
@@ -911,26 +936,19 @@ impl surfaces::Robot for RobotCore {
 
         // store first: the vault keeps the original either way (sec 4a)
         let media_ref = {
-            let cell = handle
-                .conn
-                .lock()
-                .map_err(|_| anyhow!("cell lock poisoned"))?;
-            let media_ref = handle
-                .vault
-                .store(&cell, &bytes, Some(&ext), Some("chat-upload"))?;
+            let cell = &handle.cell;
+            let media_ref = cell
+                .with(|c| Ok(handle.vault.store(c, &bytes, Some(&ext), Some("chat-upload"))))??;
             // the storage act is a receipted system intent
             let intent_id = trust::ids::new_id("int");
-            prism::journal::intent_open(
-                &cell,
-                &intent_id,
-                &serde_json::json!({
-                    "system": "media.store",
-                    "filename": filename,
-                    "hash": media_ref.hash,
-                    "size": media_ref.size,
-                })
-                .to_string(),
-            )?;
+            let open_json = serde_json::json!({
+                "system": "media.store",
+                "filename": filename,
+                "hash": media_ref.hash,
+                "size": media_ref.size,
+            })
+            .to_string();
+            cell.with(|c| prism::journal::intent_open(c, &intent_id, &open_json))?;
             // a real state transition: the bytes are in the vault, and the
             // content hash is the evidence
             let outcome = Outcome::attested(
@@ -944,16 +962,11 @@ impl surfaces::Robot for RobotCore {
                 }],
                 format!("stored in the vault: {filename}"),
             );
-            prism::journal::step(
-                &cell,
-                &intent_id,
-                "outcome",
-                &serde_json::to_string(&outcome)?,
-                None,
-            )?;
+            let outcome_json = serde_json::to_string(&outcome)?;
+            cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;
             let receipt = prism::lifecycle::build_receipt(&intent_id, &[outcome]);
-            let receipt = prism::receipts::store(&cell, &receipt)?;
-            prism::journal::intent_close(&cell, &intent_id, receipt.status.as_str())?;
+            let receipt = cell.with(|c| prism::receipts::store(c, &receipt))?;
+            cell.with(|c| prism::journal::intent_close(c, &intent_id, receipt.status.as_str()))?;
             media_ref
         };
 
@@ -1006,14 +1019,10 @@ impl surfaces::Robot for RobotCore {
         // produces text that has no other record at all. Previously the
         // transcription-failure branch recorded nothing, so the user saw a
         // completed upload and absolutely no output.
-        {
-            let cell = handle
-                .conn
-                .lock()
-                .map_err(|_| anyhow!("cell lock poisoned"))?;
-            if !transcribed {
-                mind::record_message(&cell, "out", "chat", &reply)?;
-            }
+        if !transcribed {
+            handle
+                .cell
+                .with(|c| Ok(mind::record_message(c, "out", "chat", &reply)))??;
         }
         self.boundary_crossing(Direction::Out, "upload", &reply)?;
         self.notify(principal);
@@ -1022,11 +1031,9 @@ impl surfaces::Robot for RobotCore {
 
     fn history(&self, principal: i64, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
         let handle = self.cell(principal)?;
-        let cell = handle
-            .conn
-            .lock()
-            .map_err(|_| anyhow!("cell lock poisoned"))?;
-        Ok(mind::messages_after(&cell, after_ts, 200)?)
+        Ok(handle
+            .cell
+            .with(|c| Ok(mind::messages_after(c, after_ts, 200)))??)
     }
 
     fn accept_invite(&self, token: &str) -> anyhow::Result<(i64, String)> {
@@ -1127,17 +1134,17 @@ impl surfaces::Robot for RobotCore {
         }
         {
             let handle = self.cell(self.owner_principal)?;
-            let cell = handle
-                .conn
-                .lock()
-                .map_err(|_| anyhow!("cell lock poisoned"))?;
-            d.message_count = mind::message_count(&cell)?;
-            d.fact_count = mind::facts::count_active(&cell)?;
-            d.active_reminders = mind::reminders::count_active(&cell)?;
-            d.facts = mind::facts::registry_list(&cell, 50)?
-                .into_iter()
-                .map(|(f, src, ts)| (f.content, src.chars().take(60).collect(), ts))
-                .collect();
+            handle.cell.with(|c| {
+                d.message_count = mind::message_count(c).unwrap_or(0);
+                d.fact_count = mind::facts::count_active(c).unwrap_or(0);
+                d.active_reminders = mind::reminders::count_active(c).unwrap_or(0);
+                d.facts = mind::facts::registry_list(c, 50)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(f, src, ts)| (f.content, src.chars().take(60).collect(), ts))
+                    .collect();
+                Ok(())
+            })?;
         }
         Ok(d)
     }
@@ -1171,7 +1178,7 @@ mod tests {
     use super::*;
     use prism::CRASH_POINTS;
 
-    fn file_cell(name: &str) -> (Connection, std::path::PathBuf) {
+    fn file_cell(name: &str) -> (Cell, std::path::PathBuf) {
         mind::install_vec();
         let path = std::env::temp_dir().join(format!(
             "killtest-{}-{name}.db",
@@ -1181,11 +1188,13 @@ mod tests {
         let conn = trust::cells::open_encrypted(&path, &key).unwrap();
         prism::init_cell_schema(&conn).unwrap();
         mind::init_cell_schema(&conn).unwrap();
-        (conn, path)
+        (Cell::new(conn), path)
     }
 
-    fn envelope(cell: &Connection, content: &str) -> Envelope {
-        let msg_id = mind::record_message(cell, "in", "chat", content).unwrap();
+    fn envelope(cell: &Cell, content: &str) -> Envelope {
+        let msg_id = cell
+            .with(|c| Ok(mind::record_message(c, "in", "chat", content).unwrap()))
+            .unwrap();
         Envelope {
             surface: "chat".into(),
             principal_id: 1,
@@ -1228,7 +1237,9 @@ mod tests {
             let out = prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap();
             assert!(out.receipt.status.is_terminal(), "{text}");
             assert!(!out.reply.is_empty(), "{text}");
-            let kinds = prism::journal::kinds_for_intent(&cell, &out.intent_id).unwrap();
+            let kinds = cell
+                .with(|c| prism::journal::kinds_for_intent(c, &out.intent_id))
+                .unwrap();
             assert_eq!(kinds.first().map(String::as_str), Some("intent_open"), "{text}");
             assert_eq!(kinds.last().map(String::as_str), Some("intent_close"), "{text}");
             assert!(kinds.iter().any(|k| k == "receipt"), "{text}");
@@ -1255,7 +1266,10 @@ mod tests {
         assert!(r.contains("superseded"), "{r}");
         let r = run("forget fact 1");
         assert!(r.contains("forgotten for real"), "{r}");
-        assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
+        assert_eq!(
+            cell.with(|c| Ok(mind::facts::count_active(c).unwrap())).unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1273,7 +1287,10 @@ mod tests {
             source_msg_id: None,
         };
         assert!(prism::run_turn(&cell, &env, &live_deps(&router)).is_err());
-        assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
+        assert_eq!(
+            cell.with(|c| Ok(mind::facts::count_active(c).unwrap())).unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1307,11 +1324,87 @@ mod tests {
                 assert_eq!(s2.resumed + s2.closed_failed, 0, "{text}@{point}");
 
                 let expected = if point == "after_open" { 0 } else { 1 };
-                assert_eq!(check(&cell), expected, "{text}@{point}");
-                assert!(prism::journal::open_intents(&cell).unwrap().is_empty());
+                assert_eq!(
+                    cell.with(|c| Ok(check(c))).unwrap(),
+                    expected,
+                    "{text}@{point}"
+                );
+                assert!(cell
+                    .with(prism::journal::open_intents)
+                    .unwrap()
+                    .is_empty());
                 let _ = std::fs::remove_file(path);
             }
         }
+    }
+
+    /// A capability that spends seconds in a network call must NOT hold the
+    /// person's cell while it does. Before Phase C the whole turn ran under
+    /// one guard, so a `web.research` turn could hold it for ~2 minutes:
+    /// their history, dashboard, SSE and reminders all blocked, and the
+    /// watchdog could not even observe the hang because it needed the same
+    /// lock to look. No test caught it -- tests were single-threaded and the
+    /// gateway was mocked.
+    #[test]
+    fn a_slow_capability_does_not_block_the_cell() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        /// Stands in for a model call: sleeps with the cell NOT held.
+        struct SlowRouter {
+            entered: Arc<AtomicBool>,
+        }
+        impl CapabilityRouter for SlowRouter {
+            fn execute(
+                &self,
+                _cell: &Cell,
+                _capability: &str,
+                _args: &serde_json::Value,
+                _intent_id: &str,
+            ) -> Result<Outcome, PrismError> {
+                self.entered.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(600));
+                Ok(Outcome::utterance(String::new(), vec![], "slow answer".into()))
+            }
+        }
+
+        let (cell, path) = file_cell("slowlock");
+        let entered = Arc::new(AtomicBool::new(false));
+        let router = SlowRouter { entered: entered.clone() };
+        let env = envelope(&cell, "tell me a joke"); // verdict path -> answer.model
+        let probe = cell.clone();
+
+        let turn = std::thread::spawn(move || {
+            let deps = TurnDeps {
+                router: &router,
+                verdicts: &FallbackVerdict,
+                crash: None,
+            };
+            prism::run_turn(&cell, &env, &deps).unwrap()
+        });
+
+        // wait until the slow capability is definitely running
+        let start = Instant::now();
+        while !entered.load(Ordering::SeqCst) {
+            assert!(start.elapsed() < Duration::from_secs(5), "capability never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // ...and now the cell must still be readable, promptly
+        let probe_start = Instant::now();
+        let n = probe
+            .with(|c| Ok(mind::message_count(c).unwrap()))
+            .expect("cell must be readable while a turn is in a model call");
+        let waited = probe_start.elapsed();
+        assert!(n >= 1);
+        assert!(
+            waited < Duration::from_millis(250),
+            "cell was blocked for {waited:?} by a slow capability -- the lock is \
+             being held across the call again"
+        );
+
+        turn.join().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1321,8 +1414,9 @@ mod tests {
         let out =
             prism::run_turn(&cell, &envelope(&cell, "what time is it"), &live_deps(&router))
                 .unwrap();
-        let (again_id, fresh) =
-            prism::outbox::enqueue(&cell, &out.intent_id, "surface:chat", &out.reply).unwrap();
+        let (again_id, fresh) = cell
+            .with(|c| prism::outbox::enqueue(c, &out.intent_id, "surface:chat", &out.reply))
+            .unwrap();
         assert!(!fresh);
         assert_eq!(again_id, out.reply_effect_id);
         let _ = std::fs::remove_file(path);
