@@ -2,7 +2,7 @@
 //! library -- boot the Robot and serve, or run an operational subcommand.
 
 use robotd::cli::{self, Cmd};
-use robotd::{backup, boot, config, evals, maintenance, package, scheduler};
+use robotd::{backup, backup_lane, boot, config, evals, maintenance, notify, package, scheduler};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -67,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
             println!("(the code is the seal -- carry it separately from the file)");
             Ok(())
         }
+        Cmd::Notify { config, text } => {
+            let cfg = config::load(&config)?;
+            notify::notify_owner(&cfg, &text)?;
+            println!("notice delivered to the owner's chat");
+            Ok(())
+        }
         Cmd::Eval { config, live } => {
             let cfg = config::load(&config)?;
             let gateway = if live {
@@ -89,6 +95,12 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
     scheduler::spawn(booted.robot.clone());
     // watchdog (60s in-without-out) + zombie sweeper (Q12)
     maintenance::spawn(booted.robot.clone());
+    // off-site backup, in-process (see backup_lane for why not launchd)
+    backup_lane::spawn(
+        booted.robot.clone(),
+        cfg.backup.every_hours,
+        cfg.backup.script.clone(),
+    );
 
     // the telegram surface, behind its flag: token present = on, absent = fine
     if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {

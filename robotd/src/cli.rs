@@ -17,6 +17,7 @@ bender -- labs robot v0.2
 usage:
   robotd [--config <file>]                      run the robot (default)
   robotd eval [--live] [--config <file>]        run the eval suite
+  robotd notify <text> [--config <file>]        put a notice in the owner's chat
   robotd backup [--config <file>]               write a sealed backup
   robotd backup-restore <sealed> <dir> [--config <file>]
   robotd package [<dest.pkg>] [--config <file>] export the robot package
@@ -38,6 +39,10 @@ pub enum Cmd {
     Eval {
         config: PathBuf,
         live: bool,
+    },
+    Notify {
+        config: PathBuf,
+        text: String,
     },
     Backup {
         config: PathBuf,
@@ -121,6 +126,15 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
             let live = take_flag(&mut rest, "--live");
             reject_extra(&rest, "eval")?;
             Ok(Cmd::Eval { config, live })
+        }
+        Some("notify") => {
+            if rest.len() != 1 {
+                return Err("notify needs exactly one <text> argument (quote it)".into());
+            }
+            Ok(Cmd::Notify {
+                config,
+                text: rest[0].clone(),
+            })
         }
         Some("backup") => {
             reject_extra(&rest, "backup")?;
@@ -274,6 +288,19 @@ mod tests {
     fn help_and_version_win_over_everything() {
         assert_eq!(p(&["--help"]).unwrap(), Cmd::Help);
         assert_eq!(p(&["backup", "--version"]).unwrap(), Cmd::Version);
+    }
+
+    #[test]
+    fn notify_takes_one_quoted_argument() {
+        assert_eq!(
+            p(&["notify", "backup failed"]).unwrap(),
+            Cmd::Notify {
+                config: PathBuf::from("robot.toml"),
+                text: "backup failed".into()
+            }
+        );
+        assert!(p(&["notify"]).unwrap_err().contains("exactly one"));
+        assert!(p(&["notify", "a", "b"]).unwrap_err().contains("exactly one"));
     }
 
     #[test]

@@ -8,12 +8,14 @@
 
 pub mod archive;
 pub mod backup;
+pub mod backup_lane;
 pub mod boot;
 pub mod caps;
 pub mod cli;
 pub mod config;
 pub mod evals;
 pub mod maintenance;
+pub mod notify;
 pub mod package;
 pub mod prompts;
 pub mod robot;

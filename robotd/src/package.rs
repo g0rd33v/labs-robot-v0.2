@@ -135,6 +135,10 @@ mod tests {
                 model_cache: dir.join("models").to_string_lossy().into_owned(),
             },
             hub: Default::default(),
+            backup: crate::config::BackupSection {
+                every_hours: 0, // tests never shell out to a real backup
+                script: String::new(),
+            },
         }
     }
 

@@ -44,6 +44,10 @@ fn boot_test_robot() -> TestRobot {
             model_cache: dir.join("models").to_string_lossy().into_owned(),
         },
         hub: HubSection::default(),
+            backup: robotd::config::BackupSection {
+                every_hours: 0, // tests never shell out to a real backup
+                script: String::new(),
+            },
     };
     // hermetic: never pick up a developer's keys from the environment
     std::env::remove_var("OPENROUTER_API_KEY");

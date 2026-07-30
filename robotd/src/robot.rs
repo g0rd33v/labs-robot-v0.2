@@ -177,6 +177,41 @@ impl RobotCore {
         Ok(ids)
     }
 
+    /// Put an operational notice into the owner's chat, journaled and
+    /// receipted like any other action. Used by background lanes: a lane
+    /// that fails silently is worse than one that does not run.
+    pub fn tell_owner(&self, text: &str) -> anyhow::Result<()> {
+        let handle = self.cell(self.owner_principal)?;
+        let cell = &handle.cell;
+        let intent_id = trust::ids::new_id("int");
+        let open_json = serde_json::json!({
+            "system": "ops.notice",
+            "principal_id": self.owner_principal,
+        })
+        .to_string();
+        cell.with(|c| prism::journal::intent_open(c, &intent_id, &open_json))?;
+        let outcome = Outcome::attested(
+            trust::ids::new_id("pstep"),
+            vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "ops".into(),
+                external_id: "notice".into(),
+                hash: trust::ids::sha256_hex(text.as_bytes()),
+                ts: trust::ids::ts_ms(),
+            }],
+            format!("delivered an operational notice ({} chars)", text.chars().count()),
+        );
+        let outcome_json = serde_json::to_string(&outcome)?;
+        cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;
+        let receipt = prism::lifecycle::build_receipt(&intent_id, &[outcome]);
+        let receipt = cell.with(|c| prism::receipts::store(c, &receipt))?;
+        cell.with(|c| Ok(mind::record_message(c, "out", "chat", text)))??;
+        cell.with(|c| prism::journal::intent_close(c, &intent_id, receipt.status.as_str()))?;
+        self.boundary_crossing(Direction::Out, "ops", text)?;
+        self.notify(self.owner_principal);
+        Ok(())
+    }
+
     pub fn notify(&self, principal: i64) {
         let _ = self.events.send(principal);
     }
