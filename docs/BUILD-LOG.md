@@ -5,6 +5,96 @@ dependencies introduced. Newest first.
 
 ---
 
+## Decomposition + HTTP integration tests (2026-07-30)
+
+The last structural item from the review, done in the order the review
+recommended: safety net first, refactor second.
+
+**Lib/bin split.** `robotd` was a binary-only crate, so nothing could
+import it — which is why the workspace had no `tests/` directory at all and
+the `surfaces` tests ran entirely against a hand-written double.
+`src/lib.rs` now exposes the modules; `main.rs` is a thin dispatcher.
+
+**`robotd/tests/http.rs`** — 5 tests against a real `RobotCore` on a temp
+directory with no outbound services (hermetic: the fixture clears
+`OPENROUTER_API_KEY`/`SERPER_API_KEY` so a developer's shell cannot make
+them hit the network). They cover seams that had zero coverage:
+- unauthenticated access to `/chat`, `/dash`, `/api/history`, `/api/stream`,
+  and a wrong slug;
+- a floor turn round-tripping `/api/message` → `/api/history`, including
+  that `after` actually filters;
+- upload → vault → receipt → history, asserting the stored bytes are
+  **sealed, not plaintext** on disk;
+- cross-principal isolation at the session layer: a member cannot read the
+  owner's history or registry, `/dash` is 403 for a member and 200 for the
+  owner, a refused invite leaks no link, and the invite is single-use;
+- honest degradation with no gateway — an offline brain is a reply, not a
+  500.
+
+**Decomposition.** `robot.rs` 1,430 → 811 lines. 522 lines of capabilities
+moved into `caps/`, one module per domain (reminders, memory, admin,
+answer, research) behind a `Capability` trait and a `Registry`. Prompts
+moved to `prompts.rs`, shared with the eval runner so the injection suite
+keeps testing exactly what production sends.
+
+The point was never file size:
+- **`effect()` now lives beside the code that performs it.** Previously the
+  effect class was declared in `prism::lifecycle::plan_from_decision` while
+  the implementation lived in `robotd` — two crates apart, nothing tying
+  them together, so a write could be planned as a read and nothing would
+  notice. Two new tests assert the registry covers every capability the
+  planner can emit, and that `memory.forget` is `Irreversible`.
+- **The acting principal is passed down** through `Ctx` instead of being
+  recovered by JSON-parsing the `intent_open` payload with `.unwrap_or(-1)`
+  — that was an authorization input reconstructed from a blob.
+- **`Registry::offline()` replaces the `Default` impl.** A router that
+  silently refuses everything can no longer be constructed by accident;
+  that construction is exactly how the owner-only checks went untested.
+- `Capabilities` split into `Services` / `Policy` / `Instance`, built once
+  at boot; the per-turn `Ctx` borrows and allocates nothing.
+
+**Gate.** 88 tests (50 at M7), clippy -D warnings clean, eval PASS: 59
+routing MISROUTE-0, 12/12 kill scenarios, floor p95 2.0 ms, 60/60 injection
+calls. Live after the move: registry, a model turn, and web search all
+verified ("The current version of SQLite is 3.53.4, released 2026-07-24"
+with three cited sources).
+
+**Assumption.** `tar` is still shelled out rather than using a crate — the
+dependency rule says list it first, and it did not seem worth a new
+dependency for two call sites now that they are behind one module. Noted
+rather than silently kept.
+
+### Review scorecard — what four reviewers found, and where it landed
+
+| Area | Found | Status |
+|---|---|---|
+| `extract_text` panic bricking a cell | A | fixed |
+| Latin-1 cast / script-filter hole | A | fixed |
+| Floor substring hijack (silent data loss) | A | fixed |
+| `cancel_last` replay double-cancel | A | fixed |
+| forget-after-correct stranding data | A | fixed |
+| Telegram dropping messages | A | fixed |
+| Injection gate passing on one lucky sample | A | 3 trials @ temp 0.0 |
+| Receipts hole (model prose → Verified) | B | fixed |
+| Boundary appends swallowed / non-transactional / unverified | B | fixed |
+| Self-granted eval exemption | B | removed |
+| SSRF on `fetch_text` | B | fixed |
+| Cell lock held across model calls | C | fixed |
+| Watchdog unable to observe | C | fixed |
+| Session map unbounded | C | fixed |
+| Search routing stochastic | D | floor command |
+| Owner-authz untested (vacuous) | D | fixed + mutation-checked |
+| CLI defects (litter, typo-boots, flag collisions) | D | fixed |
+| backup/package duplication | D | shared `archive` |
+| `robot.rs` size + `Effect` split across crates | structure | this entry |
+| No HTTP integration tests | structure | this entry |
+
+Still open and recorded above: unkeyed hash chain (owner decision),
+Telegram delivery confirmation, Law-4 inversion, crossings for local HTTP
+routes, Q20 golden corpus.
+
+---
+
 ## Review phases C & D (2026-07-30)
 
 Phases A and B (below) fixed panics, silent data loss, and the two laws
