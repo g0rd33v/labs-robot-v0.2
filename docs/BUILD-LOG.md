@@ -64,7 +64,7 @@ drifts into another language must not slip past the claim-vs-receipt check.
 
 ### Gate (demonstrated)
 
-- `cargo test --workspace` — **99 passed, 0 failed** (was 92).
+- `cargo test --workspace` — **100 passed, 0 failed** (was 92).
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - `robotd eval` — routing 69 cases / 0 misroutes (10 new, incl. six
   unpacked languages that must route to `none`); kill-suite 12/12; floor
@@ -85,6 +85,9 @@ New tests with teeth:
 - `every_pack_can_catch_an_unsupported_effect_claim` — a pack with no
   effect-claim phrases is a language in which the Robot could claim an
   effect with no receipt and nothing would notice.
+- `the_surface_answers_each_person_in_their_own_language` — the same over
+  real HTTP, through a real session, including three unpacked languages
+  that must return 200 with a real answer rather than an error.
 
 **Assumptions.** Script detection (Cyrillic/Latin majority) is
 deterministic and honest about its limits: it cannot separate Latin-script

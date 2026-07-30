@@ -303,3 +303,38 @@ async fn offline_robot_degrades_honestly_over_http() {
     let (_, reply) = post_json(&t.router, "/api/message", &cookie, &say("my reminders")).await;
     assert!(reply.contains("stretch"), "{reply}");
 }
+
+/// The language architecture through the real surface, not just the kernel:
+/// the same robot, the same session, two languages, each answered in the
+/// language it was asked in -- and a language with no pack still gets an
+/// ordinary 200 rather than an error.
+#[tokio::test]
+async fn the_surface_answers_each_person_in_their_own_language() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    let (status, ru) = post_json(
+        &t.router,
+        "/api/message",
+        &cookie,
+        &say("напомни через 10 минут размяться"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ru.contains("готово — напомню"), "{ru}");
+    // the date is russian too, not an english month glued onto a russian sentence
+    assert!(!ru.contains("Jul") && !ru.contains(" on "), "{ru}");
+
+    let (_, ru_list) = post_json(&t.router, "/api/message", &cookie, &say("мои напоминания")).await;
+    assert!(ru_list.contains("размяться"), "{ru_list}");
+
+    let (_, en_list) = post_json(&t.router, "/api/message", &cookie, &say("my reminders")).await;
+    assert!(en_list.contains("your reminders"), "{en_list}");
+
+    // no pack for these; the robot must still respond, not fail
+    for text in ["今何時ですか", "¿qué hora es?", "지금 몇 시야"] {
+        let (status, reply) = post_json(&t.router, "/api/message", &cookie, &say(text)).await;
+        assert_eq!(status, StatusCode::OK, "{text} must not error");
+        assert!(!reply.is_empty(), "{text}");
+    }
+}
