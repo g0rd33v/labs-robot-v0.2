@@ -6,6 +6,7 @@ mod boot;
 mod config;
 mod evals;
 mod maintenance;
+mod package;
 mod robot;
 mod scheduler;
 mod telegram;
@@ -47,6 +48,34 @@ async fn main() -> anyhow::Result<()> {
             })?;
             backup::restore(&cfg, &sealed, &dest)?;
             println!("restored into {}", dest.display());
+            return Ok(());
+        }
+        Some("package") => {
+            let dest = args.get(2).filter(|a| !a.starts_with("--")).map(PathBuf::from);
+            let (path, code) = package::export(&cfg, dest)?;
+            println!("robot package: {}", path.display());
+            println!("one-time code: {code}");
+            println!("(the code is the seal -- carry it separately from the file)");
+            return Ok(());
+        }
+        Some("restore") => {
+            let pkg = args.get(2).map(PathBuf::from).ok_or_else(|| {
+                anyhow::anyhow!("usage: robotd restore <pkg> --code <code> --into <dir> [--port N] [--force]")
+            })?;
+            let get = |flag: &str| {
+                args.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let code = get("--code")
+                .ok_or_else(|| anyhow::anyhow!("--code <code> is required"))?;
+            let into = PathBuf::from(
+                get("--into").ok_or_else(|| anyhow::anyhow!("--into <dir> is required"))?,
+            );
+            let port: u16 = get("--port").and_then(|p| p.parse().ok()).unwrap_or(7778);
+            let force = args.iter().any(|a| a == "--force");
+            package::restore(&pkg, &code, &into, port, force)?;
             return Ok(());
         }
         Some("eval") => {

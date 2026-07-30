@@ -1,0 +1,23 @@
+{
+  "cells": [
+    {
+      "bytes": 143360,
+      "cell_id": "member1-f6f9c6"
+    },
+    {
+      "bytes": 1855488,
+      "cell_id": "owner"
+    }
+  ],
+  "created_at": 1785427310093,
+  "excluded": [
+    "models (runtime, re-fetchable)",
+    "backups"
+  ],
+  "format_version": 1,
+  "kind": "bender-robot-package",
+  "media_files": 1,
+  "robot_id": "robot_6546040118b4dd1d",
+  "robot_name": "bender",
+  "runtime_version": "0.2.0"
+}

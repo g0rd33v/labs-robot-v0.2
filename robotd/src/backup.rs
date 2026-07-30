@@ -15,7 +15,7 @@ fn backup_key(keys: &KeyChain) -> [u8; 32] {
 
 /// Snapshot one encrypted db into `dest` via VACUUM INTO (online,
 /// consistent, keeps SQLCipher encryption).
-fn snapshot_db(path: &Path, key: &[u8; 32], dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn snapshot_db(path: &Path, key: &[u8; 32], dest: &Path) -> anyhow::Result<()> {
     let conn = trust::cells::open_encrypted(path, key)
         .with_context(|| format!("opening {} for backup", path.display()))?;
     conn.execute(
@@ -30,7 +30,7 @@ fn snapshot_db(path: &Path, key: &[u8; 32], dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<u64> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<u64> {
     let mut files = 0;
     if !from.exists() {
         return Ok(0);
@@ -47,7 +47,7 @@ fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<u64> {
     Ok(files)
 }
 
-fn walk(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(crate) fn walk(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut out = vec![];
     for entry in std::fs::read_dir(dir)? {
         let p = entry?.path();

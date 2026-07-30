@@ -95,6 +95,15 @@ impl KeyChain {
     }
 }
 
+/// A key derived from a human-carried code (the Robot Package seal, arch
+/// sec 8: the package travels; the code travels with the person).
+pub fn passphrase_key(pass: &str) -> [u8; KEY_LEN] {
+    let mut h = Sha256::new();
+    h.update(b"bender-package-v1:");
+    h.update(pass.as_bytes());
+    h.finalize().into()
+}
+
 /// Domain-separated subkey from any 32-byte base key: sha256(base || label).
 /// Used e.g. for the per-cell media-vault key derived from the cell DEK.
 pub fn derive_key(base: &[u8; KEY_LEN], label: &[u8]) -> [u8; KEY_LEN] {

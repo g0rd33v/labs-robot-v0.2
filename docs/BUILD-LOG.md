@@ -5,6 +5,56 @@ dependencies introduced. Newest first.
 
 ---
 
+## M7 — Transferability proof (2026-07-30) · gate PASSED · **MVP COMPLETE**
+
+**Shipped.** The Robot Package (arch §8): `robotd package [dest]` exports
+essence — every cell (online snapshot, cipher verified), media vault, core
+last, the keys, a manifest — as one tarball sealed under a **one-time code**
+printed to the owner (the code is the perimeter; carry it separately from
+the file). `robotd restore <pkg> --code C --into <dir> [--port N] [--force]`
+unpacks a ready-to-run Robot (`robot.toml` + `data/`) on any blank
+directory, runs the §8a integrity gate (cells must open with the travelled
+keys), and refuses to clobber an existing robot without `--force` — and
+even then the old data is moved aside, never deleted. Models are runtime,
+not essence (§8): excluded from the package; the restored config boots with
+the vector door closed until re-fetched.
+
+**The demo (owner-specified: demo/labs-robot-bender-usb as the stick).**
+1. Planted a marker fact on the main Robot, quiesced it, packaged: 2.1MB
+   sealed `.pkg` + one-time code. Wrong code → refused.
+2. Restored into `demo/labs-robot-bender-usb`, copied the one binary in:
+   the whole Robot = one folder + one file.
+3. Ran it FROM the stick on port 7778: **same robot_id, same slug token**,
+   registry intact (marker + the RU fact), the pending RU reminder intact.
+   Added a new fact born on the stick.
+4. Packaged FROM the stick with its own binary; restored back into main
+   with `--force` (old data aside), models re-attached, embeddings back on.
+5. Main Robot on 7777: **all three facts present, including the one born
+   on the stick.** State travelled both directions. Same Robot, three
+   homes, nothing re-taught.
+- Package round-trip + wrong-code rejection + force-preserves-old proven
+  by test. 53 tests green; clippy -D warnings clean.
+
+**Assumptions:**
+- "Synchronize between folders" is delivered as the §8a **Move** flow
+  (state travels with the package, both directions, exactly-once). Live
+  bidirectional CRDT sync is explicitly out of MVP (mission), specced for
+  later (§9). Two robots run from two folders simultaneously as
+  *independent* instances; the package is the state carrier.
+- The one-time code seals the package (capability-style, like the Tier-3
+  slug); Recovery-Kit-grade custody (§13d) is the owner's job.
+- A physical /Volumes stick is byte-identical to the demo dir as far as
+  the Robot is concerned (path-relative config, one folder).
+
+**Dependencies introduced**: none.
+
+**MVP definition of done — checked.** Slug URL on this MacBook ✓ text ✓
+voice ✓ memory across restarts ✓ reminders that fire ✓ web search + READ ✓
+Registry ✓ Boundary Log ✓ second member with a sealed cell ✓ **and the
+whole Robot runs from another folder with its memory intact ✓.**
+
+---
+
 ## M6 — Evals + hardening (2026-07-30) · gate PASSED
 
 **Shipped.** `robotd eval [--live]` runs the corpus in ./evals (§12: evals
