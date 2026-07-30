@@ -19,15 +19,34 @@ pub fn spawn(robot: Arc<RobotCore>, tg: Arc<hub::Telegram>) {
             match updates {
                 Ok(Ok(list)) => {
                     for u in list {
-                        offset = offset.max(u.update_id + 1);
                         let robot = robot.clone();
                         let tg = tg.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            if let Err(e) = process(&robot, &tg, &u) {
-                                tracing::error!("telegram turn failed: {e:#}");
-                            }
+                        let update_id = u.update_id;
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            process(&robot, &tg, &u)
                         })
                         .await;
+                        // The offset is Telegram's ACK: advancing it makes the
+                        // update unrecoverable. Advance only after the turn
+                        // actually succeeded, so a failure is retried on the
+                        // next poll instead of silently swallowing the
+                        // person's message (the Second Law: never drop a
+                        // request without saying so).
+                        match outcome {
+                            Ok(Ok(())) => offset = offset.max(update_id + 1),
+                            Ok(Err(e)) => {
+                                tracing::error!(
+                                    "telegram turn failed for update {update_id}, will retry: {e:#}"
+                                );
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                break; // re-poll from the un-acked offset
+                            }
+                            Err(e) => {
+                                tracing::error!("telegram task panicked on {update_id}: {e}");
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                break;
+                            }
+                        }
                     }
                 }
                 Ok(Err(e)) => {

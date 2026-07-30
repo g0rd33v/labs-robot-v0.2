@@ -67,7 +67,23 @@ pub fn list_active(conn: &Connection) -> Result<Vec<Reminder>, MindError> {
 }
 
 /// Cancel the most recently created active reminder; returns it, if any.
-pub fn cancel_latest(conn: &Connection) -> Result<Option<Reminder>, MindError> {
+///
+/// Idempotent per intent (the CapabilityRouter contract): "the latest" is
+/// resolved at execution time, so a crash between the UPDATE and the
+/// journal write would otherwise make replay cancel a SECOND reminder while
+/// the receipt claimed one. The op marker records what this intent actually
+/// cancelled and replays that answer instead of re-resolving.
+pub fn cancel_latest(conn: &Connection, intent_id: &str) -> Result<Option<Reminder>, MindError> {
+    if let Some(marker) = crate::facts::op_marker(conn, intent_id)? {
+        let id = marker["id"].as_str().unwrap_or_default();
+        return Ok(conn
+            .query_row(
+                &format!("SELECT {COLS} FROM reminders WHERE id = ?1"),
+                params![id],
+                row_to_reminder,
+            )
+            .optional()?);
+    }
     let latest: Option<Reminder> = conn
         .query_row(
             &format!(
@@ -78,12 +94,28 @@ pub fn cancel_latest(conn: &Connection) -> Result<Option<Reminder>, MindError> {
             row_to_reminder,
         )
         .optional()?;
-    if let Some(ref rem) = latest {
-        conn.execute(
-            "UPDATE reminders SET status = 'cancelled' WHERE id = ?1",
-            params![rem.id],
-        )?;
+    let tx = conn.unchecked_transaction()?;
+    match &latest {
+        Some(rem) => {
+            tx.execute(
+                "UPDATE reminders SET status = 'cancelled' WHERE id = ?1",
+                params![rem.id],
+            )?;
+            crate::facts::set_op_marker(
+                &tx,
+                intent_id,
+                &serde_json::json!({ "op": "cancel_latest", "id": rem.id }),
+            )?;
+        }
+        None => {
+            crate::facts::set_op_marker(
+                &tx,
+                intent_id,
+                &serde_json::json!({ "op": "cancel_latest", "id": null }),
+            )?;
+        }
     }
+    tx.commit()?;
     Ok(latest.map(|mut r| {
         r.status = "cancelled".into();
         r
@@ -148,10 +180,41 @@ mod tests {
         create(&conn, "int_2", 1000, "sooner").unwrap();
         let listed = list_active(&conn).unwrap();
         assert_eq!(listed[0].about, "sooner"); // soonest first
-        let cancelled = cancel_latest(&conn).unwrap().unwrap();
+        let cancelled = cancel_latest(&conn, "int_c1").unwrap().unwrap();
         assert_eq!(cancelled.about, "sooner"); // most recently created
         assert_eq!(count_active(&conn).unwrap(), 1);
-        assert!(cancel_latest(&conn).unwrap().is_some());
-        assert!(cancel_latest(&conn).unwrap().is_none()); // nothing left
+        assert!(cancel_latest(&conn, "int_c2").unwrap().is_some());
+        assert!(cancel_latest(&conn, "int_c3").unwrap().is_none()); // nothing left
+    }
+
+    /// Regression: "the latest" is resolved at execution time, so replaying
+    /// the same intent must NOT cancel a second reminder.
+    #[test]
+    fn cancel_is_idempotent_per_intent() {
+        let conn = cell();
+        create(&conn, "int_1", 2000, "first").unwrap();
+        create(&conn, "int_2", 1000, "second").unwrap();
+        assert_eq!(count_active(&conn).unwrap(), 2);
+
+        let a = cancel_latest(&conn, "int_cancel").unwrap().unwrap();
+        assert_eq!(count_active(&conn).unwrap(), 1);
+        // crash replay: same intent runs again
+        let b = cancel_latest(&conn, "int_cancel").unwrap().unwrap();
+        assert_eq!(a.id, b.id, "replay must return the same reminder");
+        assert_eq!(
+            count_active(&conn).unwrap(),
+            1,
+            "replay must not cancel a second reminder"
+        );
+
+        // a nothing-to-cancel result is also recorded, so replay stays quiet
+        let conn2 = cell();
+        assert!(cancel_latest(&conn2, "int_empty").unwrap().is_none());
+        create(&conn2, "int_new", 5000, "arrived later").unwrap();
+        assert!(
+            cancel_latest(&conn2, "int_empty").unwrap().is_none(),
+            "replay of an empty cancel must not eat a newly created reminder"
+        );
+        assert_eq!(count_active(&conn2).unwrap(), 1);
     }
 }

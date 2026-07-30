@@ -42,7 +42,84 @@ pub enum FloorMatch {
     TelegramCode,
 }
 
+/// Whole-utterance commands. Matching is EXACT, never substring: an
+/// utterance that merely *contains* one of these is not that command.
+/// (Regression: "remind me at 18:00 to show reminders" used to list
+/// reminders and never create the reminder, with a Verified receipt for the
+/// wrong action.) Anything less than exact belongs to the verdict path --
+/// Q17 makes the floor the high-signal deterministic set, not an NLU.
+const TIME_FORMS: [&str; 12] = [
+    "time",
+    "what time is it",
+    "what time is it now",
+    "what's the time",
+    "whats the time",
+    "current time",
+    "what day is it",
+    "what day is it today",
+    "what date is it",
+    "который час",
+    "сколько времени",
+    "какое сегодня число",
+];
+const SELF_FORMS: [&str; 8] = [
+    "who are you",
+    "who are you?",
+    "what are you",
+    "tell me about yourself",
+    "кто ты",
+    "кто ты такой",
+    "что ты такое",
+    "расскажи о себе",
+];
+const LIST_REMINDER_FORMS: [&str; 8] = [
+    "reminders",
+    "my reminders",
+    "list reminders",
+    "show reminders",
+    "show my reminders",
+    "мои напоминания",
+    "напоминания",
+    "список напоминаний",
+];
+const CANCEL_REMINDER_FORMS: [&str; 6] = [
+    "cancel reminder",
+    "cancel the reminder",
+    "cancel last reminder",
+    "cancel the last reminder",
+    "отмени напоминание",
+    "отмена напоминания",
+];
+const REGISTRY_FORMS: [&str; 8] = [
+    "registry",
+    "my facts",
+    "show facts",
+    "show my facts",
+    "list facts",
+    "мои факты",
+    "факты",
+    "список фактов",
+];
+const HELP_FORMS: [&str; 6] = ["help", "/help", "commands", "/start", "помощь", "команды"];
+const INVITE_FORMS: [&str; 5] = [
+    "invite",
+    "new invite",
+    "invite someone",
+    "пригласи",
+    "новый инвайт",
+];
+const TELEGRAM_FORMS: [&str; 4] = ["telegram code", "telegram", "код телеграм", "телеграм код"];
+
+fn is(joined: &str, forms: &[&str]) -> bool {
+    forms.contains(&joined)
+}
+
 /// Scan one utterance. `now` is injected for testability.
+///
+/// Order matters: structured commands with an explicit head token
+/// (remind/remember/correct/forget/recall) are parsed BEFORE whole-utterance
+/// phrase commands, so a reminder whose subject mentions "reminders" is
+/// still a reminder.
 pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
     let original: Vec<&str> = text.split_whitespace().collect();
     if original.is_empty() {
@@ -58,113 +135,61 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         .collect();
     let joined = lower.join(" ");
 
-    // help
-    if matches!(
-        joined.as_str(),
-        "help" | "/help" | "commands" | "/start" | "помощь" | "команды"
-    ) {
-        return Some(FloorMatch::Help);
-    }
-
-    // time / date
-    const TIME_PATTERNS: [&str; 8] = [
-        "what time",
-        "what's the time",
-        "current time",
-        "what date",
-        "what day is it",
-        "который час",
-        "сколько времени",
-        "какое сегодня число",
-    ];
-    if joined == "time" || TIME_PATTERNS.iter().any(|p| joined.contains(p)) {
-        return Some(FloorMatch::TimeNow);
-    }
-
-    // memory: recall (before self/meta -- "что ты помнишь" must not be eaten)
-    if let Some(m) = parse_recall(&lower, &original, &joined) {
-        return Some(m);
-    }
-
-    // self / meta
-    const SELF_PATTERNS: [&str; 4] = ["who are you", "what are you", "кто ты", "что ты такое"];
-    if SELF_PATTERNS.iter().any(|p| joined.contains(p)) {
-        return Some(FloorMatch::SelfMeta);
-    }
-
-    // list reminders
-    const LIST_PATTERNS: [&str; 5] = [
-        "my reminders",
-        "list reminders",
-        "show reminders",
-        "мои напоминания",
-        "список напоминаний",
-    ];
-    if joined == "reminders" || LIST_PATTERNS.iter().any(|p| joined.contains(p)) {
-        return Some(FloorMatch::ListReminders);
-    }
-
-    // cancel reminder
-    if joined.starts_with("cancel reminder")
-        || joined.starts_with("cancel the reminder")
-        || joined.starts_with("отмени напоминание")
-        || joined.starts_with("отмена напоминания")
-    {
-        return Some(FloorMatch::CancelReminder);
-    }
-
-    // invites + telegram binding (owner-side commands; the router enforces
-    // the role, the floor only recognizes the words)
-    if matches!(
-        joined.as_str(),
-        "invite" | "new invite" | "invite someone" | "пригласи" | "новый инвайт"
-    ) {
-        return Some(FloorMatch::Invite);
-    }
-    if matches!(
-        joined.as_str(),
-        "telegram code" | "telegram" | "код телеграм" | "телеграм код"
-    ) {
-        return Some(FloorMatch::TelegramCode);
-    }
-
-    // registry list
-    const REGISTRY_PATTERNS: [&str; 5] = [
-        "my facts",
-        "show facts",
-        "list facts",
-        "мои факты",
-        "список фактов",
-    ];
-    if joined == "registry" || REGISTRY_PATTERNS.iter().any(|p| joined.contains(p)) {
-        return Some(FloorMatch::RegistryList);
-    }
+    // ---- 1. structured commands (explicit head token at position 0) ----
 
     // forget fact N
     if let Some(rest) = joined
         .strip_prefix("forget fact ")
         .or_else(|| joined.strip_prefix("забудь факт "))
     {
-        if let Ok(index) = rest.trim().parse::<usize>() {
-            if index >= 1 {
-                return Some(FloorMatch::ForgetFact { index });
-            }
-        }
-        return None;
+        return rest
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|i| *i >= 1)
+            .map(|index| FloorMatch::ForgetFact { index });
     }
-
-    // correct fact N: new content
     if let Some(m) = parse_correct(&lower, &original) {
         return Some(m);
     }
-
-    // remember: store an owner-stated fact
+    if let Some(m) = parse_recall(&lower, &original, &joined) {
+        return Some(m);
+    }
     if let Some(m) = parse_remember(&lower, &original) {
         return Some(m);
     }
+    if let Some(m) = parse_reminder(&lower, &original, now) {
+        return Some(m);
+    }
 
-    // explicit reminders
-    parse_reminder(&lower, &original, now)
+    // ---- 2. whole-utterance phrase commands (exact match only) ----
+
+    if is(&joined, &HELP_FORMS) {
+        return Some(FloorMatch::Help);
+    }
+    if is(&joined, &TIME_FORMS) {
+        return Some(FloorMatch::TimeNow);
+    }
+    if is(&joined, &SELF_FORMS) {
+        return Some(FloorMatch::SelfMeta);
+    }
+    if is(&joined, &LIST_REMINDER_FORMS) {
+        return Some(FloorMatch::ListReminders);
+    }
+    if is(&joined, &CANCEL_REMINDER_FORMS) {
+        return Some(FloorMatch::CancelReminder);
+    }
+    if is(&joined, &REGISTRY_FORMS) {
+        return Some(FloorMatch::RegistryList);
+    }
+    if is(&joined, &INVITE_FORMS) {
+        return Some(FloorMatch::Invite);
+    }
+    if is(&joined, &TELEGRAM_FORMS) {
+        return Some(FloorMatch::TelegramCode);
+    }
+
+    None
 }
 
 fn parse_recall(lower: &[String], original: &[&str], joined: &str) -> Option<FloorMatch> {
@@ -282,16 +307,21 @@ fn parse_reminder(
         // relative: in/через N unit rest
         Some("in") | Some("через") if !tomorrow => {
             let n: i64 = lower.get(i + 1)?.parse().ok()?;
-            if !(1..=10080).contains(&n) {
-                return None; // beyond a week is not high-signal floor territory
+            if n < 1 {
+                return None;
             }
             let unit = lower.get(i + 2)?;
             let minutes = match unit.as_str() {
                 "minute" | "minutes" | "min" | "mins" | "минуту" | "минуты" | "минут"
                 | "мин" => n,
-                "hour" | "hours" | "h" | "час" | "часа" | "часов" | "ч" => n * 60,
+                "hour" | "hours" | "h" | "час" | "часа" | "часов" | "ч" => n.checked_mul(60)?,
                 _ => return None,
             };
+            // the horizon guard belongs on the RESOLVED duration, not on the
+            // raw number ("in 5000 hours" is 208 days, not 5000 minutes)
+            if minutes > 10080 {
+                return None; // beyond a week is not high-signal floor territory
+            }
             let about = about_from(original, i + 3);
             if about.is_empty() {
                 return None;
@@ -302,11 +332,16 @@ fn parse_reminder(
         // absolute: at/в HH[:MM] rest  (optionally preceded by tomorrow/завтра)
         Some("at") | Some("в") => {
             let (h, m) = parse_hhmm(lower.get(i + 1)?)?;
-            let base = now.date_naive() + Duration::days(if tomorrow { 1 } else { 0 });
-            let naive = base.and_hms_opt(h, m, 0)?;
-            let mut target = Local.from_local_datetime(&naive).earliest()?;
+            // calendar arithmetic, never +24h: adding an absolute day across a
+            // DST boundary lands an hour off the wall-clock time asked for
+            let mut day = now.date_naive();
+            if tomorrow {
+                day = day.succ_opt()?;
+            }
+            let mut target = local_at(day, h, m)?;
             if target <= now && !tomorrow {
-                target += Duration::days(1); // "at 8:00" said at 9:00 means tomorrow
+                // "at 8:00" said at 09:00 means tomorrow's 8:00
+                target = local_at(day.succ_opt()?, h, m)?;
             }
             if target <= now {
                 return None;
@@ -337,6 +372,24 @@ fn about_from(original: &[&str], mut idx: usize) -> String {
     original[idx.min(original.len())..].join(" ")
 }
 
+/// Local wall-clock time on a given day. During a spring-forward gap the
+/// requested time does not exist; we take the first instant after the gap
+/// rather than dropping the reminder on the floor.
+fn local_at(day: chrono::NaiveDate, h: u32, m: u32) -> Option<DateTime<Local>> {
+    let naive = day.and_hms_opt(h, m, 0)?;
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(t) => Some(t),
+        chrono::LocalResult::Ambiguous(earliest, _) => Some(earliest),
+        chrono::LocalResult::None => {
+            // gap hour: walk forward in 15-minute steps to the first real instant
+            (1..=8).find_map(|step| {
+                let bumped = naive + Duration::minutes(15 * step);
+                Local.from_local_datetime(&bumped).earliest()
+            })
+        }
+    }
+}
+
 fn parse_hhmm(tok: &str) -> Option<(u32, u32)> {
     let (h, m) = match tok.split_once(':') {
         Some((h, m)) => (h.parse().ok()?, m.parse().ok()?),
@@ -353,8 +406,104 @@ fn parse_hhmm(tok: &str) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    /// A fixed, unremarkable clock: 15 March 2026, 10:00 local. Tests must
+    /// not depend on the wall clock -- the absolute-reminder cases behave
+    /// differently near midnight and across DST transitions.
     fn now() -> DateTime<Local> {
-        Local::now()
+        Local
+            .with_ymd_and_hms(2026, 3, 15, 10, 0, 0)
+            .earliest()
+            .expect("fixed test clock is a real local time")
+    }
+
+    /// Regression: phrase commands were matched with `contains`, so any
+    /// utterance mentioning them was hijacked -- the real command was
+    /// silently dropped and the receipt honestly recorded the WRONG action.
+    #[test]
+    fn phrase_commands_do_not_hijack_structured_commands() {
+        // a reminder whose subject mentions reminders is still a reminder
+        match scan("remind me at 18:00 to show reminders", now()) {
+            Some(FloorMatch::Remind { about, .. }) => assert_eq!(about, "show reminders"),
+            other => panic!("hijacked: {other:?}"),
+        }
+        match scan("напомни в 9 посмотреть мои напоминания", now()) {
+            Some(FloorMatch::Remind { about, .. }) => {
+                assert_eq!(about, "посмотреть мои напоминания")
+            }
+            other => panic!("hijacked: {other:?}"),
+        }
+        // a fact that mentions facts is still a fact
+        match scan("remember that my facts are private", now()) {
+            Some(FloorMatch::Remember { content }) => {
+                assert_eq!(content, "my facts are private")
+            }
+            other => panic!("hijacked: {other:?}"),
+        }
+        // "what date" inside a reminder subject must not become TimeNow
+        match scan("remind me at 9 to check what date the demo is", now()) {
+            Some(FloorMatch::Remind { about, .. }) => {
+                assert_eq!(about, "check what date the demo is")
+            }
+            other => panic!("hijacked: {other:?}"),
+        }
+        // and a fact mentioning the time question stays a fact
+        match scan("remember that i always ask what time it is", now()) {
+            Some(FloorMatch::Remember { .. }) => {}
+            other => panic!("hijacked: {other:?}"),
+        }
+    }
+
+    /// Conversational phrasings are NOT floor commands -- they belong to the
+    /// verdict path (Q17: the floor is the high-signal set, not an NLU).
+    #[test]
+    fn near_miss_phrasings_fall_through_to_the_verdict() {
+        for text in [
+            "can you show me my reminders please",
+            "i wonder what time it is",
+            "tell me about my facts and where they came from",
+        ] {
+            assert_eq!(scan(text, now()), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn relative_horizon_guard_applies_to_resolved_duration() {
+        // 5000 hours is 208 days -- must not pass as "within a week"
+        assert_eq!(scan("remind me in 5000 hours to x", now()), None);
+        // but a legitimate hour-scale reminder still works
+        assert!(matches!(
+            scan("remind me in 48 hours to x", now()),
+            Some(FloorMatch::Remind { .. })
+        ));
+        // exactly a week is the boundary, just inside
+        assert!(matches!(
+            scan("remind me in 168 hours to x", now()),
+            Some(FloorMatch::Remind { .. })
+        ));
+        assert_eq!(scan("remind me in 169 hours to x", now()), None);
+    }
+
+    /// "at 8:00" said at 10:00 rolls to tomorrow's 8:00 by CALENDAR, not by
+    /// adding 24 absolute hours (which lands an hour off across DST).
+    #[test]
+    fn absolute_rollover_uses_calendar_days() {
+        let n = now(); // 10:00
+        match scan("remind me at 8 to stretch", n) {
+            Some(FloorMatch::Remind { fire_at_ms, .. }) => {
+                let fired = Local.timestamp_millis_opt(fire_at_ms).earliest().unwrap();
+                assert_eq!(fired.date_naive(), n.date_naive().succ_opt().unwrap());
+                assert_eq!(fired.format("%H:%M").to_string(), "08:00");
+            }
+            other => panic!("no match: {other:?}"),
+        }
+        // and "tomorrow at 9" is tomorrow's 09:00 on the wall clock
+        match scan("remind me tomorrow at 9 to stretch", n) {
+            Some(FloorMatch::Remind { fire_at_ms, .. }) => {
+                let fired = Local.timestamp_millis_opt(fire_at_ms).earliest().unwrap();
+                assert_eq!(fired.format("%H:%M").to_string(), "09:00");
+            }
+            other => panic!("no match: {other:?}"),
+        }
     }
 
     #[test]

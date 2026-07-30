@@ -311,10 +311,24 @@ impl ModelGateway {
         schema: Option<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<ChatOut, HubError> {
+        self.chat_at(role, messages, schema, max_tokens, 0.4)
+    }
+
+    /// As `chat`, with an explicit temperature. Anything reasoning over
+    /// untrusted input runs at 0.0: sampling variance there is not
+    /// creativity, it is a security property left to chance.
+    pub fn chat_at(
+        &self,
+        role: Role,
+        messages: &[Msg],
+        schema: Option<serde_json::Value>,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<ChatOut, HubError> {
         let mut body = serde_json::json!({
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.4,
+            "temperature": temperature,
         });
         if let Some(s) = schema {
             body["response_format"] = serde_json::json!({

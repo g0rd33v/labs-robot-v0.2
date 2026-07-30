@@ -19,6 +19,11 @@ pub fn open_encrypted(path: &Path, key: &[u8; 32]) -> Result<Connection, TrustEr
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))?;
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    // SQLite's default busy timeout is 0: any contention fails instantly
+    // with SQLITE_BUSY instead of waiting. `robotd backup` opens these same
+    // files from a second connection while the daemon is live, so without
+    // this a backup during a write simply errors out.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
 }
 

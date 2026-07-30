@@ -264,7 +264,12 @@ pub fn registry_list(
 /// stable across re-execution, so the first execution records what it did
 /// under its intent; crash replay returns the recorded result instead of
 /// resolving the index again (and possibly hitting a different fact).
-fn op_marker(conn: &Connection, intent_id: &str) -> Result<Option<serde_json::Value>, MindError> {
+///
+/// Public because the same hazard applies to any capability whose target is
+/// selected at execution time rather than named in the plan (e.g.
+/// `reminder.cancel_last`, which cancels "the latest" -- a different row
+/// after a crash).
+pub fn op_marker(conn: &Connection, intent_id: &str) -> Result<Option<serde_json::Value>, MindError> {
     let v: Option<String> = conn
         .query_row(
             "SELECT value FROM cell_meta WHERE key = ?1",
@@ -275,7 +280,7 @@ fn op_marker(conn: &Connection, intent_id: &str) -> Result<Option<serde_json::Va
     Ok(v.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
-fn set_op_marker(
+pub fn set_op_marker(
     conn: &Connection,
     intent_id: &str,
     value: &serde_json::Value,
@@ -311,16 +316,41 @@ pub fn forget_by_index(
         |r| r.get(0),
     )?;
     let tx = conn.unchecked_transaction()?;
-    if vec_available(&tx) {
-        tx.execute("DELETE FROM facts_vec WHERE rowid = ?1", params![rowid])?;
+    // Erasing a fact erases its whole supersession CHAIN. The predecessors
+    // are earlier versions of the same knowledge -- "my password is hunter2"
+    // corrected to "...is xyz" -- and they are unreachable from the registry
+    // (every read path filters `status != 'superseded'`). Detaching them
+    // would leave the original text on disk, unaddressable and undeletable,
+    // while the reply claims "deleted, not hidden". The erase right means
+    // the content goes, so we walk the chain backwards and delete all of it.
+    let mut doomed = vec![(fact.id.clone(), rowid)];
+    let mut frontier = vec![fact.id.clone()];
+    while let Some(current) = frontier.pop() {
+        let mut stmt =
+            tx.prepare("SELECT id, rowid FROM facts WHERE superseded_by = ?1")?;
+        let parents = stmt
+            .query_map(params![current], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (id, rid) in parents {
+            frontier.push(id.clone());
+            doomed.push((id, rid));
+        }
     }
-    // superseded history pointing at the erased fact loses its endpoint --
-    // the owner's erase right beats chain completeness
-    tx.execute(
-        "UPDATE facts SET superseded_by = NULL WHERE superseded_by = ?1",
-        params![fact.id],
-    )?;
-    tx.execute("DELETE FROM facts WHERE id = ?1", params![fact.id])?;
+    let vec_on = vec_available(&tx);
+    for (id, rid) in &doomed {
+        if vec_on {
+            tx.execute("DELETE FROM facts_vec WHERE rowid = ?1", params![rid])?;
+        }
+        // break inbound links before the row goes, so the FK never trips
+        tx.execute(
+            "UPDATE facts SET superseded_by = NULL WHERE superseded_by = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
+    }
     tx.execute(
         "INSERT INTO cell_meta(key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -521,6 +551,48 @@ mod tests {
             .unwrap();
         assert_eq!(status, "superseded");
         assert_eq!(by.unwrap(), new.id);
+    }
+
+    /// Regression: forgetting a CORRECTED fact used to detach the original
+    /// and leave it on disk forever -- unreachable from the registry (it is
+    /// `superseded`), so undeletable through any command, while the reply
+    /// claimed "the row is deleted, not hidden". The erase right has to
+    /// reach the whole chain.
+    #[test]
+    fn forget_erases_the_whole_supersession_chain() {
+        let conn = cell();
+        let m1 = msg(&conn, "remember that my password is hunter2");
+        remember(&conn, "my password is hunter2", &m1, "int_1", None).unwrap();
+        let m2 = msg(&conn, "correct fact 1: my password is xyz");
+        correct_by_index(&conn, 1, "my password is xyz", &m2, "int_2", None)
+            .unwrap()
+            .unwrap();
+        // a second correction, so the chain is three deep
+        let m3 = msg(&conn, "correct fact 1: my password is abc");
+        correct_by_index(&conn, 1, "my password is abc", &m3, "int_3", None)
+            .unwrap()
+            .unwrap();
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "two superseded + one live");
+
+        forget_by_index(&conn, 1, "int_forget").unwrap().unwrap();
+
+        // nothing survives -- not the live row, not the superseded originals
+        let remaining: i64 = conn
+            .query_row("SELECT count(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "superseded originals must not be stranded");
+        let leaked: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM facts WHERE content LIKE '%hunter2%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0, "the original secret is still on disk");
+        assert_eq!(count_active(&conn).unwrap(), 0);
     }
 
     #[test]

@@ -40,3 +40,13 @@
 {"text": "how do i cook rice", "expect": "none"}
 {"text": "what's the latest rust version", "expect": "none"}
 {"text": "переведи это на английский", "expect": "none"}
+{"text": "remind me at 18:00 to show reminders", "expect": "remind"}
+{"text": "напомни в 9 посмотреть мои напоминания", "expect": "remind"}
+{"text": "remember that my facts are private", "expect": "remember"}
+{"text": "remind me at 9 to check what date the demo is", "expect": "remind"}
+{"text": "remember that i always ask what time it is", "expect": "remember"}
+{"text": "remind me in 30 minutes to cancel reminder spam", "expect": "remind"}
+{"text": "запомни что мои факты приватные", "expect": "remember"}
+{"text": "can you show me my reminders please", "expect": "none"}
+{"text": "i wonder what time it is", "expect": "none"}
+{"text": "remind me in 5000 hours to x", "expect": "none"}
