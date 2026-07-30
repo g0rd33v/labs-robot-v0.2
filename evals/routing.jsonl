@@ -1,0 +1,42 @@
+{"text": "what time is it?", "expect": "time_now"}
+{"text": "What's the time", "expect": "time_now"}
+{"text": "который час", "expect": "time_now"}
+{"text": "сколько времени", "expect": "time_now"}
+{"text": "what day is it today?", "expect": "time_now"}
+{"text": "who are you?", "expect": "self_meta"}
+{"text": "кто ты", "expect": "self_meta"}
+{"text": "help", "expect": "help"}
+{"text": "помощь", "expect": "help"}
+{"text": "/start", "expect": "help"}
+{"text": "remind me in 10 minutes to stretch", "expect": "remind"}
+{"text": "remind me in 2 hours to call mark", "expect": "remind"}
+{"text": "remind me at 23:59 to wrap up", "expect": "remind"}
+{"text": "remind me tomorrow at 9 to stretch", "expect": "remind"}
+{"text": "напомни через 5 минут выпить воды", "expect": "remind"}
+{"text": "напомни завтра в 10 проверить почту", "expect": "remind"}
+{"text": "my reminders", "expect": "list_reminders"}
+{"text": "список напоминаний", "expect": "list_reminders"}
+{"text": "cancel reminder", "expect": "cancel_reminder"}
+{"text": "отмени напоминание", "expect": "cancel_reminder"}
+{"text": "remember that i drink green tea", "expect": "remember"}
+{"text": "запомни что я пью зелёный чай", "expect": "remember"}
+{"text": "what do you remember about tea?", "expect": "recall"}
+{"text": "что ты помнишь о чае", "expect": "recall"}
+{"text": "what do you remember", "expect": "recall"}
+{"text": "my facts", "expect": "registry_list"}
+{"text": "мои факты", "expect": "registry_list"}
+{"text": "forget fact 2", "expect": "forget_fact"}
+{"text": "забудь факт 1", "expect": "forget_fact"}
+{"text": "correct fact 1: i live in lisbon", "expect": "correct_fact"}
+{"text": "исправь факт 2: я живу в лиссабоне", "expect": "correct_fact"}
+{"text": "invite", "expect": "invite"}
+{"text": "telegram code", "expect": "telegram_code"}
+{"text": "tell me a joke", "expect": "none"}
+{"text": "what is the meaning of life", "expect": "none"}
+{"text": "remind me to call mark", "expect": "none"}
+{"text": "напомни позвонить маме", "expect": "none"}
+{"text": "remember to buy milk", "expect": "none"}
+{"text": "remind me in 99999 minutes to x", "expect": "none"}
+{"text": "how do i cook rice", "expect": "none"}
+{"text": "what's the latest rust version", "expect": "none"}
+{"text": "переведи это на английский", "expect": "none"}

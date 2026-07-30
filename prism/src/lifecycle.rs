@@ -420,20 +420,20 @@ pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt) -> String {
     }
 }
 
-/// A failed receipt for an intent interrupted before any decision was
-/// journaled: no effect ran, and the honest answer is "resend".
-pub(crate) fn interrupted_receipt(intent_id: &str) -> Receipt {
+/// An honest failed receipt with a single deterministic claim. Used by
+/// crash recovery and the zombie sweeper (Q12) -- a closed intent always
+/// says truthfully why it closed.
+pub fn failed_receipt(intent_id: &str, claim: &str, provider: &str) -> Receipt {
     Receipt {
         receipt_id: ids::new_id("rcpt"),
         intent_id: intent_id.into(),
         status: ReceiptStatus::Failed,
         claims: vec![Claim {
-            claim: "interrupted before any decision; no effect was executed; message preserved"
-                .into(),
+            claim: claim.into(),
             evidence: vec![Evidence {
                 kind: "deterministic".into(),
-                provider: "replay".into(),
-                external_id: "crash-recovery".into(),
+                provider: provider.into(),
+                external_id: "honest-failure".into(),
                 hash: String::new(),
                 ts: ids::ts_ms(),
             }],
@@ -441,6 +441,16 @@ pub(crate) fn interrupted_receipt(intent_id: &str) -> Receipt {
         models_used: vec![],
         data_disclosures: vec![],
     }
+}
+
+/// A failed receipt for an intent interrupted before any decision was
+/// journaled: no effect ran, and the honest answer is "resend".
+pub(crate) fn interrupted_receipt(intent_id: &str) -> Receipt {
+    failed_receipt(
+        intent_id,
+        "interrupted before any decision; no effect was executed; message preserved",
+        "replay",
+    )
 }
 
 /// Format a fire-time for human display (local time).

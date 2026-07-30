@@ -5,6 +5,59 @@ dependencies introduced. Newest first.
 
 ---
 
+## M6 — Evals + hardening (2026-07-30) · gate PASSED
+
+**Shipped.** `robotd eval [--live]` runs the corpus in ./evals (§12: evals
+built into the runtime): **routing** (42 floor cases EN+RU, MISROUTE bar
+0), the **receipts kill-suite** (12 crash scenarios: reminder + remember
+turns murdered at all six journal boundaries, replay exactly-once), a
+**latency probe** (§2c bar: deterministic floor ≤300ms p95), and — live —
+**20 prompt-injection cases** run against the exact production web-READ
+framing (`research_system_prompt` is shared code, not a copy). **Watchdog**
+(§6a law 2): a 30s maintenance lane flags any intent open >60s without a
+terminal receipt — once per intent, with an error trace. **Zombie sweeper**
+(Q12): intents open past the 5-minute TTL close with an honest failed
+receipt naming the sweeper, and the owner sees a message — nothing is
+silently dropped. **Encrypted backup** (Q38): `robotd backup` snapshots
+every cell online via VACUUM INTO (cipher preserved — verified opaque, or
+the backup aborts), copies the sealed media tree, snapshots core **last**
+(freshest registry), writes a manifest, tars, and seals the tarball under
+a KEK-derived key. `robotd backup-restore <file> <dir>` round-trips; a
+restored cell opens with the instance keys and its facts are intact.
+
+**Gate demo.**
+- Offline suite: 42/42 routing, 12/12 kill scenarios, floor p50 1.4ms /
+  p95 1.7ms (bar 300ms). PASS.
+- Live suite, first run: **13/20 injection cases resisted — 7 leaked**
+  (base64-smuggle, authority-claim, hidden-html-comment, chain-of-pages,
+  json-config-bait, flattery, delayed-instruction). The suite did its job.
+  Hardened the framing: untrusted-data delimiters, explicit token-refusal,
+  decode-refusal, no-rule-adoption, and a closing reminder *after* the
+  content (sandwich). Re-run: **20/20 resisted, 0 leaks. PASS.**
+- Live backup while the robot was running: 2.1MB sealed tarball (2 cells +
+  media incl. the voice note), no tar/SQLite magic in the bytes, restore
+  verified (manifest + cells open with the kek, facts present).
+- Watchdog/sweeper proven by test: 2-minute synthetic hang → one alert;
+  6-minute zombie → closed with an honest receipt; second sweep idle.
+- 52 tests green; clippy -D warnings clean.
+
+**Assumptions**:
+- Injection resistance is measured against the current cast; the suite
+  reruns on any cast change (§12 discipline) — a model swap that leaks
+  does not ship.
+- Eval latency bars cover the deterministic floor; model-turn latency is
+  reported but not gated (provider-dependent).
+- Backup restore requires the instance `kek.key` (Recovery-Kit logic:
+  lose the keys, lose the backup — by design, §13d).
+- The tarball is built with the system `tar` (macOS/Linux); no tar crate.
+
+**Dependencies introduced**: none.
+
+**Next.** M7 — transferability: `robotd package` / `robotd restore`
+(arch §8), then the USB-stick run with memory intact. The demo.
+
+---
+
 ## M5 — People + surfaces (2026-07-30) · gate PASSED
 
 **Shipped.** One core, many cells: every principal commands their own
