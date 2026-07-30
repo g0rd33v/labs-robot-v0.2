@@ -3,7 +3,7 @@
 //! (decisions Q9).
 
 use crate::config::RobotConfig;
-use crate::robot::{Capabilities, RobotCore};
+use crate::robot::RobotCore;
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::net::SocketAddr;
@@ -37,14 +37,8 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         schema::meta_set(&core, "schema_version", "1")?;
     }
 
-    // owner principal + cell
+    // owner principal (the cell itself opens lazily via RobotCore)
     let owner_principal = ensure_owner(&core)?;
-    let dek = ensure_cell_key(&core, &keys, "owner")?;
-    let owner_cell =
-        trust::cells::open_encrypted(&data_dir.join("cells").join("owner.db"), &dek)
-            .context("opening owner cell")?;
-    prism::init_cell_schema(&owner_cell)?;
-    mind::init_cell_schema(&owner_cell)?;
 
     // tier-3 slug (Q32): stored inside the encrypted core so the URL can be
     // re-printed at every boot; rotation = replacing this row.
@@ -123,37 +117,50 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         }
     };
 
-    // crash replay (arch sec 3): resume every intent the last run left open;
-    // an intent without a terminal receipt is a bug, never a silent drop
-    let router = Capabilities {
-        embedder: embedder.clone(),
-        gateway: gateway.clone(),
-        research: research.clone(),
-        ultra_daily_cap: cfg.hub.ultra_daily_cap,
-    };
-    let replayed = prism::replay::resume_incomplete(&owner_cell, &router)?;
-    if replayed.resumed + replayed.closed_failed > 0 {
-        tracing::info!(
-            "crash replay: {} resumed, {} closed failed",
-            replayed.resumed,
-            replayed.closed_failed
-        );
-    }
-
-    let robot = Arc::new(RobotCore {
-        owner_principal,
-        core,
-        owner_cell: Mutex::new(owner_cell),
-        embedder,
-        gateway,
-        research,
-        ultra_daily_cap: cfg.hub.ultra_daily_cap,
-    });
-    let state = Arc::new(surfaces::WebState::new(robot.clone(), slug_hash));
     let addr = SocketAddr::new(
         cfg.server.host.parse().context("server.host")?,
         cfg.server.port,
     );
+    let public_base = if cfg.server.public_base.is_empty() {
+        format!("http://{addr}")
+    } else {
+        cfg.server.public_base.clone()
+    };
+
+    let robot = Arc::new(RobotCore::new(
+        owner_principal,
+        core,
+        keys,
+        data_dir.to_path_buf(),
+        embedder,
+        gateway,
+        research,
+        cfg.hub.ultra_daily_cap,
+        public_base,
+        cfg.robot.name.clone(),
+    ));
+
+    // crash replay (arch sec 3): resume every intent the last run left open
+    // in every principal's cell; an intent without a terminal receipt is a
+    // bug, never a silent drop
+    let router = robot.router();
+    for principal in robot.principals_active()? {
+        let handle = robot.cell(principal)?;
+        let cell = handle
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
+        let replayed = prism::replay::resume_incomplete(&cell, &router)?;
+        if replayed.resumed + replayed.closed_failed > 0 {
+            tracing::info!(
+                "crash replay (principal {principal}): {} resumed, {} closed failed",
+                replayed.resumed,
+                replayed.closed_failed
+            );
+        }
+    }
+
+    let state = Arc::new(surfaces::WebState::new(robot.clone(), slug_hash));
     Ok(BootResult {
         robot,
         state,
@@ -181,26 +188,6 @@ fn ensure_owner(core: &Connection) -> anyhow::Result<i64> {
     Ok(core.last_insert_rowid())
 }
 
-fn ensure_cell_key(core: &Connection, keys: &KeyChain, cell_id: &str) -> anyhow::Result<[u8; 32]> {
-    let existing: Option<(Vec<u8>, Vec<u8>)> = core
-        .query_row(
-            "SELECT wrapped_dek, nonce FROM cell_keys WHERE cell_id = ?1",
-            params![cell_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if let Some((wrapped, nonce)) = existing {
-        return Ok(keys.unwrap_dek(&nonce, &wrapped)?);
-    }
-    let dek = KeyChain::new_dek();
-    let (nonce, wrapped) = keys.wrap_dek(&dek)?;
-    core.execute(
-        "INSERT INTO cell_keys(cell_id, wrapped_dek, nonce, created_at) VALUES (?1,?2,?3,?4)",
-        params![cell_id, wrapped, nonce, trust::ids::ts_ms()],
-    )?;
-    Ok(dek)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +203,7 @@ mod tests {
             server: ServerSection {
                 host: "127.0.0.1".into(),
                 port: 0,
+                public_base: String::new(),
             },
             mind: MindSection {
                 embeddings: false, // hermetic tests: no downloads
@@ -237,10 +225,11 @@ mod tests {
         assert!(boot.slug_url.starts_with("http://127.0.0.1:0/a/"));
 
         // one full floor turn through the robot (deterministic, no network)
+        let owner = boot.robot.owner_principal;
         let reply = boot
             .state
             .robot
-            .handle_message("what time is it?".into())
+            .handle_message(owner, "what time is it?".into())
             .unwrap();
         assert!(reply.contains("it's"), "floor time answer expected: {reply}");
 
@@ -264,17 +253,55 @@ mod tests {
         assert!(trust::boundary::verify_chain(&core).unwrap());
 
         // the turn is journaled with a receipt, and history serves it
-        let dek = ensure_cell_key(&core, &keys, "owner").unwrap();
-        let cell =
-            trust::cells::open_encrypted(&dir.join("cells").join("owner.db"), &dek).unwrap();
-        let kinds = prism::journal::kinds_for_latest_intent(&cell).unwrap();
-        assert_eq!(kinds.first().map(String::as_str), Some("intent_open"));
-        assert_eq!(kinds.last().map(String::as_str), Some("intent_close"));
-        assert!(kinds.iter().any(|k| k == "receipt"));
-        assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
-        assert_eq!(mind::message_count(&cell).unwrap(), 2);
-        let history = boot.state.robot.history(0).unwrap();
+        let handle = boot.robot.cell(owner).unwrap();
+        {
+            let cell = handle.conn.lock().unwrap();
+            let kinds = prism::journal::kinds_for_latest_intent(&cell).unwrap();
+            assert_eq!(kinds.first().map(String::as_str), Some("intent_open"));
+            assert_eq!(kinds.last().map(String::as_str), Some("intent_close"));
+            assert!(kinds.iter().any(|k| k == "receipt"));
+            assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
+            assert_eq!(mind::message_count(&cell).unwrap(), 2);
+        }
+        let history = boot.state.robot.history(owner, 0).unwrap();
         assert_eq!(history.len(), 2);
+
+        // M5: invite -> member cell isolation (law #2 as files)
+        let invite_reply = boot
+            .state
+            .robot
+            .handle_message(owner, "invite".into())
+            .unwrap();
+        assert!(invite_reply.contains("/i/"), "{invite_reply}");
+        let token = invite_reply.split("/i/").nth(1).unwrap().trim().to_string();
+        let (member, name) = boot.state.robot.accept_invite(&token).unwrap();
+        assert!(name.starts_with("member-"));
+        assert_ne!(member, owner);
+        // the same invite cannot be redeemed twice
+        assert!(boot.state.robot.accept_invite(&token).is_err());
+        // the member's history is empty -- not the owner's
+        assert!(boot.state.robot.history(member, 0).unwrap().is_empty());
+        // owner remembers something; the member's cell must not see it
+        boot.state
+            .robot
+            .handle_message(owner, "remember that the launch code is 4242".into())
+            .unwrap();
+        let member_recall = boot
+            .state
+            .robot
+            .handle_message(member, "what do you remember".into())
+            .unwrap();
+        assert!(
+            !member_recall.contains("4242"),
+            "cell isolation broken: {member_recall}"
+        );
+        // and the member's cell is its own encrypted file on disk
+        let member_files: Vec<_> = std::fs::read_dir(dir.join("cells"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("member"))
+            .collect();
+        assert!(!member_files.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

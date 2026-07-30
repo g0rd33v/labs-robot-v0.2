@@ -5,6 +5,7 @@ mod boot;
 mod config;
 mod robot;
 mod scheduler;
+mod telegram;
 
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -30,6 +31,17 @@ async fn main() -> anyhow::Result<()> {
 
     // the commitment ledger's background lane: due reminders fire
     scheduler::spawn(booted.robot.clone());
+
+    // the telegram surface, behind its flag: token present = on, absent = fine
+    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
+        if !token.trim().is_empty() {
+            let tg = std::sync::Arc::new(hub::Telegram::new(
+                token.trim().to_string(),
+                Some(booted.robot.core.clone()),
+            ));
+            telegram::spawn(booted.robot.clone(), tg);
+        }
+    }
 
     tracing::info!(
         "robot '{}' is up; data in {}",

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 fastembed = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

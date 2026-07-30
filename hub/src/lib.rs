@@ -11,10 +11,12 @@
 pub mod escalation;
 pub mod gateway;
 pub mod research;
+pub mod telegram;
 pub mod verdicts;
 
 pub use gateway::{BoundarySink, Cast, ChatApi, ChatOut, GatewayConfig, ModelGateway, Msg, Role, UreqApi};
 pub use research::Research;
+pub use telegram::{Telegram, TgUpdate};
 pub use verdicts::GatewayVerdicts;
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};

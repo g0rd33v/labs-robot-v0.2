@@ -250,6 +250,16 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
                 serde_json::json!({ "index": index, "content": content }),
                 Effect::ReversibleWrite,
             )],
+            FloorMatch::Invite => vec![step(
+                "member.invite",
+                serde_json::json!({}),
+                Effect::ReversibleWrite,
+            )],
+            FloorMatch::TelegramCode => vec![step(
+                "telegram.bind_code",
+                serde_json::json!({}),
+                Effect::ReversibleWrite,
+            )],
         },
         Decision::Verdict { v } => {
             // the verdict routes; capabilities execute. chitchat with a

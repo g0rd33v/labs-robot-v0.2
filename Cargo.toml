@@ -39,6 +39,10 @@ fastembed = "5"
 # the gateway's HTTP client (OpenRouter, Serper, web fetch) -- small, sync,
 # rustls; every call passes through hub and is boundary-logged (law #3)
 ureq = { version = "2", features = ["json"] }
+# SSE message-push for the built-in chat (BroadcastStream wrapper)
+tokio-stream = { version = "0.1", features = ["sync"] }
+# audio bytes -> base64 for the STT seat's input_audio content parts
+base64 = "0.22"
 # vector search inside the encrypted cell (Q20, arch sec 13: sqlite-vec)
 sqlite-vec = "0.1"
 # key material, tokens, ids

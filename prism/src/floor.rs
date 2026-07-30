@@ -36,6 +36,10 @@ pub enum FloorMatch {
     ForgetFact { index: usize },
     /// supersede fact N with new content
     CorrectFact { index: usize, content: String },
+    /// mint a one-time member invite link (owner only)
+    Invite,
+    /// mint a telegram bind code (owner only)
+    TelegramCode,
 }
 
 /// Scan one utterance. `now` is injected for testability.
@@ -107,6 +111,21 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         || joined.starts_with("отмена напоминания")
     {
         return Some(FloorMatch::CancelReminder);
+    }
+
+    // invites + telegram binding (owner-side commands; the router enforces
+    // the role, the floor only recognizes the words)
+    if matches!(
+        joined.as_str(),
+        "invite" | "new invite" | "invite someone" | "пригласи" | "новый инвайт"
+    ) {
+        return Some(FloorMatch::Invite);
+    }
+    if matches!(
+        joined.as_str(),
+        "telegram code" | "telegram" | "код телеграм" | "телеграм код"
+    ) {
+        return Some(FloorMatch::TelegramCode);
     }
 
     // registry list

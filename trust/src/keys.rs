@@ -18,6 +18,7 @@ use std::path::Path;
 pub const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 
+#[derive(Clone)]
 pub struct KeyChain {
     kek: [u8; KEY_LEN],
 }

@@ -138,6 +138,17 @@ pub trait ChatApi: Send + Sync {
         body: &serde_json::Value,
         timeout_ms: u64,
     ) -> Result<serde_json::Value, HubError>;
+
+    /// The router's audio endpoint (multipart). Default: unsupported.
+    fn post_transcription(
+        &self,
+        _model: &str,
+        _bytes: &[u8],
+        _format: &str,
+        _timeout_ms: u64,
+    ) -> Result<serde_json::Value, HubError> {
+        Err(HubError::Gateway("transcription transport unavailable".into()))
+    }
 }
 
 /// OpenRouter over ureq. The API key lives in memory only, injected into
@@ -179,6 +190,46 @@ impl ChatApi for UreqApi {
             .map_err(|e| HubError::Gateway(format!("{model}: {e}")))?;
         resp.into_json()
             .map_err(|e| HubError::Gateway(format!("{model}: bad json: {e}")))
+    }
+
+    fn post_transcription(
+        &self,
+        model: &str,
+        bytes: &[u8],
+        format: &str,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, HubError> {
+        // hand-rolled multipart: no new dependency for one endpoint
+        let boundary = format!("----bender{}", trust::ids::random_hex(12));
+        let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + 512);
+        let part = |name: &str, value: &str| {
+            format!(
+                "--{boundary}\r\ncontent-disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+        };
+        body.extend_from_slice(part("model", model).as_bytes());
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"; \
+                 filename=\"audio.{format}\"\r\ncontent-type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = self
+            .agent
+            .post(&format!("{}/audio/transcriptions", self.base_url))
+            .set("authorization", &format!("Bearer {}", self.api_key))
+            .set(
+                "content-type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .timeout(Duration::from_millis(timeout_ms))
+            .send_bytes(&body)
+            .map_err(|e| HubError::Gateway(format!("{model} (audio): {e}")))?;
+        resp.into_json()
+            .map_err(|e| HubError::Gateway(format!("{model} (audio): bad json: {e}")))
     }
 }
 
@@ -294,6 +345,53 @@ impl ModelGateway {
             }
         }
         Err(last_err)
+    }
+
+    /// The STT seat (sec 6a: parakeet via the router's audio endpoint):
+    /// multipart to /audio/transcriptions first, the input_audio chat shape
+    /// as the fallback. Boundary-logged like every other call.
+    pub fn transcribe(&self, bytes: &[u8], format: &str) -> Result<ChatOut, HubError> {
+        let model = self.cast.stt.clone();
+        self.log(
+            Direction::Out,
+            &model,
+            "stt",
+            &format!("audio:{format}:{}bytes", bytes.len()),
+        );
+        match self
+            .api
+            .post_transcription(&model, bytes, format, self.cfg.answer_timeout_ms)
+        {
+            Ok(resp) => {
+                let resp_str = resp.to_string();
+                self.log(Direction::In, &model, "stt", &resp_str);
+                let text = resp["text"]
+                    .as_str()
+                    .ok_or_else(|| HubError::Gateway(format!("{model}: no transcript")))?
+                    .to_string();
+                return Ok(ChatOut {
+                    content: text,
+                    model,
+                });
+            }
+            Err(e) => tracing::warn!("audio endpoint failed, trying chat shape: {e}"),
+        }
+        // fallback: input_audio content part through chat completions
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text",
+                     "text": "transcribe this audio verbatim in its original language. output only the transcript."},
+                    {"type": "input_audio", "input_audio": {"data": b64, "format": format}}
+                ]
+            }],
+            "max_tokens": 800,
+            "temperature": 0.0,
+        });
+        self.attempt(&model, Role::Stt, &body, self.cfg.answer_timeout_ms)
     }
 
     /// Q19 hedging for the verdict class: if the primary hasn't answered by

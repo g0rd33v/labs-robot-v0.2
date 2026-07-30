@@ -17,37 +17,41 @@
     font-weight: 600; letter-spacing: .04em; color: #7ee787;
   }
   header small { color: #8b949e; font-weight: 400; margin-left: 8px; }
+  header a { color: #58a6ff; float: right; text-decoration: none; font-weight: 400; font-size: 13px; }
   #log { flex: 1; overflow-y: auto; padding: 16px; }
   .msg { max-width: 72ch; margin: 0 0 10px; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: break-word; }
   .in    { background: #1f6feb22; border: 1px solid #1f6feb55; margin-left: auto; }
   .out   { background: #16191f;   border: 1px solid #21262d; }
   .who { font-size: 11px; color: #8b949e; margin-bottom: 2px; }
   form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #21262d; }
-  input {
+  input[type=text] {
     flex: 1; background: #010409; color: #e6edf3; border: 1px solid #30363d;
     border-radius: 8px; padding: 10px 12px; font: inherit; outline: none;
   }
-  input:focus { border-color: #1f6feb; }
-  button {
+  input[type=text]:focus { border-color: #1f6feb; }
+  button, label.up {
     background: #238636; color: #fff; border: 0; border-radius: 8px;
     padding: 10px 18px; font: inherit; cursor: pointer;
   }
+  label.up { background: #21262d; padding: 10px 14px; }
   button:disabled { opacity: .5; }
   #thinking { display: none; color: #8b949e; font-size: 12px; padding: 0 16px 6px; }
 </style>
 </head>
 <body>
-<header>bender<small>robot v0.2</small></header>
+<header>bender<small>robot v0.2</small><a href="/dash">dashboard</a></header>
 <div id="log"></div>
 <div id="thinking">thinking&hellip;</div>
 <form id="f">
-  <input id="t" autocomplete="off" placeholder="say something to your robot" autofocus>
+  <label class="up" title="voice note or file">&#128206;<input id="file" type="file" hidden></label>
+  <input id="t" type="text" autocomplete="off" placeholder="say something to your robot" autofocus>
   <button id="b">send</button>
 </form>
 <script>
   const log = document.getElementById('log');
   const input = document.getElementById('t');
   const btn = document.getElementById('b');
+  const fileInput = document.getElementById('file');
   const thinking = document.getElementById('thinking');
   let lastTs = 0;
   const seen = new Set();
@@ -73,9 +77,13 @@
     try {
       const r = await fetch('/api/history?after=' + lastTs);
       if (!r.ok) return;
-      const rows = await r.json();
-      rows.forEach(render);
-    } catch (_) { /* robot restarting; next poll catches up */ }
+      (await r.json()).forEach(render);
+    } catch (_) { /* robot restarting; next event catches up */ }
+  }
+
+  function busy(on) {
+    btn.disabled = on;
+    thinking.style.display = on ? 'block' : 'none';
   }
 
   document.getElementById('f').onsubmit = async (e) => {
@@ -83,8 +91,7 @@
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
-    btn.disabled = true;
-    thinking.style.display = 'block';
+    busy(true);
     try {
       const r = await fetch('/api/message', {
         method: 'POST',
@@ -92,18 +99,41 @@
         body: JSON.stringify({ text }),
       });
       if (!r.ok) render({ ts: lastTs, direction: 'out', content: '[error ' + r.status + ']' });
-      await poll(); // server truth renders both sides
+      await poll();
     } catch (err) {
       render({ ts: lastTs, direction: 'out', content: '[unreachable: ' + err + ']' });
     } finally {
-      btn.disabled = false;
-      thinking.style.display = 'none';
+      busy(false);
       input.focus();
     }
   };
 
-  poll();                 // history on load
-  setInterval(poll, 4000); // and the scheduler's reminders arrive live
+  fileInput.onchange = async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    busy(true);
+    try {
+      const r = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'x-filename': encodeURIComponent(file.name) },
+        body: file,
+      });
+      if (!r.ok) render({ ts: lastTs, direction: 'out', content: '[upload error ' + r.status + ']' });
+      await poll();
+    } finally {
+      busy(false);
+      fileInput.value = '';
+    }
+  };
+
+  // SSE push: replies and scheduler fires arrive the moment they exist;
+  // a slow poll stays on as the fallback when the stream reconnects.
+  try {
+    const es = new EventSource('/api/stream');
+    es.onmessage = () => poll();
+  } catch (_) {}
+  poll();
+  setInterval(poll, 15000);
 </script>
 </body>
 </html>

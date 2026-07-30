@@ -1,7 +1,7 @@
-//! The reminder scheduler: the commitment ledger's future axis made real.
-//! Due reminders fire through the transactional outbox (Q11) as their own
-//! journaled system intents with receipts -- the Second Law (never silently
-//! drop a request) as a background lane.
+//! The reminder scheduler: the commitment ledger's future axis made real,
+//! now per principal -- every member's cell gets its own fires. Due
+//! reminders fire through the transactional outbox (Q11) as journaled
+//! system intents with receipts; the Second Law as a background lane.
 
 use crate::robot::RobotCore;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ pub fn spawn(robot: Arc<RobotCore>) {
         loop {
             tick.tick().await;
             let robot = robot.clone();
-            let fired = tokio::task::spawn_blocking(move || fire_due(&robot)).await;
+            let fired = tokio::task::spawn_blocking(move || fire_all_due(&robot)).await;
             if let Ok(Err(e)) = fired {
                 tracing::error!("scheduler: {e:#}");
             }
@@ -23,26 +23,33 @@ pub fn spawn(robot: Arc<RobotCore>) {
     });
 }
 
-fn fire_due(robot: &RobotCore) -> anyhow::Result<usize> {
-    let now = trust::ids::ts_ms();
-    let mut count = 0;
+fn fire_all_due(robot: &RobotCore) -> anyhow::Result<usize> {
+    let mut total = 0;
+    for principal in robot.principals_active()? {
+        total += fire_due_for(robot, principal)?;
+    }
+    Ok(total)
+}
 
+fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
+    let now = trust::ids::ts_ms();
+    let handle = robot.cell(principal)?;
     let due = {
-        let cell = robot
-            .owner_cell
+        let cell = handle
+            .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
         mind::reminders::due_active(&cell, now)?
     };
+    let mut count = 0;
 
     for rem in due {
         let text = format!("⏰ reminder: {}", rem.about);
         {
-            let cell = robot
-                .owner_cell
+            let cell = handle
+                .conn
                 .lock()
                 .map_err(|_| anyhow::anyhow!("cell lock poisoned"))?;
-            // a system intent of its own: journaled, receipted, closed
             let intent_id = trust::ids::new_id("int");
             prism::journal::intent_open(
                 &cell,
@@ -55,7 +62,6 @@ fn fire_due(robot: &RobotCore) -> anyhow::Result<usize> {
                 })
                 .to_string(),
             )?;
-            // the delivery is an effect: through the outbox, deduped
             let (effect_id, _) =
                 prism::outbox::enqueue(&cell, &intent_id, "surface:chat", &text)?;
             mind::reminders::mark_fired(&cell, &rem.id)?;
@@ -91,13 +97,11 @@ fn fire_due(robot: &RobotCore) -> anyhow::Result<usize> {
                 .to_string(),
                 None,
             )?;
-            // delivered into the message store; the chat poll renders it
             mind::record_message(&cell, "out", "chat", &text)?;
             prism::outbox::mark(&cell, &effect_id, "sent", None)?;
             prism::outbox::mark(&cell, &effect_id, "confirmed", None)?;
             prism::journal::intent_close(&cell, &intent_id, receipt.status.as_str())?;
         }
-        // the crossing: the reminder text leaves the process via the chat
         {
             let core = robot
                 .core
@@ -117,7 +121,8 @@ fn fire_due(robot: &RobotCore) -> anyhow::Result<usize> {
                 },
             );
         }
-        tracing::info!("reminder fired: {}", rem.about);
+        robot.notify(principal);
+        tracing::info!("reminder fired for principal {principal}: {}", rem.about);
         count += 1;
     }
     Ok(count)
@@ -126,60 +131,68 @@ fn fire_due(robot: &RobotCore) -> anyhow::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
-    use std::sync::Mutex;
+    use rusqlite::params;
 
-    fn robot_with_cell() -> (Arc<RobotCore>, std::path::PathBuf) {
+    fn test_robot() -> (Arc<RobotCore>, std::path::PathBuf) {
         mind::install_vec();
         let dir = std::env::temp_dir().join(format!("sched-{}", trust::ids::random_hex(6)));
-        std::fs::create_dir_all(&dir).unwrap();
-        let key = trust::keys::KeyChain::new_dek();
-        let core = trust::cells::open_encrypted(&dir.join("core.db"), &key).unwrap();
+        std::fs::create_dir_all(dir.join("cells")).unwrap();
+        std::fs::create_dir_all(dir.join("media")).unwrap();
+        let keys = trust::keys::KeyChain::load_or_create(&dir.join("kek.key")).unwrap();
+        let core =
+            trust::cells::open_encrypted(&dir.join("core.db"), &keys.core_db_key()).unwrap();
         trust::schema::init_core(&core).unwrap();
-        let cell = trust::cells::open_encrypted(&dir.join("owner.db"), &key).unwrap();
-        prism::init_cell_schema(&cell).unwrap();
-        mind::init_cell_schema(&cell).unwrap();
-        let robot = Arc::new(RobotCore {
-            owner_principal: 1,
-            core: Arc::new(Mutex::new(core)),
-            owner_cell: Mutex::new(cell),
-            embedder: None,
-            gateway: None,
-            research: None,
-            ultra_daily_cap: 0,
-        });
+        core.execute(
+            "INSERT INTO principals(kind, display_name, cell_id, created_at) \
+             VALUES ('owner','owner','owner',?1)",
+            params![trust::ids::ts_ms()],
+        )
+        .unwrap();
+        let owner = core.last_insert_rowid();
+        let robot = Arc::new(RobotCore::new(
+            owner,
+            Arc::new(std::sync::Mutex::new(core)),
+            keys,
+            dir.clone(),
+            None,
+            None,
+            None,
+            0,
+            "http://127.0.0.1:0".into(),
+            "bender-test".into(),
+        ));
         (robot, dir)
-    }
-
-    fn cell_do<T>(robot: &RobotCore, f: impl FnOnce(&Connection) -> T) -> T {
-        let cell = robot.owner_cell.lock().unwrap();
-        f(&cell)
     }
 
     #[test]
     fn due_reminders_fire_once_with_receipts() {
-        let (robot, dir) = robot_with_cell();
-        cell_do(&robot, |c| {
-            mind::reminders::create(c, "int_past", trust::ids::ts_ms() - 1000, "call mark")
+        let (robot, dir) = test_robot();
+        let owner = robot.owner_principal;
+        let handle = robot.cell(owner).unwrap();
+        {
+            let cell = handle.conn.lock().unwrap();
+            mind::reminders::create(&cell, "int_past", trust::ids::ts_ms() - 1000, "call mark")
                 .unwrap();
-            mind::reminders::create(c, "int_future", trust::ids::ts_ms() + 3_600_000, "later")
-                .unwrap();
-        });
+            mind::reminders::create(
+                &cell,
+                "int_future",
+                trust::ids::ts_ms() + 3_600_000,
+                "later",
+            )
+            .unwrap();
+        }
 
-        assert_eq!(fire_due(&robot).unwrap(), 1); // only the due one
-        assert_eq!(fire_due(&robot).unwrap(), 0); // and only once
+        assert_eq!(fire_all_due(&robot).unwrap(), 1);
+        assert_eq!(fire_all_due(&robot).unwrap(), 0);
 
-        cell_do(&robot, |c| {
-            // fired, not active; the future one untouched
-            assert_eq!(mind::reminders::count_active(c).unwrap(), 1);
-            // delivered to the message store
-            let msgs = mind::messages_after(c, 0, 10).unwrap();
-            assert_eq!(msgs.len(), 1);
-            assert!(msgs[0].2.contains("call mark"));
-            // journaled with a terminal receipt, intent closed
-            assert!(prism::journal::open_intents(c).unwrap().is_empty());
-            assert_eq!(prism::receipts::count(c).unwrap(), 1);
-        });
+        let cell = handle.conn.lock().unwrap();
+        assert_eq!(mind::reminders::count_active(&cell).unwrap(), 1);
+        let msgs = mind::messages_after(&cell, 0, 10).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].2.contains("call mark"));
+        assert!(prism::journal::open_intents(&cell).unwrap().is_empty());
+        assert_eq!(prism::receipts::count(&cell).unwrap(), 1);
+        drop(cell);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

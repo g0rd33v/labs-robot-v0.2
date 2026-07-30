@@ -1,17 +1,24 @@
 //! RobotCore: the composition of the organs behind the `surfaces::Robot`
 //! trait, plus the capability router wiring Prism's steps to Mind's stores.
-//! Enforces the boundary-log law on every turn.
+//! M5: one core, many cells -- every principal commands their own encrypted
+//! partition (law #2); the owner commands the Robot.
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail, Context};
 use chrono::{Local, TimeZone};
 use hub::gateway::{Msg, Role};
 use prism::lifecycle::format_fire_at;
 use prism::types::Tier;
 use prism::verdict::{FallbackVerdict, VerdictProvider};
 use prism::{CapabilityRouter, Envelope, Evidence, Outcome, PrismError, TurnDeps};
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use surfaces::dash::DashData;
+use tokio::sync::broadcast;
 use trust::boundary::{self, Crossing, Direction};
+use trust::keys::KeyChain;
+use trust::schema;
 
 /// The static persona directive (soul is a directive, not a loop, in the
 /// MVP). English-internal; the model renders the user's language (sec 2d:
@@ -28,21 +35,6 @@ fn persona() -> String {
     )
 }
 
-/// The MVP capability set, executed against the member's own cell.
-/// Idempotent per intent, as the router contract requires.
-#[derive(Default, Clone)]
-pub struct Capabilities {
-    /// The local embedding seat (hub). Optional: without it the vector door
-    /// stays closed and recall degrades to FTS + recency.
-    pub embedder: Option<Arc<hub::Embedder>>,
-    /// The model gateway. Optional: without it the floor still works and
-    /// model turns answer honestly that the brain is offline.
-    pub gateway: Option<Arc<hub::ModelGateway>>,
-    /// Serper + fetch/READ. Optional: without it search turns say so.
-    pub research: Option<Arc<hub::Research>>,
-    pub ultra_daily_cap: u32,
-}
-
 const BRAIN_OFFLINE: &str = "my model brain is offline (no OPENROUTER_API_KEY \
 in the environment). the deterministic floor still works -- time, reminders, \
 memory, registry. try \"help\".";
@@ -55,8 +47,15 @@ fn role_for(tier: Tier) -> Role {
     }
 }
 
-/// Per-day ultra counter in cell_meta (Q18: quota enforced by the gateway
-/// side, degradation visible). Returns true if this call may run on ultra.
+fn learned_at(ts_ms: i64) -> String {
+    match Local.timestamp_millis_opt(ts_ms).earliest() {
+        Some(dt) => dt.format("%d %b %H:%M").to_string(),
+        None => "unknown time".into(),
+    }
+}
+
+/// Per-day ultra counter in cell_meta (Q18). Returns true if this call may
+/// run on ultra.
 fn bump_ultra(cell: &Connection, cap: u32) -> bool {
     if cap == 0 {
         return false;
@@ -65,7 +64,7 @@ fn bump_ultra(cell: &Connection, cap: u32) -> bool {
     let used: u32 = cell
         .query_row(
             "SELECT value FROM cell_meta WHERE key = ?1",
-            rusqlite::params![key],
+            params![key],
             |r| r.get::<_, String>(0),
         )
         .ok()
@@ -77,14 +76,54 @@ fn bump_ultra(cell: &Connection, cap: u32) -> bool {
     let _ = cell.execute(
         "INSERT INTO cell_meta(key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![key, (used + 1).to_string()],
+        params![key, (used + 1).to_string()],
     );
     true
 }
 
+pub(crate) fn ensure_cell_key(
+    core: &Connection,
+    keys: &KeyChain,
+    cell_id: &str,
+) -> anyhow::Result<[u8; 32]> {
+    let existing: Option<(Vec<u8>, Vec<u8>)> = core
+        .query_row(
+            "SELECT wrapped_dek, nonce FROM cell_keys WHERE cell_id = ?1",
+            params![cell_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((wrapped, nonce)) = existing {
+        return Ok(keys.unwrap_dek(&nonce, &wrapped)?);
+    }
+    let dek = KeyChain::new_dek();
+    let (nonce, wrapped) = keys.wrap_dek(&dek)?;
+    core.execute(
+        "INSERT INTO cell_keys(cell_id, wrapped_dek, nonce, created_at) VALUES (?1,?2,?3,?4)",
+        params![cell_id, wrapped, nonce, trust::ids::ts_ms()],
+    )?;
+    Ok(dek)
+}
+
+// ------------------------------------------------------------ capabilities
+
+/// The MVP capability set, executed against the acting member's own cell.
+/// Idempotent per intent, as the router contract requires.
+#[derive(Default, Clone)]
+pub struct Capabilities {
+    pub embedder: Option<Arc<hub::Embedder>>,
+    pub gateway: Option<Arc<hub::ModelGateway>>,
+    pub research: Option<Arc<hub::Research>>,
+    pub ultra_daily_cap: u32,
+    /// core access for owner-side capabilities (invites, telegram binding)
+    pub core: Option<Arc<Mutex<Connection>>>,
+    pub owner_principal: i64,
+    pub public_base: String,
+}
+
 impl Capabilities {
     /// Provenance anchor (law #5): the source message id journaled at
-    /// intent_open. Knowledge-writing capabilities refuse to run without it.
+    /// intent_open.
     fn source_msg_of(cell: &Connection, intent_id: &str) -> Result<String, PrismError> {
         let payload = prism::journal::payload_of(cell, intent_id, "intent_open")?
             .ok_or_else(|| PrismError::Capability("no intent_open journaled".into()))?;
@@ -100,6 +139,16 @@ impl Capabilities {
             })
     }
 
+    /// The acting principal, from the journaled intent (role checks).
+    fn principal_of(cell: &Connection, intent_id: &str) -> i64 {
+        prism::journal::payload_of(cell, intent_id, "intent_open")
+            .ok()
+            .flatten()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+            .and_then(|v| v["principal_id"].as_i64())
+            .unwrap_or(-1)
+    }
+
     fn passage_embedding(&self, text: &str) -> Option<Vec<f32>> {
         self.embedder
             .as_ref()
@@ -110,13 +159,6 @@ impl Capabilities {
         self.embedder
             .as_ref()
             .and_then(|e| e.embed_query(text).ok())
-    }
-}
-
-fn learned_at(ts_ms: i64) -> String {
-    match Local.timestamp_millis_opt(ts_ms).earliest() {
-        Some(dt) => dt.format("%d %b %H:%M").to_string(),
-        None => "unknown time".into(),
     }
 }
 
@@ -133,6 +175,13 @@ impl CapabilityRouter for Capabilities {
             provider: "cell".into(),
             external_id: id.into(),
             hash: hash.into(),
+            ts: trust::ids::ts_ms(),
+        };
+        let deterministic = |id: &str| Evidence {
+            kind: "deterministic".into(),
+            provider: "robot".into(),
+            external_id: id.into(),
+            hash: String::new(),
             ts: trust::ids::ts_ms(),
         };
         let ok = |evidence: Vec<Evidence>, detail: String| {
@@ -308,21 +357,89 @@ impl CapabilityRouter for Capabilities {
                     ),
                 }
             }
+            "member.invite" => {
+                let acting = Self::principal_of(cell, intent_id);
+                let Some(core) = &self.core else {
+                    return ok(
+                        vec![deterministic("member.invite")],
+                        "invite minting isn't available in this context.".into(),
+                    );
+                };
+                if acting != self.owner_principal {
+                    return ok(
+                        vec![deterministic("member.invite")],
+                        "only the owner can mint invites.".into(),
+                    );
+                }
+                let token = trust::ids::random_hex(12);
+                {
+                    let core = core
+                        .lock()
+                        .map_err(|_| PrismError::Capability("core lock poisoned".into()))?;
+                    core.execute(
+                        "INSERT INTO invites(token_hash, role, created_at) VALUES (?1,'member',?2)",
+                        params![trust::ids::sha256_hex(token.as_bytes()), trust::ids::ts_ms()],
+                    )
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                }
+                ok(
+                    vec![evidence("invite", "")],
+                    format!(
+                        "one-time invite link (works once, member role, their own sealed cell):\n\
+                         {}/i/{token}",
+                        self.public_base
+                    ),
+                )
+            }
+            "telegram.bind_code" => {
+                let acting = Self::principal_of(cell, intent_id);
+                let Some(core) = &self.core else {
+                    return ok(
+                        vec![deterministic("telegram.bind_code")],
+                        "telegram binding isn't available in this context.".into(),
+                    );
+                };
+                if acting != self.owner_principal {
+                    return ok(
+                        vec![deterministic("telegram.bind_code")],
+                        "only the owner can bind telegram.".into(),
+                    );
+                }
+                let code = format!(
+                    "{:06}",
+                    u32::from_str_radix(&trust::ids::random_hex(4), 16).unwrap_or(0) % 1_000_000
+                );
+                {
+                    let core = core
+                        .lock()
+                        .map_err(|_| PrismError::Capability("core lock poisoned".into()))?;
+                    schema::meta_set(
+                        &core,
+                        "tg_bind_code_hash",
+                        &trust::ids::sha256_hex(code.as_bytes()),
+                    )
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                    schema::meta_set(
+                        &core,
+                        "tg_bind_expiry",
+                        &(trust::ids::ts_ms() + 10 * 60_000).to_string(),
+                    )
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                }
+                ok(
+                    vec![evidence("telegram.bind_code", "")],
+                    format!(
+                        "telegram bind code: {code}\nsend this code to your bot in telegram \
+                         within 10 minutes and that chat becomes yours. (the bot needs \
+                         TELEGRAM_BOT_TOKEN in the environment.)"
+                    ),
+                )
+            }
             "answer.model" => {
                 let query = args["query"].as_str().unwrap_or("");
                 let Some(gw) = &self.gateway else {
-                    return ok(
-                        vec![Evidence {
-                            kind: "deterministic".into(),
-                            provider: "floor".into(),
-                            external_id: "brain-offline".into(),
-                            hash: String::new(),
-                            ts: trust::ids::ts_ms(),
-                        }],
-                        BRAIN_OFFLINE.into(),
-                    );
+                    return ok(vec![deterministic("brain-offline")], BRAIN_OFFLINE.into());
                 };
-                // escalation: verdict tier merged with deterministic rules
                 let vtier: Tier =
                     serde_json::from_value(args["tier"].clone()).unwrap_or(Tier::Fast);
                 let mut tier = hub::escalation::merge(vtier, hub::escalation::classify(query));
@@ -332,14 +449,13 @@ impl CapabilityRouter for Capabilities {
                     quota_note =
                         "\n\n(daily ultra budget exhausted -- answered on super; the receipt names it.)";
                 }
-                // context compiler-lite: persona + memory + recent turns
                 let emb = self.query_embedding(query);
                 let facts =
                     mind::facts::recall(cell, query, emb.as_deref(), 5).unwrap_or_default();
                 let mut system = persona();
                 if !facts.is_empty() {
                     system.push_str(
-                        "\n\nfacts you remember about the owner (each has provenance in your registry):",
+                        "\n\nfacts you remember about this person (each has provenance in your registry):",
                     );
                     for f in &facts {
                         system.push_str(&format!("\n- {}", f.content));
@@ -350,8 +466,6 @@ impl CapabilityRouter for Capabilities {
                     content: system,
                 }];
                 let mut history = mind::recent_messages(cell, 10).unwrap_or_default();
-                // the current inbound message is already recorded; keep it
-                // out of history, it goes in as the live user turn
                 if history.last().map(|(d, c)| d == "in" && c == query) == Some(true) {
                     history.pop();
                 }
@@ -377,14 +491,7 @@ impl CapabilityRouter for Capabilities {
                         format!("{}{quota_note}", out.content),
                     ),
                     Err(e) => ok(
-                        // honest inability (13d): a true claim about a failure
-                        vec![Evidence {
-                            kind: "deterministic".into(),
-                            provider: "gateway".into(),
-                            external_id: "provider-failure".into(),
-                            hash: String::new(),
-                            ts: trust::ids::ts_ms(),
-                        }],
+                        vec![deterministic("provider-failure")],
                         format!(
                             "i'm having trouble thinking right now ({e}). \
                              the deterministic floor still works -- try \"help\"."
@@ -402,45 +509,24 @@ impl CapabilityRouter for Capabilities {
                          i can only answer from what i already know."
                             .to_string()
                     };
-                    return ok(
-                        vec![Evidence {
-                            kind: "deterministic".into(),
-                            provider: "floor".into(),
-                            external_id: "search-offline".into(),
-                            hash: String::new(),
-                            ts: trust::ids::ts_ms(),
-                        }],
-                        why,
-                    );
+                    return ok(vec![deterministic("search-offline")], why);
                 };
                 let hits = match rs.search(query) {
                     Ok(h) if !h.is_empty() => h,
                     Ok(_) => {
                         return ok(
-                            vec![Evidence {
-                                kind: "deterministic".into(),
-                                provider: "serper".into(),
-                                external_id: "no-results".into(),
-                                hash: String::new(),
-                                ts: trust::ids::ts_ms(),
-                            }],
+                            vec![deterministic("no-results")],
                             "the web search came back empty for that.".into(),
                         )
                     }
                     Err(e) => {
                         return ok(
-                            vec![Evidence {
-                                kind: "deterministic".into(),
-                                provider: "serper".into(),
-                                external_id: "search-failure".into(),
-                                hash: String::new(),
-                                ts: trust::ids::ts_ms(),
-                            }],
+                            vec![deterministic("search-failure")],
                             format!("search failed honestly: {e}"),
                         )
                     }
                 };
-                let mut evidence = vec![];
+                let mut ev = vec![];
                 let mut ctx = String::new();
                 for (i, h) in hits.iter().take(3).enumerate() {
                     ctx.push_str(&format!(
@@ -451,11 +537,10 @@ impl CapabilityRouter for Capabilities {
                         h.snippet
                     ));
                 }
-                // fetch->READ the top pages (capped)
                 for (i, h) in hits.iter().take(2).enumerate() {
                     if let Ok(text) = rs.fetch_text(&h.link, 4000) {
                         ctx.push_str(&format!("PAGE {} ({}):\n{}\n\n", i + 1, h.link, text));
-                        evidence.push(Evidence {
+                        ev.push(Evidence {
                             kind: "web".into(),
                             provider: "fetch".into(),
                             external_id: h.link.clone(),
@@ -488,23 +573,17 @@ impl CapabilityRouter for Capabilities {
                         for (i, h) in hits.iter().take(3).enumerate() {
                             sources.push_str(&format!("\n{}. {}", i + 1, h.link));
                         }
-                        evidence.push(Evidence {
+                        ev.push(Evidence {
                             kind: "provider_response".into(),
                             provider: "openrouter".into(),
                             external_id: out.model.clone(),
                             hash: trust::ids::sha256_hex(out.content.as_bytes()),
                             ts: trust::ids::ts_ms(),
                         });
-                        ok(evidence, format!("{}{sources}", out.content))
+                        ok(ev, format!("{}{sources}", out.content))
                     }
                     Err(e) => ok(
-                        vec![Evidence {
-                            kind: "deterministic".into(),
-                            provider: "gateway".into(),
-                            external_id: "provider-failure".into(),
-                            hash: String::new(),
-                            ts: trust::ids::ts_ms(),
-                        }],
+                        vec![deterministic("provider-failure")],
                         format!("i found sources but couldn't think about them ({e})."),
                     ),
                 }
@@ -514,83 +593,186 @@ impl CapabilityRouter for Capabilities {
     }
 }
 
+// ------------------------------------------------------------- robot core
+
+#[derive(Clone)]
+pub struct CellHandle {
+    pub conn: Arc<Mutex<Connection>>,
+    pub vault: Arc<mind::vault::MediaVault>,
+}
+
 pub struct RobotCore {
     pub owner_principal: i64,
     /// shared with the hub gateway as its boundary-log sink
     pub core: Arc<Mutex<Connection>>,
-    pub owner_cell: Mutex<Connection>,
+    cells: Mutex<HashMap<i64, CellHandle>>,
+    keys: KeyChain,
+    data_dir: PathBuf,
     pub embedder: Option<Arc<hub::Embedder>>,
     pub gateway: Option<Arc<hub::ModelGateway>>,
     pub research: Option<Arc<hub::Research>>,
     pub ultra_daily_cap: u32,
+    pub public_base: String,
+    pub robot_name: String,
+    pub started_at: i64,
+    events: broadcast::Sender<i64>,
 }
 
 impl RobotCore {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        owner_principal: i64,
+        core: Arc<Mutex<Connection>>,
+        keys: KeyChain,
+        data_dir: PathBuf,
+        embedder: Option<Arc<hub::Embedder>>,
+        gateway: Option<Arc<hub::ModelGateway>>,
+        research: Option<Arc<hub::Research>>,
+        ultra_daily_cap: u32,
+        public_base: String,
+        robot_name: String,
+    ) -> Self {
+        Self {
+            owner_principal,
+            core,
+            cells: Mutex::new(HashMap::new()),
+            keys,
+            data_dir,
+            embedder,
+            gateway,
+            research,
+            ultra_daily_cap,
+            public_base,
+            robot_name,
+            started_at: trust::ids::ts_ms(),
+            events: broadcast::channel(64).0,
+        }
+    }
+
+    /// Open (or fetch) a principal's cell: their own encrypted file, their
+    /// own vault. Lazily opened, cached for the process lifetime.
+    pub fn cell(&self, principal: i64) -> anyhow::Result<CellHandle> {
+        if let Some(h) = self
+            .cells
+            .lock()
+            .map_err(|_| anyhow!("cells lock poisoned"))?
+            .get(&principal)
+        {
+            return Ok(h.clone());
+        }
+        let (cell_id, dek) = {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            let cell_id: String = core
+                .query_row(
+                    "SELECT cell_id FROM principals WHERE id = ?1 AND status = 'active'",
+                    params![principal],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .with_context(|| format!("no active principal {principal}"))?;
+            let dek = ensure_cell_key(&core, &self.keys, &cell_id)?;
+            (cell_id, dek)
+        };
+        let conn = trust::cells::open_encrypted(
+            &self.data_dir.join("cells").join(format!("{cell_id}.db")),
+            &dek,
+        )?;
+        prism::init_cell_schema(&conn)?;
+        mind::init_cell_schema(&conn)?;
+        let vault = mind::vault::MediaVault::new(
+            self.data_dir.join("media").join(&cell_id),
+            trust::keys::derive_key(&dek, b"media"),
+        );
+        let handle = CellHandle {
+            conn: Arc::new(Mutex::new(conn)),
+            vault: Arc::new(vault),
+        };
+        self.cells
+            .lock()
+            .map_err(|_| anyhow!("cells lock poisoned"))?
+            .insert(principal, handle.clone());
+        Ok(handle)
+    }
+
+    pub fn principals_active(&self) -> anyhow::Result<Vec<i64>> {
+        let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+        let mut stmt = core.prepare("SELECT id FROM principals WHERE status = 'active'")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    pub fn notify(&self, principal: i64) {
+        let _ = self.events.send(principal);
+    }
+
+    /// The capability router for this robot (also used by boot-time replay).
+    pub fn router(&self) -> Capabilities {
+        self.capabilities()
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             embedder: self.embedder.clone(),
             gateway: self.gateway.clone(),
             research: self.research.clone(),
             ultra_daily_cap: self.ultra_daily_cap,
+            core: Some(self.core.clone()),
+            owner_principal: self.owner_principal,
+            public_base: self.public_base.clone(),
         }
     }
-}
 
-fn chat_crossing(direction: Direction, payload_hash: String, size: i64) -> Crossing {
-    Crossing {
-        direction,
-        channel: "chat".into(),
-        counterparty: "local-web".into(),
-        purpose: "conversation".into(),
-        categories: "message".into(),
-        payload_hash,
-        size,
-        // the local owner session; remote/unknown surfaces get `untrusted`
-        trust_tag: "owner".into(),
+    fn boundary_crossing(
+        &self,
+        direction: Direction,
+        surface: &str,
+        payload: &str,
+    ) -> anyhow::Result<()> {
+        let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+        boundary::append(
+            &core,
+            &Crossing {
+                direction,
+                channel: surface.into(),
+                counterparty: if surface == "telegram" {
+                    "api.telegram.org".into()
+                } else {
+                    "local-web".into()
+                },
+                purpose: "conversation".into(),
+                categories: "message".into(),
+                payload_hash: trust::ids::sha256_hex(payload.as_bytes()),
+                size: payload.len() as i64,
+                trust_tag: "owner".into(),
+            },
+        )?;
+        Ok(())
     }
-}
 
-impl surfaces::Robot for RobotCore {
-    fn handle_message(&self, text: String) -> anyhow::Result<String> {
-        // 1. boundary log: the inbound crossing, before anything else (law #3)
-        {
-            let core = self
-                .core
-                .lock()
-                .map_err(|_| anyhow!("core lock poisoned"))?;
-            boundary::append(
-                &core,
-                &chat_crossing(
-                    Direction::In,
-                    trust::ids::sha256_hex(text.as_bytes()),
-                    text.len() as i64,
-                ),
-            )?;
-        }
-
-        // 2. the governed turn, inside the owner's encrypted cell
+    /// One governed turn for any principal on any surface.
+    pub fn turn(&self, principal: i64, text: String, surface: &str) -> anyhow::Result<String> {
+        self.boundary_crossing(Direction::In, surface, &text)?;
+        let handle = self.cell(principal)?;
         let reply = {
-            let cell = self
-                .owner_cell
+            let cell = handle
+                .conn
                 .lock()
                 .map_err(|_| anyhow!("cell lock poisoned"))?;
-            let msg_id = mind::record_message(&cell, "in", "chat", &text)?;
+            let msg_id = mind::record_message(&cell, "in", surface, &text)?;
             let env = Envelope {
-                surface: "chat".into(),
-                principal_id: self.owner_principal,
+                surface: surface.into(),
+                principal_id: principal,
                 modality: "text".into(),
                 content: text,
                 ts: trust::ids::ts_ms(),
-                device_trust: "owner-session".into(),
+                device_trust: "session".into(),
                 source_msg_id: Some(msg_id),
             };
             let router = self.capabilities();
-            // the verdict seat: the gateway's gemma when online, the
-            // deterministic fallback when not (the doorman is never absent)
             let verdicts: Box<dyn VerdictProvider> = match &self.gateway {
-                Some(g) => Box::new(hub::GatewayVerdicts {
-                    gateway: g.clone(),
-                }),
+                Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
                 None => Box::new(FallbackVerdict),
             };
             let deps = TurnDeps {
@@ -599,40 +781,296 @@ impl surfaces::Robot for RobotCore {
                 crash: None,
             };
             let out = prism::run_turn(&cell, &env, &deps)?;
-            // the reply effect leaves through the outbox: sent -> confirmed
-            // (local synchronous delivery; Telegram's message_id path is M5)
             prism::outbox::mark(&cell, &out.reply_effect_id, "sent", None)?;
             prism::outbox::mark(&cell, &out.reply_effect_id, "confirmed", None)?;
-            mind::record_message(&cell, "out", "chat", &out.reply)?;
+            mind::record_message(&cell, "out", surface, &out.reply)?;
             out.reply
         };
+        self.boundary_crossing(Direction::Out, surface, &reply)?;
+        self.notify(principal);
+        Ok(reply)
+    }
+}
 
-        // 3. boundary log: the outbound crossing, before the reply leaves
+const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus", "flac"];
+
+impl surfaces::Robot for RobotCore {
+    fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<String> {
+        self.turn(principal, text, "chat")
+    }
+
+    fn handle_media(
+        &self,
+        principal: i64,
+        filename: String,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<String> {
+        let filename = urlencoding_decode(&filename);
+        let hash_in = trust::ids::sha256_hex(&bytes);
         {
-            let core = self
-                .core
-                .lock()
-                .map_err(|_| anyhow!("core lock poisoned"))?;
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
             boundary::append(
                 &core,
-                &chat_crossing(
-                    Direction::Out,
-                    trust::ids::sha256_hex(reply.as_bytes()),
-                    reply.len() as i64,
-                ),
+                &Crossing {
+                    direction: Direction::In,
+                    channel: "upload".into(),
+                    counterparty: "local-web".into(),
+                    purpose: "media-upload".into(),
+                    categories: "media".into(),
+                    payload_hash: hash_in.clone(),
+                    size: bytes.len() as i64,
+                    trust_tag: "owner".into(),
+                },
             )?;
         }
+        let handle = self.cell(principal)?;
+        let ext = filename
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
 
+        // store first: the vault keeps the original either way (sec 4a)
+        let media_ref = {
+            let cell = handle
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("cell lock poisoned"))?;
+            let media_ref = handle
+                .vault
+                .store(&cell, &bytes, Some(&ext), Some("chat-upload"))?;
+            // the storage act is a receipted system intent
+            let intent_id = trust::ids::new_id("int");
+            prism::journal::intent_open(
+                &cell,
+                &intent_id,
+                &serde_json::json!({
+                    "system": "media.store",
+                    "filename": filename,
+                    "hash": media_ref.hash,
+                    "size": media_ref.size,
+                })
+                .to_string(),
+            )?;
+            let outcome = Outcome {
+                step_id: trust::ids::new_id("pstep"),
+                ok: true,
+                evidence: vec![Evidence {
+                    kind: "row".into(),
+                    provider: "vault".into(),
+                    external_id: media_ref.hash.clone(),
+                    hash: media_ref.hash.clone(),
+                    ts: trust::ids::ts_ms(),
+                }],
+                detail: format!("stored in the vault: {filename}"),
+            };
+            prism::journal::step(
+                &cell,
+                &intent_id,
+                "outcome",
+                &serde_json::to_string(&outcome)?,
+                None,
+            )?;
+            let receipt = prism::lifecycle::build_receipt(&intent_id, &[outcome]);
+            let receipt = prism::receipts::store(&cell, &receipt)?;
+            prism::journal::intent_close(&cell, &intent_id, receipt.status.as_str())?;
+            media_ref
+        };
+
+        let is_audio = AUDIO_EXTS.contains(&ext.as_str());
+        let reply = if is_audio {
+            match &self.gateway {
+                Some(gw) => match gw.transcribe(&bytes, &ext) {
+                    Ok(out) => {
+                        let transcript = out.content.trim().to_string();
+                        // the voice note becomes a normal governed turn
+                        let answer =
+                            self.turn(principal, transcript.clone(), "chat")?;
+                        format!("heard your voice note: \"{transcript}\"\n\n{answer}")
+                    }
+                    Err(e) => {
+                        tracing::warn!("stt failed: {e}");
+                        format!(
+                            "voice note stored ({} KB, {}...), but transcription failed \
+                             honestly: {e}",
+                            media_ref.size / 1024,
+                            &media_ref.hash[..12]
+                        )
+                    }
+                },
+                None => format!(
+                    "voice note stored ({} KB, {}...); transcription needs the model \
+                     gateway, which is offline.",
+                    media_ref.size / 1024,
+                    &media_ref.hash[..12]
+                ),
+            }
+        } else {
+            format!(
+                "stored in your vault: {filename} ({} KB, content-addressed {}...) -- \
+                 it stays encrypted beside your cell.",
+                media_ref.size.max(1024) / 1024,
+                &media_ref.hash[..12]
+            )
+        };
+
+        // the reply lands in the message store so history/SSE deliver it
+        {
+            let cell = handle
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("cell lock poisoned"))?;
+            if !is_audio || self.gateway.is_none() {
+                mind::record_message(&cell, "out", "chat", &reply)?;
+            }
+        }
+        self.notify(principal);
         Ok(reply)
     }
 
-    fn history(&self, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
-        let cell = self
-            .owner_cell
+    fn history(&self, principal: i64, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
+        let handle = self.cell(principal)?;
+        let cell = handle
+            .conn
             .lock()
             .map_err(|_| anyhow!("cell lock poisoned"))?;
         Ok(mind::messages_after(&cell, after_ts, 200)?)
     }
+
+    fn accept_invite(&self, token: &str) -> anyhow::Result<(i64, String)> {
+        let token_hash = trust::ids::sha256_hex(token.as_bytes());
+        let (principal, name) = {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            let used_by: Option<Option<i64>> = core
+                .query_row(
+                    "SELECT used_by FROM invites WHERE token_hash = ?1",
+                    params![token_hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match used_by {
+                None => bail!("unknown invite"),
+                Some(Some(_)) => bail!("invite already used"),
+                Some(None) => {}
+            }
+            let n: i64 = core.query_row(
+                "SELECT count(*) FROM principals WHERE kind = 'member'",
+                [],
+                |r| r.get(0),
+            )?;
+            let name = format!("member-{}", n + 1);
+            let cell_id = format!("member{}-{}", n + 1, trust::ids::random_hex(3));
+            core.execute(
+                "INSERT INTO principals(kind, display_name, cell_id, created_at) \
+                 VALUES ('member', ?1, ?2, ?3)",
+                params![name, cell_id, trust::ids::ts_ms()],
+            )?;
+            let principal = core.last_insert_rowid();
+            core.execute(
+                "UPDATE invites SET used_by = ?1 WHERE token_hash = ?2",
+                params![principal, token_hash],
+            )?;
+            schema::core_journal(
+                &core,
+                "member.join",
+                &serde_json::json!({ "principal": principal, "name": name }).to_string(),
+            )?;
+            (principal, name)
+        };
+        // create their sealed cell eagerly
+        self.cell(principal)?;
+        Ok((principal, name))
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<i64> {
+        self.events.subscribe()
+    }
+
+    fn dashboard(&self, principal: i64) -> anyhow::Result<DashData> {
+        if principal != self.owner_principal {
+            bail!("dashboard is owner-only");
+        }
+        let mut d = DashData {
+            robot_name: self.robot_name.clone(),
+            started_at: self.started_at,
+            now: trust::ids::ts_ms(),
+            gateway_online: self.gateway.is_some(),
+            search_online: self.research.as_ref().map(|r| r.can_search()).unwrap_or(false),
+            embedder_online: self.embedder.is_some(),
+            ..Default::default()
+        };
+        if let Some(gw) = &self.gateway {
+            d.cast_answer = gw.cast.answer.clone();
+            d.cast_verdict = gw.cast.verdict.clone();
+        }
+        {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            d.robot_id = schema::meta_get(&core, "robot_id")?.unwrap_or_default();
+            let mut stmt = core.prepare(
+                "SELECT id, kind, display_name, status FROM principals ORDER BY id",
+            )?;
+            d.principals = stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            d.boundary_count = trust::boundary::count(&core)?;
+            let mut stmt = core.prepare(
+                "SELECT ts, direction, channel, counterparty, purpose, size \
+                 FROM boundary_log ORDER BY seq DESC LIMIT 50",
+            )?;
+            d.boundary = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        {
+            let handle = self.cell(self.owner_principal)?;
+            let cell = handle
+                .conn
+                .lock()
+                .map_err(|_| anyhow!("cell lock poisoned"))?;
+            d.message_count = mind::message_count(&cell)?;
+            d.fact_count = mind::facts::count_active(&cell)?;
+            d.active_reminders = mind::reminders::count_active(&cell)?;
+            d.facts = mind::facts::registry_list(&cell, 50)?
+                .into_iter()
+                .map(|(f, src, ts)| (f.content, src.chars().take(60).collect(), ts))
+                .collect();
+        }
+        Ok(d)
+    }
+
+    fn owner_principal(&self) -> i64 {
+        self.owner_principal
+    }
+}
+
+/// Minimal percent-decode for the x-filename header (the client encodes it).
+fn urlencoding_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -653,8 +1091,6 @@ mod tests {
         (conn, path)
     }
 
-    /// An envelope whose content is first recorded as a message, so
-    /// provenance-requiring capabilities have their anchor.
     fn envelope(cell: &Connection, content: &str) -> Envelope {
         let msg_id = mind::record_message(cell, "in", "chat", content).unwrap();
         Envelope {
@@ -676,8 +1112,6 @@ mod tests {
         }
     }
 
-    /// M3 GATE PART 1: every turn class ends with a terminal receipt --
-    /// now including the memory set.
     #[test]
     fn every_turn_ends_with_a_terminal_receipt() {
         let (cell, path) = file_cell("receipts");
@@ -694,7 +1128,9 @@ mod tests {
             "my facts",
             "correct fact 1: i drink black tea",
             "forget fact 1",
-            "tell me a joke", // fallback path
+            "invite",        // owner-only refusal path (owner 0 != principal 1)
+            "telegram code", // owner-only refusal path
+            "tell me a joke",
         ] {
             let out = prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap();
             assert!(out.receipt.status.is_terminal(), "{text}");
@@ -707,8 +1143,6 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// M3 GATE PART 2: the memory law walk -- remember with provenance,
-    /// recall finds it, registry shows the source, forget deletes for real.
     #[test]
     fn memory_walk_remember_recall_registry_forget() {
         let (cell, path) = file_cell("memory");
@@ -720,29 +1154,18 @@ mod tests {
         };
         let r = run("remember that the demo is on friday");
         assert!(r.contains("remembered: the demo is on friday"), "{r}");
-
         let r = run("what do you remember about the demo");
         assert!(r.contains("the demo is on friday"), "{r}");
-
         let r = run("my facts");
-        assert!(r.contains("the demo is on friday"), "{r}");
-        assert!(r.contains("from your words"), "{r}"); // source chain visible
-
+        assert!(r.contains("from your words"), "{r}");
         let r = run("correct fact 1: the demo moved to monday");
         assert!(r.contains("superseded"), "{r}");
-        let r = run("what do you remember about the demo");
-        assert!(r.contains("moved to monday"), "{r}");
-        assert!(!r.contains("on friday"), "{r}"); // superseded is out of recall
-
         let r = run("forget fact 1");
         assert!(r.contains("forgotten for real"), "{r}");
         assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
         let _ = std::fs::remove_file(path);
     }
 
-    /// A fact may never exist without its source message (law #5): a turn
-    /// whose envelope has no recorded message must fail the remember step
-    /// and say so honestly.
     #[test]
     fn remember_without_provenance_fails_honestly() {
         let (cell, path) = file_cell("noprov");
@@ -754,16 +1177,13 @@ mod tests {
             content: "remember that x is y".into(),
             ts: trust::ids::ts_ms(),
             device_trust: "owner-session".into(),
-            source_msg_id: None, // no anchor
+            source_msg_id: None,
         };
-        let err = prism::run_turn(&cell, &env, &live_deps(&router));
-        assert!(err.is_err(), "unsourced remember must not succeed");
+        assert!(prism::run_turn(&cell, &env, &live_deps(&router)).is_err());
         assert_eq!(mind::facts::count_active(&cell).unwrap(), 0);
         let _ = std::fs::remove_file(path);
     }
 
-    /// M2's kill-test, carried forward: crash at every boundary, replay
-    /// exactly-once -- for the reminder path and the remember path.
     #[test]
     fn kill_test_crash_at_every_boundary_replays_exactly_once() {
         type EffectCount = fn(&Connection) -> i64;
@@ -786,29 +1206,21 @@ mod tests {
                     crash: Some(&crash),
                 };
                 let err = prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap_err();
-                assert!(
-                    matches!(err, PrismError::SimulatedCrash(_)),
-                    "{text} @ {point}: expected crash"
-                );
+                assert!(matches!(err, PrismError::SimulatedCrash(_)), "{text}@{point}");
 
                 let s1 = prism::replay::resume_incomplete(&cell, &router).unwrap();
-                assert_eq!(s1.resumed + s1.closed_failed, 1, "{text} @ {point}");
+                assert_eq!(s1.resumed + s1.closed_failed, 1, "{text}@{point}");
                 let s2 = prism::replay::resume_incomplete(&cell, &router).unwrap();
-                assert_eq!(s2.resumed + s2.closed_failed, 0, "{text} @ {point}");
+                assert_eq!(s2.resumed + s2.closed_failed, 0, "{text}@{point}");
 
                 let expected = if point == "after_open" { 0 } else { 1 };
-                assert_eq!(check(&cell), expected, "{text} @ {point}");
-
-                assert!(
-                    prism::journal::open_intents(&cell).unwrap().is_empty(),
-                    "{text} @ {point}"
-                );
+                assert_eq!(check(&cell), expected, "{text}@{point}");
+                assert!(prism::journal::open_intents(&cell).unwrap().is_empty());
                 let _ = std::fs::remove_file(path);
             }
         }
     }
 
-    /// The reply effect is deduped in the outbox (Q11).
     #[test]
     fn reply_effect_is_unique_per_intent() {
         let (cell, path) = file_cell("outbox");

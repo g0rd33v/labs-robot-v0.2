@@ -68,6 +68,8 @@ impl Default for RobotSection {
 pub struct ServerSection {
     pub host: String,
     pub port: u16,
+    /// base URL printed in invite links; empty = http://host:port
+    pub public_base: String,
 }
 
 impl Default for ServerSection {
@@ -75,6 +77,7 @@ impl Default for ServerSection {
         Self {
             host: "127.0.0.1".into(),
             port: 7777,
+            public_base: String::new(),
         }
     }
 }

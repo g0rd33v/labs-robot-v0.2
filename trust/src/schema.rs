@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS core_journal (
     kind         TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invites (
+    token_hash TEXT PRIMARY KEY,
+    role       TEXT NOT NULL DEFAULT 'member',
+    created_at INTEGER NOT NULL,
+    used_by    INTEGER
+);
 ";
 
 pub fn init_core(conn: &Connection) -> Result<(), TrustError> {

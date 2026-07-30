@@ -5,6 +5,71 @@ dependencies introduced. Newest first.
 
 ---
 
+## M5 — People + surfaces (2026-07-30) · gate PASSED
+
+**Shipped.** One core, many cells: every principal commands their own
+encrypted partition (law #2 as files, §2a), opened lazily with its own
+wrapped DEK and its own sealed media vault. The owner mints **one-time
+invite links** in chat ("invite" → `/i/<token>`, Q2 pre-authorization);
+redeeming creates a member principal + sealed cell; the same link twice is
+403. Owner/member roles enforced structurally: owner-only capabilities
+(invites, telegram binding) check the journaled acting principal;
+`/dash` is owner-only. **SSE message push**: replies and scheduler fires
+arrive the moment they exist (poll fallback kept). **Voice notes + file
+drop**: uploads land in the per-principal vault (content-addressed,
+sealed, receipted as `media.store` system intents); audio goes to the
+parakeet seat via the router's `/audio/transcriptions` (hand-rolled
+multipart, no new dep; input_audio chat shape as fallback) and the
+transcript becomes a normal governed turn. **Dashboard-lite** (§10a, Q35
+stack — server-rendered, zero build chain): Overview (health, cast,
+online/offline seats, counts), People, Registry with sources, Boundary
+Log (last 50 crossings, every byte in/out). **Telegram behind the flag**:
+TELEGRAM_BOT_TOKEN present → long-poll loop through hub (boundary-logged),
+invite-only per Q2 — unknown chats are turned away; the owner binds with a
+10-minute code minted in their own chat ("telegram code"). The scheduler
+now fires per principal.
+
+**Gate demo (live).**
+- Invite flow: owner minted `/i/…`; member joined, got their own cell;
+  second redemption → 403; member's registry empty (owner facts
+  invisible — isolation is a file boundary, verified live and by test);
+  member's `/dash` → 403.
+- Voice loop: synthesized "What do you remember about the demo?" (macOS
+  say) → upload → vault (69 KB, content-addressed) → parakeet transcript
+  → governed turn → answered with the corrected Russian fact.
+- First STT attempt failed honestly (wrong endpoint shape): file stored,
+  failure named in the reply — degradation by design; fixed with the
+  audio endpoint and re-verified.
+- Dashboard renders live: gateway online with cast names, 71 boundary
+  crossings including the visible Q19 hedge (two verdict crossings 2.5s
+  apart, then the fallback seat answering).
+- 50 tests green (incl. invite/isolation and multipart STT paths);
+  clippy -D warnings clean.
+
+**Assumptions** (spec-silent or MVP-scoped):
+- "Chat streaming (SSE)" implemented as message-push SSE (instant
+  delivery), not token-level streaming — token streams would put model
+  narration on the wire before the receipt exists; deliverable-grade
+  token streaming is a post-MVP refinement.
+- Sessions are in-memory; invite redemption mints a session directly
+  (the member re-enters via a fresh invite if the process restarts —
+  members are re-invitable in MVP; durable member auth is post-MVP).
+- Telegram is owner-bound only in MVP (members join via web invites);
+  group chats (Q33) out of scope.
+- Vision seat remains configured-but-unexercised (image understanding
+  needs an image-message path; the vault stores images fine).
+- Upload cap 25MB; filename arrives percent-encoded in a header (no
+  multipart parser dependency for the chat surface).
+
+**Dependencies introduced**: tokio-stream (SSE BroadcastStream), base64
+(audio → input_audio fallback shape). Both listed in root Cargo.toml.
+
+**Next.** M6 — evals + hardening: eval runner + corpus in ./evals
+(routing, receipts kill-suite, 20 prompt-injection cases, latency),
+watchdog (in-without-out 60s), zombie sweeper, encrypted backup script.
+
+---
+
 ## M4 — Hub: the intelligence gateway (2026-07-30) · gate PASSED
 
 **Shipped.** The gateway (arch §6) with Akita's paid-for laws baked in:
