@@ -37,28 +37,90 @@ impl Research {
         self.serper_key.is_some()
     }
 
-    fn log(&self, direction: Direction, counterparty: &str, purpose: &str, payload: &[u8]) {
-        if let Some(sink) = &self.boundary {
-            if let Ok(conn) = sink.lock() {
-                let _ = boundary::append(
-                    &conn,
-                    &Crossing {
-                        direction,
-                        channel: "web".into(),
-                        counterparty: counterparty.into(),
-                        purpose: purpose.into(),
-                        categories: "web-content".into(),
-                        payload_hash: trust::ids::sha256_hex(payload),
-                        size: payload.len() as i64,
-                        trust_tag: if direction == Direction::Out {
-                            "granted".into()
-                        } else {
-                            "untrusted".into()
-                        },
-                    },
-                );
-            }
+    /// Law #3, enforced: a failed log write aborts the crossing.
+    fn log(
+        &self,
+        direction: Direction,
+        counterparty: &str,
+        purpose: &str,
+        payload: &[u8],
+    ) -> Result<(), HubError> {
+        let Some(sink) = &self.boundary else {
+            return Ok(());
+        };
+        let conn = sink
+            .lock()
+            .map_err(|_| HubError::Gateway("boundary log unavailable (poisoned)".into()))?;
+        boundary::append(
+            &conn,
+            &Crossing {
+                direction,
+                channel: "web".into(),
+                counterparty: counterparty.into(),
+                purpose: purpose.into(),
+                categories: "web-content".into(),
+                payload_hash: trust::ids::sha256_hex(payload),
+                size: payload.len() as i64,
+                trust_tag: if direction == Direction::Out {
+                    "granted".into()
+                } else {
+                    "untrusted".into()
+                },
+            },
+        )
+        .map_err(|e| HubError::Gateway(format!("boundary log write failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Fetch targets come from search results -- i.e. from the open world.
+    /// Without a policy the robot can be pointed at its own surfaces or at
+    /// anything else reachable from this machine, and the body is then fed
+    /// straight into model context. Public HTTP(S) only.
+    fn check_fetchable(url: &str) -> Result<(), HubError> {
+        let lower = url.to_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err(HubError::Gateway(format!(
+                "refusing non-http(s) fetch target: {url}"
+            )));
         }
+        let host = lower
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split(['/', '?', '#']).next())
+            .map(|hostport| {
+                // strip credentials and port
+                let h = hostport.rsplit('@').next().unwrap_or(hostport);
+                h.split(':').next().unwrap_or(h).to_string()
+            })
+            .unwrap_or_default();
+        if host.is_empty() {
+            return Err(HubError::Gateway(format!("refusing malformed URL: {url}")));
+        }
+        let private = host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || host == "0.0.0.0"
+            || host == "[::1]"
+            || host.starts_with("127.")
+            || host.starts_with("10.")
+            || host.starts_with("192.168.")
+            || host.starts_with("169.254.") // link-local, incl. cloud metadata
+            || host.starts_with("::1")
+            || host.starts_with("fd")
+            || (host.starts_with("172.")
+                && host
+                    .split('.')
+                    .nth(1)
+                    .and_then(|o| o.parse::<u8>().ok())
+                    .is_some_and(|o| (16..=31).contains(&o)));
+        if private {
+            return Err(HubError::Gateway(format!(
+                "refusing to fetch a private/loopback address from an untrusted \
+                 search result: {host}"
+            )));
+        }
+        Ok(())
     }
 
     /// Top organic results from Serper.
@@ -73,7 +135,7 @@ impl Research {
             "google.serper.dev",
             "web-search",
             body.to_string().as_bytes(),
-        );
+        )?;
         let resp: serde_json::Value = self
             .agent
             .post("https://google.serper.dev/search")
@@ -89,7 +151,7 @@ impl Research {
             "google.serper.dev",
             "web-search",
             resp_str.as_bytes(),
-        );
+        )?;
         let hits = resp["organic"]
             .as_array()
             .map(|arr| {
@@ -109,7 +171,8 @@ impl Research {
 
     /// Fetch a page and extract readable text (capped).
     pub fn fetch_text(&self, url: &str, cap: usize) -> Result<String, HubError> {
-        self.log(Direction::Out, url, "web-fetch", url.as_bytes());
+        Self::check_fetchable(url)?;
+        self.log(Direction::Out, url, "web-fetch", url.as_bytes())?;
         let resp = self
             .agent
             .get(url)
@@ -122,7 +185,7 @@ impl Research {
             .take(800 * 1024)
             .read_to_string(&mut html)
             .map_err(|e| HubError::Gateway(format!("read {url}: {e}")))?;
-        self.log(Direction::In, url, "web-fetch", html.as_bytes());
+        self.log(Direction::In, url, "web-fetch", html.as_bytes())?;
         let mut text = extract_text(&html);
         text.truncate(cap);
         Ok(text)

@@ -161,7 +161,36 @@ pub(crate) fn finish_planned_intent(
     )?;
 
     // receipt: compiled from evidence, never narrated by a model
-    let receipt = build_receipt(intent_id, &outcomes);
+    let mut receipt = build_receipt(intent_id, &outcomes);
+
+    // the deterministic expression check (sec 5 / Q26) runs before the
+    // receipt is stored, so an unsupported effect claim is recorded as
+    // uncertain rather than verified
+    let draft_reply = compose_reply(&outcomes, &receipt);
+    let unsupported = unsupported_effect_claim(&draft_reply, &outcomes);
+    if unsupported {
+        receipt.status = ReceiptStatus::Uncertain;
+        receipt.claims.push(Claim {
+            claim: "an utterance in this turn asserted an effect that no step \
+                    performed; the assertion is unsupported and was flagged to \
+                    the person"
+                .into(),
+            evidence: vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "expression-check".into(),
+                external_id: "unsupported-effect-claim".into(),
+                hash: ids::sha256_hex(draft_reply.as_bytes()),
+                ts: ids::ts_ms(),
+            }],
+        });
+        journal::step(
+            cell,
+            intent_id,
+            "expression.flagged",
+            &serde_json::json!({ "reason": "unsupported effect claim" }).to_string(),
+            None,
+        )?;
+    }
     let receipt = receipts::store(cell, &receipt)?;
     journal::step(
         cell,
@@ -175,7 +204,10 @@ pub(crate) fn finish_planned_intent(
 
     // reply through the transactional outbox (Q11): enqueued before it can
     // possibly leave, deduped structurally
-    let reply = compose_reply(&outcomes, &receipt);
+    let mut reply = compose_reply(&outcomes, &receipt);
+    if unsupported {
+        reply.push_str(UNSUPPORTED_NOTE);
+    }
     let (reply_effect_id, _fresh) = outbox::enqueue(cell, intent_id, "surface:chat", &reply)?;
     if !live {
         // resumed after a crash: the session that asked is gone; the honest
@@ -323,17 +355,20 @@ fn execute_step(
     step: &PlanStep,
     intent_id: &str,
 ) -> Result<Outcome, PrismError> {
-    let deterministic = |detail: String| Outcome {
-        step_id: step.step_id.clone(),
-        ok: true,
-        evidence: vec![Evidence {
-            kind: "deterministic".into(),
-            provider: "floor".into(),
-            external_id: step.capability.clone(),
-            hash: ids::sha256_hex(detail.as_bytes()),
-            ts: ids::ts_ms(),
-        }],
-        detail,
+    // floor answers are system-generated constants computed from local state:
+    // they attest to exactly what they say
+    let deterministic = |detail: String| {
+        Outcome::attested(
+            step.step_id.clone(),
+            vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "floor".into(),
+                external_id: step.capability.clone(),
+                hash: ids::sha256_hex(detail.as_bytes()),
+                ts: ids::ts_ms(),
+            }],
+            detail,
+        )
     };
     match step.capability.as_str() {
         "answer.time" => {
@@ -346,8 +381,19 @@ fn execute_step(
         "answer.self" => Ok(deterministic(SELF_TEXT.into())),
         "answer.help" => Ok(deterministic(HELP_TEXT.into())),
         "answer.fallback" => Ok(deterministic(FALLBACK_TEXT.into())),
-        // the verdict's own chitchat one-liner (Q16 reply field)
-        "answer.direct" => Ok(deterministic(
+        // the verdict's own chitchat one-liner (Q16 reply field) -- model
+        // text, so it speaks but attests to nothing
+        "answer.direct" => Ok(Outcome::utterance(
+            step.step_id.clone(),
+            vec![Evidence {
+                kind: "provider_response".into(),
+                provider: "verdict".into(),
+                external_id: "verdict.reply".into(),
+                hash: ids::sha256_hex(
+                    step.args["reply"].as_str().unwrap_or("").as_bytes(),
+                ),
+                ts: ids::ts_ms(),
+            }],
             step.args["reply"].as_str().unwrap_or("hi.").to_string(),
         )),
         _ => {
@@ -378,6 +424,7 @@ pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
         .filter(|e| e.kind == "provider_response")
         .map(|e| e.external_id.clone())
         .collect();
+    models_used.sort();
     models_used.dedup();
     Receipt {
         receipt_id: ids::new_id("rcpt"),
@@ -386,7 +433,16 @@ pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
         claims: outcomes
             .iter()
             .map(|o| Claim {
-                claim: o.detail.clone(),
+                // model prose is never promoted to a claim: an utterance
+                // asserts only that a model spoke, and the evidence says
+                // which one
+                claim: match &o.claim {
+                    Some(c) => c.clone(),
+                    None => format!(
+                        "produced an utterance of {} characters; asserts no external effect",
+                        o.detail.chars().count()
+                    ),
+                },
                 evidence: o.evidence.clone(),
             })
             .collect(),
@@ -394,6 +450,56 @@ pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
         data_disclosures: vec![],
     }
 }
+
+/// Phrases in which the Robot asserts it changed something in the world.
+/// Deliberately narrow: only first-person completions, not descriptions.
+const EFFECT_CLAIM_PATTERNS: [&str; 26] = [
+    "i've set",
+    "i have set",
+    "i've created",
+    "i have created",
+    "i've added",
+    "i have added",
+    "i've saved",
+    "i have saved",
+    "i've stored",
+    "i have stored",
+    "i've deleted",
+    "i have deleted",
+    "i've removed",
+    "i have removed",
+    "i've cancelled",
+    "i've canceled",
+    "i've scheduled",
+    "i have scheduled",
+    "i've remembered",
+    "i have remembered",
+    "i've sent",
+    "i have sent",
+    "reminder is set",
+    "я поставил",
+    "я запомнил",
+    "я удалил",
+];
+
+/// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set
+/// logic, ~0 ms", run on every turn, never on the model that generated).
+///
+/// If an utterance asserts the Robot performed an effect, but the turn
+/// executed no effect-producing step, the assertion is unsupported. Rather
+/// than let it stand, we say so -- and the receipt goes `uncertain`, because
+/// what was said cannot be backed by evidence.
+pub fn unsupported_effect_claim(reply: &str, outcomes: &[Outcome]) -> bool {
+    if outcomes.iter().any(|o| o.is_effect()) {
+        return false; // something really happened; the claim may be true
+    }
+    let lower = reply.to_lowercase();
+    EFFECT_CLAIM_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+const UNSUPPORTED_NOTE: &str = "\n\n[note from my own checks: the sentence above \
+sounds like i changed something, but this turn executed no action -- nothing was \
+created, saved, or deleted. the receipt for this turn records no effect.]";
 
 /// The reply is rendered from the receipt's claims -- system evidence, not
 /// model narration. English for now; Soul's user-language rendering is a
@@ -415,8 +521,25 @@ pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt) -> String {
             }
             reply
         }
-        _ => "that didn't work -- nothing was changed. the receipt records the failure honestly."
-            .to_string(),
+        _ => {
+            // honest failure: say what actually went wrong, not a generic line
+            let details: Vec<&str> = outcomes
+                .iter()
+                .filter(|o| !o.ok && !o.detail.is_empty())
+                .map(|o| o.detail.as_str())
+                .collect();
+            if details.is_empty() {
+                "that didn't work -- nothing was changed. the receipt records the \
+                 failure honestly."
+                    .to_string()
+            } else {
+                format!(
+                    "{}\n(nothing was changed; the receipt records this as {}.)",
+                    details.join("\n"),
+                    receipt.status.as_str()
+                )
+            }
+        }
     }
 }
 
@@ -458,5 +581,96 @@ pub fn format_fire_at(fire_at_ms: i64) -> String {
     match Local.timestamp_millis_opt(fire_at_ms).earliest() {
         Some(dt) => dt.format("%H:%M on %a, %d %b").to_string(),
         None => format!("t+{fire_at_ms}ms"),
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn ev(kind: &str) -> Vec<Evidence> {
+        vec![Evidence {
+            kind: kind.into(),
+            provider: "test".into(),
+            external_id: "x".into(),
+            hash: String::new(),
+            ts: 0,
+        }]
+    }
+
+    /// The receipts law, structurally: model prose must never appear as a
+    /// receipt claim. Before this split, a model replying "I've set that
+    /// reminder" produced a Verified receipt asserting exactly that, with
+    /// "a model spoke" as its only evidence.
+    #[test]
+    fn model_prose_never_becomes_a_receipt_claim() {
+        let lie = "I've set that reminder for tomorrow at 9!".to_string();
+        let outcome = Outcome::utterance("s1".into(), ev("provider_response"), lie.clone());
+        let receipt = build_receipt("int_1", &[outcome]);
+
+        assert_eq!(receipt.claims.len(), 1);
+        assert!(
+            !receipt.claims[0].claim.contains("I've set"),
+            "model narration leaked into the receipt: {}",
+            receipt.claims[0].claim
+        );
+        assert!(receipt.claims[0].claim.contains("asserts no external effect"));
+    }
+
+    /// A capability that really acted DOES attest, and its text is the claim.
+    #[test]
+    fn attested_effects_are_claimed_verbatim() {
+        let outcome = Outcome::attested(
+            "s1".into(),
+            ev("row"),
+            "done -- i'll remind you at 09:00: call mark".to_string(),
+        );
+        let receipt = build_receipt("int_2", &[outcome]);
+        assert_eq!(receipt.status, ReceiptStatus::Verified);
+        assert!(receipt.claims[0].claim.contains("call mark"));
+    }
+
+    /// A failed provider call must not produce a Verified receipt.
+    #[test]
+    fn failures_are_not_verified() {
+        let outcome = Outcome::failed(
+            "s1".into(),
+            ev("deterministic"),
+            "i'm having trouble thinking right now".to_string(),
+        );
+        let receipt = build_receipt("int_3", std::slice::from_ref(&outcome));
+        assert_eq!(receipt.status, ReceiptStatus::Failed);
+        // and the reply says what went wrong, not a generic line
+        let reply = compose_reply(&[outcome], &receipt);
+        assert!(reply.contains("trouble thinking"), "{reply}");
+        assert!(reply.contains("nothing was changed"), "{reply}");
+    }
+
+    /// The deterministic claim-vs-receipt check (sec 5 / Q26): an utterance
+    /// asserting an effect on a turn that executed none is flagged.
+    #[test]
+    fn unsupported_effect_claims_are_detected() {
+        let spoke = Outcome::utterance(
+            "s1".into(),
+            ev("provider_response"),
+            "Sure! I've saved that to your memory.".into(),
+        );
+        assert!(unsupported_effect_claim(
+            "Sure! I've saved that to your memory.",
+            std::slice::from_ref(&spoke)
+        ));
+
+        // ...but not when a capability actually did the work
+        let did = Outcome::attested("s2".into(), ev("row"), "remembered: x".into());
+        assert!(!unsupported_effect_claim(
+            "I've saved that to your memory.",
+            &[did]
+        ));
+
+        // ordinary answers are not flagged
+        assert!(!unsupported_effect_claim(
+            "Rust 1.97.1 is the latest stable release.",
+            &[spoke]
+        ));
     }
 }

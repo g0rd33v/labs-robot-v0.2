@@ -5,6 +5,94 @@ dependencies introduced. Newest first.
 
 ---
 
+## Review phase B — the laws (2026-07-30)
+
+Four independent reviewers audited the MVP after M7. Phase A fixed panics
+and silent data loss; phase B closes the gaps in the two laws that were
+implemented as discipline rather than as structure.
+
+**Receipts (law 1) — the hole was where the model speaks.** `Claim.claim`
+was `Outcome.detail` verbatim, and for `answer.model` / `web.research` that
+detail *is* raw model output. A model replying "I've set that reminder"
+produced a **Verified** receipt asserting exactly that, evidenced only by
+"a model spoke" — the classic agent lie the receipts law exists to kill,
+reintroduced. Fixed structurally: `Outcome` now carries `claim:
+Option<String>`, built through `attested` / `utterance` / `failed`
+constructors. Model prose is an utterance and never becomes a claim; the
+receipt records "produced an utterance of N characters; asserts no external
+effect" with the provider evidence beside it. Provider failures are
+`ok: false`, so a failed call can no longer come out `Verified`, and the
+reply says what actually broke instead of a generic line.
+
+Also implemented the **deterministic claim-vs-receipt check** that §5/Q26
+specifies and M1–M7 never built: if an utterance asserts an effect
+("i've saved", "я запомнил", 26 patterns) on a turn where no step
+performed one, the receipt goes `uncertain`, the turn journals
+`expression.flagged`, and the person is told in plain words that the
+sentence is unsupported. String/set logic, ~0 ms, never runs on the model
+that generated.
+
+**Boundary log (law 3) — evidence that was neither enforced nor checked.**
+- Every hub append was `let _ = …`. A poisoned lock or failed INSERT meant
+  bytes crossed with no record and the reply shipped anyway. Now `log()`
+  returns `Result` and every caller uses `?`: **no crossing record, no
+  crossing.** The compiler enforces it.
+- `append` read the previous hash and inserted as two statements. Two
+  connections (the daemon and `robotd backup`/`eval`) could interleave and
+  fork the chain permanently, after which `verify_chain` reports false
+  forever — indistinguishable from tampering. Now one IMMEDIATE
+  transaction, joining the caller's if one exists.
+- `verify_chain` existed but was called only in tests. Now runs at every
+  boot (journaled, and loudly logged if broken) and on every dashboard
+  render, with a status indicator on the panel that claims "every byte in
+  and out".
+- Added `BEFORE UPDATE`/`BEFORE DELETE` triggers: the log is append-only by
+  construction, not convention.
+- Failed provider calls now log their inbound crossing too (previously the
+  `?` returned before the In append, so error responses were unlogged).
+- `trust_tag` is derived from origin, not from session ownership: inbound
+  Telegram is `untrusted`, local chat/upload is `owner`, everything the
+  robot emits is `granted`. Previously all conversation crossings were
+  hard-coded `owner`, including open-world Telegram text.
+- **The exemption I granted myself is gone.** `eval --live` made 60 real
+  API calls with `boundary: None`, justified in a code comment. The law
+  covers the process, not "production traffic"; that was not a call the
+  code got to make. Eval now wires the instance sink and refuses to run
+  live without one.
+
+**Other law-adjacent fixes:** SSRF policy on `fetch_text` (targets come
+from search results, i.e. the open world — loopback, private ranges,
+link-local/metadata, and non-http(s) schemes are refused); the Q19 hedge
+now races to the first **success** rather than the first responder (a
+primary erroring 500 ms after the hedge fired used to kill the in-flight
+hedge — losing in precisely the case hedging exists for) and hedges
+immediately on a fast failure; `outbox` marks `confirmed` after the
+message is in the store the surface reads from, not before.
+
+**Gate.** 71 tests green; clippy -D warnings clean; eval 52 routing
+MISROUTE-0, 12/12 kill scenarios, floor p95 1.6 ms, **60/60 injection
+calls clean**. Live: boot reports "boundary log verified: 136 crossings,
+chain intact"; after a live eval run wrote 128 more crossings **from a
+second process against the running daemon**, the chain still verifies at
+264 — the concurrent-writer fork this fix exists for.
+
+**Known gaps, stated rather than hidden:**
+- The chain is unkeyed SHA-256. Triggers and verification stop accidental
+  and casual tampering, but an adversary who can write the database and
+  alter its schema can recompute the chain. Real tamper-*proofing* needs an
+  HMAC under a key held outside `core.db` (or an external anchor); specced,
+  not built.
+- Telegram still marks `confirmed` before the provider send returns a
+  message_id; per-surface delivery confirmation is a surfaces-layer change.
+- Law 4 remains inverted (Russian literals inside `prism`, English-only
+  replies at the surface). That is a product change — user-language
+  rendering — not a review fix.
+- `/api/history`, `/dash`, SSE and the inbound listener move bytes without
+  crossings; the law reads as outbound-oriented but the code should say so
+  explicitly.
+
+---
+
 ## M7 — Transferability proof (2026-07-30) · gate PASSED · **MVP COMPLETE**
 
 **Shipped.** The Robot Package (arch §8): `robotd package [dest]` exports

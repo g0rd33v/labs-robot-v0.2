@@ -137,9 +137,63 @@ pub struct Outcome {
     pub step_id: String,
     pub ok: bool,
     pub evidence: Vec<Evidence>,
-    /// Human-usable English fragment describing what happened; feeds the
-    /// reply composer. Never a model narration of success (receipts law).
+    /// What the person sees. For capability steps this is system-generated;
+    /// for model steps it is the model's own prose.
     pub detail: String,
+    /// What the RECEIPT asserts about the world.
+    ///
+    /// `Some(_)` only when the text describes a state transition this code
+    /// actually performed and can point at evidence for. `None` means the
+    /// step produced an utterance and asserts nothing -- model prose is
+    /// never promoted to a receipt claim (arch sec 3: receipts are compiled
+    /// from evidence, never narrated by the model that acted). Without this
+    /// split, a model replying "I've set that reminder" produced a
+    /// `Verified` receipt whose only evidence was that a model spoke.
+    #[serde(default)]
+    pub claim: Option<String>,
+}
+
+impl Outcome {
+    /// A step that performed a verified state transition: its text is both
+    /// what the person reads and what the receipt asserts.
+    pub fn attested(step_id: String, evidence: Vec<Evidence>, detail: String) -> Self {
+        Self {
+            step_id,
+            ok: true,
+            evidence,
+            claim: Some(detail.clone()),
+            detail,
+        }
+    }
+
+    /// A step that produced an utterance only (model answers, chitchat).
+    /// The receipt records that a model spoke, not what it said.
+    pub fn utterance(step_id: String, evidence: Vec<Evidence>, detail: String) -> Self {
+        Self {
+            step_id,
+            ok: true,
+            evidence,
+            detail,
+            claim: None,
+        }
+    }
+
+    /// A step that failed. `ok: false` so the receipt cannot come out
+    /// `Verified` -- an external call that failed is not a verified success.
+    pub fn failed(step_id: String, evidence: Vec<Evidence>, detail: String) -> Self {
+        Self {
+            step_id,
+            ok: false,
+            evidence,
+            claim: Some(detail.clone()),
+            detail,
+        }
+    }
+
+    /// True when this step actually changed something in the world.
+    pub fn is_effect(&self) -> bool {
+        self.ok && self.claim.is_some()
+    }
 }
 
 // ---------------------------------------------------------------- verdict (Q16, frozen)

@@ -19,6 +19,8 @@ pub struct DashData {
     pub fact_count: i64,
     pub active_reminders: i64,
     pub boundary_count: i64,
+    /// Result of re-hashing the whole chain at read time.
+    pub boundary_chain_ok: bool,
     /// (content, source snippet, learned ts)
     pub facts: Vec<(String, String, i64)>,
     /// (ts, direction, channel, counterparty, purpose, size)
@@ -134,7 +136,7 @@ pub fn render(d: &DashData) -> String {
   <div class=card><span class=lbl>messages</span><b>{msgs}</b></div>
   <div class=card><span class=lbl>facts</span><b>{facts_n}</b></div>
   <div class=card><span class=lbl>active reminders</span><b>{rems}</b></div>
-  <div class=card><span class=lbl>boundary crossings</span><b>{bnd}</b></div>
+  <div class=card><span class=lbl>boundary crossings</span><b>{bnd}</b><span class=dim>{chain}</span></div>
 </div>
 
 <h2>people</h2>
@@ -144,6 +146,7 @@ pub fn render(d: &DashData) -> String {
 <table><tr><th>#</th><th>fact</th><th>source (your words)</th></tr>{facts_rows}</table>
 
 <h2>boundary log -- last {bshown} crossings (every byte in and out)</h2>
+{chainbanner}
 <table><tr><th>ts</th><th>dir</th><th>channel</th><th>counterparty</th><th>purpose</th><th>size</th></tr>{brows}</table>
 </main></body></html>"#,
         name = esc(&d.robot_name),
@@ -157,9 +160,19 @@ pub fn render(d: &DashData) -> String {
         facts_n = d.fact_count,
         rems = d.active_reminders,
         bnd = d.boundary_count,
+        chain = if d.boundary_chain_ok {
+            "<span class=ok>chain verified</span>"
+        } else {
+            "<span class=off>CHAIN BROKEN</span>"
+        },
         principals = principals_rows,
         facts_rows = fact_rows,
         bshown = d.boundary.len(),
+        chainbanner = if d.boundary_chain_ok {
+            String::new()
+        } else {
+            "<p class=off>the hash chain does not verify: the record below cannot be              trusted as complete. this is reported, not hidden.</p>".to_string()
+        },
         brows = boundary_rows,
     )
 }
@@ -175,6 +188,7 @@ mod tests {
             robot_id: "robot_x".into(),
             facts: vec![("<script>x</script>".into(), "said".into(), 1)],
             boundary: vec![(1, "in".into(), "chat".into(), "local".into(), "conv".into(), 5)],
+            boundary_chain_ok: true,
             principals: vec![(1, "owner".into(), "owner".into(), "active".into())],
             ..Default::default()
         };

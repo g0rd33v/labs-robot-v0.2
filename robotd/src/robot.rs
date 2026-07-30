@@ -222,13 +222,19 @@ impl CapabilityRouter for Capabilities {
             hash: String::new(),
             ts: trust::ids::ts_ms(),
         };
+        // `ok` = this step performed a state transition and attests to it.
+        // `spoke` = a model produced text; the receipt records that a model
+        // spoke, never what it said (arch sec 3).
+        // `failed` = the step did not do what it set out to do; the receipt
+        // must not come out Verified.
         let ok = |evidence: Vec<Evidence>, detail: String| {
-            Ok(Outcome {
-                step_id: String::new(),
-                ok: true,
-                evidence,
-                detail,
-            })
+            Ok(Outcome::attested(String::new(), evidence, detail))
+        };
+        let spoke = |evidence: Vec<Evidence>, detail: String| {
+            Ok(Outcome::utterance(String::new(), evidence, detail))
+        };
+        let failed = |evidence: Vec<Evidence>, detail: String| {
+            Ok(Outcome::failed(String::new(), evidence, detail))
         };
         match capability {
             "reminder.create" => {
@@ -518,7 +524,8 @@ impl CapabilityRouter for Capabilities {
                     content: query.into(),
                 });
                 match gw.chat(role_for(tier), &messages, None, 1200) {
-                    Ok(out) => ok(
+                    // model prose: an utterance, not an attestation
+                    Ok(out) => spoke(
                         vec![Evidence {
                             kind: "provider_response".into(),
                             provider: "openrouter".into(),
@@ -528,7 +535,8 @@ impl CapabilityRouter for Capabilities {
                         }],
                         format!("{}{quota_note}", out.content),
                     ),
-                    Err(e) => ok(
+                    // a failed external call is not a verified success
+                    Err(e) => failed(
                         vec![deterministic("provider-failure")],
                         format!(
                             "i'm having trouble thinking right now ({e}). \
@@ -558,9 +566,9 @@ impl CapabilityRouter for Capabilities {
                         )
                     }
                     Err(e) => {
-                        return ok(
+                        return failed(
                             vec![deterministic("search-failure")],
-                            format!("search failed honestly: {e}"),
+                            format!("the web search failed: {e}"),
                         )
                     }
                 };
@@ -611,9 +619,11 @@ impl CapabilityRouter for Capabilities {
                             hash: trust::ids::sha256_hex(out.content.as_bytes()),
                             ts: trust::ids::ts_ms(),
                         });
-                        ok(ev, format!("{}{sources}", out.content))
+                        // the fetched sources are evidence of what was READ,
+                        // not of what the model concluded from them
+                        spoke(ev, format!("{}{sources}", out.content))
                     }
-                    Err(e) => ok(
+                    Err(e) => failed(
                         vec![deterministic("provider-failure")],
                         format!("i found sources but couldn't think about them ({e})."),
                     ),
@@ -799,7 +809,17 @@ impl RobotCore {
                 categories: "message".into(),
                 payload_hash: trust::ids::sha256_hex(payload.as_bytes()),
                 size: payload.len() as i64,
-                trust_tag: "owner".into(),
+                // Trust is a property of where the bytes came from, not of
+                // who the session belongs to. Inbound Telegram text arrives
+                // over a third-party platform from the open world; only the
+                // local session on this machine is owner-trusted. Everything
+                // the robot itself emits is `granted` (it left under its own
+                // authority).
+                trust_tag: match (direction, surface) {
+                    (Direction::Out, _) => "granted".into(),
+                    (Direction::In, "chat") | (Direction::In, "upload") => "owner".into(),
+                    (Direction::In, _) => "untrusted".into(),
+                },
             },
         )?;
         Ok(())
@@ -835,9 +855,14 @@ impl RobotCore {
                 crash: None,
             };
             let out = prism::run_turn(&cell, &env, &deps)?;
+            // `confirmed` must follow the delivery it claims. For the local
+            // chat the message store IS the delivery channel (the surface
+            // renders from history), so recording it is the confirmation.
+            // Telegram confirms on the provider's message_id, which the send
+            // path owns -- tracked in BUILD-LOG, not silently conflated.
             prism::outbox::mark(&cell, &out.reply_effect_id, "sent", None)?;
-            prism::outbox::mark(&cell, &out.reply_effect_id, "confirmed", None)?;
             mind::record_message(&cell, "out", surface, &out.reply)?;
+            prism::outbox::mark(&cell, &out.reply_effect_id, "confirmed", None)?;
             out.reply
         };
         self.boundary_crossing(Direction::Out, surface, &reply)?;
@@ -906,18 +931,19 @@ impl surfaces::Robot for RobotCore {
                 })
                 .to_string(),
             )?;
-            let outcome = Outcome {
-                step_id: trust::ids::new_id("pstep"),
-                ok: true,
-                evidence: vec![Evidence {
+            // a real state transition: the bytes are in the vault, and the
+            // content hash is the evidence
+            let outcome = Outcome::attested(
+                trust::ids::new_id("pstep"),
+                vec![Evidence {
                     kind: "row".into(),
                     provider: "vault".into(),
                     external_id: media_ref.hash.clone(),
                     hash: media_ref.hash.clone(),
                     ts: trust::ids::ts_ms(),
                 }],
-                detail: format!("stored in the vault: {filename}"),
-            };
+                format!("stored in the vault: {filename}"),
+            );
             prism::journal::step(
                 &cell,
                 &intent_id,
@@ -1081,6 +1107,7 @@ impl surfaces::Robot for RobotCore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             d.boundary_count = trust::boundary::count(&core)?;
+            d.boundary_chain_ok = trust::boundary::verify_chain(&core)?;
             let mut stmt = core.prepare(
                 "SELECT ts, direction, channel, counterparty, purpose, size \
                  FROM boundary_log ORDER BY seq DESC LIMIT 50",

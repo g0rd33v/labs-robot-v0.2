@@ -67,12 +67,28 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         None
     };
 
+    // Law #3 is only credible if the chain is actually checked. Verify at
+    // every boot, journal the verdict, and surface it on the dashboard --
+    // tamper-evidence nobody evaluates is not evidence.
+    let chain_ok = trust::boundary::verify_chain(&core)?;
+    if chain_ok {
+        tracing::info!(
+            "boundary log verified: {} crossings, chain intact",
+            trust::boundary::count(&core)?
+        );
+    } else {
+        tracing::error!(
+            "BOUNDARY LOG CHAIN BROKEN -- the I/O record for this robot can no \
+             longer be trusted end to end. this is reported in the dashboard."
+        );
+    }
     schema::core_journal(
         &core,
         "boot",
         &serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "name": cfg.robot.name,
+            "boundary_chain_ok": chain_ok,
         })
         .to_string(),
     )?;

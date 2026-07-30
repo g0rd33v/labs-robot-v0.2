@@ -255,28 +255,42 @@ impl ModelGateway {
         }
     }
 
-    fn log(&self, direction: Direction, model: &str, purpose: &str, payload: &str) {
-        if let Some(sink) = &self.boundary {
-            if let Ok(conn) = sink.lock() {
-                let _ = boundary::append(
-                    &conn,
-                    &Crossing {
-                        direction,
-                        channel: "model-api".into(),
-                        counterparty: format!("openrouter.ai/{model}"),
-                        purpose: purpose.into(),
-                        categories: "prompt-context".into(),
-                        payload_hash: trust::ids::sha256_hex(payload.as_bytes()),
-                        size: payload.len() as i64,
-                        trust_tag: if direction == Direction::Out {
-                            "granted".into()
-                        } else {
-                            "untrusted".into()
-                        },
-                    },
-                );
-            }
-        }
+    /// Record a crossing. Law #3 is enforced, not attempted: if the log
+    /// write fails, the caller must abort rather than let bytes move
+    /// unrecorded. Previously this swallowed both a poisoned lock and a
+    /// failed INSERT, so the Boundary Log silently degraded to best-effort.
+    fn log(
+        &self,
+        direction: Direction,
+        model: &str,
+        purpose: &str,
+        payload: &str,
+    ) -> Result<(), HubError> {
+        let Some(sink) = &self.boundary else {
+            return Ok(()); // no sink wired: this gateway is not instance traffic
+        };
+        let conn = sink
+            .lock()
+            .map_err(|_| HubError::Gateway("boundary log unavailable (poisoned)".into()))?;
+        boundary::append(
+            &conn,
+            &Crossing {
+                direction,
+                channel: "model-api".into(),
+                counterparty: format!("openrouter.ai/{model}"),
+                purpose: purpose.into(),
+                categories: "prompt-context".into(),
+                payload_hash: trust::ids::sha256_hex(payload.as_bytes()),
+                size: payload.len() as i64,
+                trust_tag: if direction == Direction::Out {
+                    "granted".into()
+                } else {
+                    "untrusted".into()
+                },
+            },
+        )
+        .map_err(|e| HubError::Gateway(format!("boundary log write failed: {e}")))?;
+        Ok(())
     }
 
     fn attempt(
@@ -287,10 +301,19 @@ impl ModelGateway {
         timeout_ms: u64,
     ) -> Result<ChatOut, HubError> {
         let body_str = body.to_string();
-        self.log(Direction::Out, model, role.as_str(), &body_str);
-        let resp = self.api.post_chat(model, body, timeout_ms)?;
+        // no crossing record, no crossing: the log write gates the call
+        self.log(Direction::Out, model, role.as_str(), &body_str)?;
+        let resp = match self.api.post_chat(model, body, timeout_ms) {
+            Ok(r) => r,
+            Err(e) => {
+                // the failure itself is an inbound crossing worth recording
+                let note = format!("error: {e}");
+                self.log(Direction::In, model, role.as_str(), &note)?;
+                return Err(e);
+            }
+        };
         let resp_str = resp.to_string();
-        self.log(Direction::In, model, role.as_str(), &resp_str);
+        self.log(Direction::In, model, role.as_str(), &resp_str)?;
         let content = resp["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| HubError::Gateway(format!("{model}: no content in response")))?
@@ -371,14 +394,14 @@ impl ModelGateway {
             &model,
             "stt",
             &format!("audio:{format}:{}bytes", bytes.len()),
-        );
+        )?;
         match self
             .api
             .post_transcription(&model, bytes, format, self.cfg.answer_timeout_ms)
         {
             Ok(resp) => {
                 let resp_str = resp.to_string();
-                self.log(Direction::In, &model, "stt", &resp_str);
+                self.log(Direction::In, &model, "stt", &resp_str)?;
                 let text = resp["text"]
                     .as_str()
                     .ok_or_else(|| HubError::Gateway(format!("{model}: no transcript")))?
@@ -419,33 +442,41 @@ impl ModelGateway {
         timeout_ms: u64,
     ) -> Result<ChatOut, HubError> {
         let (tx, rx) = mpsc::channel::<Result<ChatOut, HubError>>();
-        let fire = |tx: mpsc::Sender<Result<ChatOut, HubError>>| {
+        let fire = |tx: mpsc::Sender<Result<ChatOut, HubError>>| -> Result<(), HubError> {
             let api = self.api.clone();
-            let model = model.to_string();
+            let model_owned = model.to_string();
             let body = body.clone();
             let body_str = body.to_string();
-            self.log(Direction::Out, &model, role.as_str(), &body_str);
+            // gate the request on its own crossing record (law #3)
+            self.log(Direction::Out, model, role.as_str(), &body_str)?;
             let boundary = self.boundary.clone();
             let role_name = role.as_str();
             std::thread::spawn(move || {
+                let model = model_owned;
                 let result = api.post_chat(&model, &body, timeout_ms).and_then(|resp| {
+                    // the response is unusable unless its crossing is
+                    // recorded: no record, no bytes
                     if let Some(sink) = &boundary {
-                        if let Ok(conn) = sink.lock() {
-                            let s = resp.to_string();
-                            let _ = boundary::append(
-                                &conn,
-                                &Crossing {
-                                    direction: Direction::In,
-                                    channel: "model-api".into(),
-                                    counterparty: format!("openrouter.ai/{model}"),
-                                    purpose: role_name.into(),
-                                    categories: "prompt-context".into(),
-                                    payload_hash: trust::ids::sha256_hex(s.as_bytes()),
-                                    size: s.len() as i64,
-                                    trust_tag: "untrusted".into(),
-                                },
-                            );
-                        }
+                        let s = resp.to_string();
+                        let conn = sink.lock().map_err(|_| {
+                            HubError::Gateway("boundary log unavailable (poisoned)".into())
+                        })?;
+                        boundary::append(
+                            &conn,
+                            &Crossing {
+                                direction: Direction::In,
+                                channel: "model-api".into(),
+                                counterparty: format!("openrouter.ai/{model}"),
+                                purpose: role_name.into(),
+                                categories: "prompt-context".into(),
+                                payload_hash: trust::ids::sha256_hex(s.as_bytes()),
+                                size: s.len() as i64,
+                                trust_tag: "untrusted".into(),
+                            },
+                        )
+                        .map_err(|e| {
+                            HubError::Gateway(format!("boundary log write failed: {e}"))
+                        })?;
                     }
                     let content = resp["choices"][0]["message"]["content"]
                         .as_str()
@@ -459,18 +490,51 @@ impl ModelGateway {
                 });
                 let _ = tx.send(result);
             });
+            Ok(())
         };
 
-        fire(tx.clone());
-        match rx.recv_timeout(Duration::from_millis(self.cfg.hedge_after_ms)) {
-            Ok(result) => result,
-            Err(_) => {
-                // deadline passed: hedge with an identical request
-                fire(tx);
-                rx.recv_timeout(Duration::from_millis(timeout_ms))
-                    .map_err(|_| HubError::Gateway(format!("{model}: hedged attempts timed out")))?
+        // Race semantics: the FIRST SUCCESS wins, not the first responder.
+        // Previously an error from the primary (typically its own timeout,
+        // 500ms after the hedge was fired) was returned immediately and
+        // discarded an in-flight hedge -- losing in exactly the case
+        // hedging exists for. A fast failure now hedges at once instead of
+        // waiting out the deadline.
+        fire(tx.clone())?;
+        let mut hedged = false;
+        let mut heard = 0usize;
+        let mut last_err: Option<HubError> = None;
+        let mut wait = Duration::from_millis(self.cfg.hedge_after_ms);
+
+        loop {
+            match rx.recv_timeout(wait) {
+                Ok(Ok(out)) => return Ok(out),
+                Ok(Err(e)) => {
+                    heard += 1;
+                    last_err = Some(e);
+                    if !hedged {
+                        fire(tx.clone())?;
+                        hedged = true;
+                        wait = Duration::from_millis(timeout_ms);
+                        continue;
+                    }
+                    if heard >= 2 {
+                        break;
+                    }
+                    wait = Duration::from_millis(timeout_ms);
+                }
+                Err(_) => {
+                    if !hedged {
+                        fire(tx.clone())?;
+                        hedged = true;
+                        wait = Duration::from_millis(timeout_ms);
+                        continue;
+                    }
+                    break; // both attempts exhausted their time
+                }
             }
         }
+        Err(last_err
+            .unwrap_or_else(|| HubError::Gateway(format!("{model}: hedged attempts timed out"))))
     }
 }
 

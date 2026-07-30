@@ -31,33 +31,38 @@ impl Telegram {
         }
     }
 
-    fn log(&self, direction: Direction, purpose: &str, payload: &[u8]) {
-        if let Some(sink) = &self.boundary {
-            if let Ok(conn) = sink.lock() {
-                let _ = boundary::append(
-                    &conn,
-                    &Crossing {
-                        direction,
-                        channel: "telegram".into(),
-                        counterparty: "api.telegram.org".into(),
-                        purpose: purpose.into(),
-                        categories: "message".into(),
-                        payload_hash: trust::ids::sha256_hex(payload),
-                        size: payload.len() as i64,
-                        trust_tag: if direction == Direction::Out {
-                            "granted".into()
-                        } else {
-                            "untrusted".into()
-                        },
-                    },
-                );
-            }
-        }
+    /// Law #3, enforced: a failed log write aborts the crossing.
+    fn log(&self, direction: Direction, purpose: &str, payload: &[u8]) -> Result<(), HubError> {
+        let Some(sink) = &self.boundary else {
+            return Ok(());
+        };
+        let conn = sink
+            .lock()
+            .map_err(|_| HubError::Gateway("boundary log unavailable (poisoned)".into()))?;
+        boundary::append(
+            &conn,
+            &Crossing {
+                direction,
+                channel: "telegram".into(),
+                counterparty: "api.telegram.org".into(),
+                purpose: purpose.into(),
+                categories: "message".into(),
+                payload_hash: trust::ids::sha256_hex(payload),
+                size: payload.len() as i64,
+                trust_tag: if direction == Direction::Out {
+                    "granted".into()
+                } else {
+                    "untrusted".into()
+                },
+            },
+        )
+        .map_err(|e| HubError::Gateway(format!("boundary log write failed: {e}")))?;
+        Ok(())
     }
 
     /// Long-poll for updates (25s server-side wait).
     pub fn get_updates(&self, offset: i64) -> Result<Vec<TgUpdate>, HubError> {
-        self.log(Direction::Out, "telegram-poll", format!("offset={offset}").as_bytes());
+        self.log(Direction::Out, "telegram-poll", format!("offset={offset}").as_bytes())?;
         let resp: serde_json::Value = self
             .agent
             .get(&format!(
@@ -72,7 +77,7 @@ impl Telegram {
             .into_json()
             .map_err(|e| HubError::Gateway(format!("telegram json: {e}")))?;
         let resp_str = resp.to_string();
-        self.log(Direction::In, "telegram-poll", resp_str.as_bytes());
+        self.log(Direction::In, "telegram-poll", resp_str.as_bytes())?;
         let updates = resp["result"]
             .as_array()
             .map(|arr| {
@@ -92,7 +97,7 @@ impl Telegram {
 
     pub fn send_message(&self, chat_id: i64, text: &str) -> Result<(), HubError> {
         let body = serde_json::json!({ "chat_id": chat_id, "text": text });
-        self.log(Direction::Out, "telegram-send", body.to_string().as_bytes());
+        self.log(Direction::Out, "telegram-send", body.to_string().as_bytes())?;
         let resp = self
             .agent
             .post(&format!(
@@ -103,7 +108,7 @@ impl Telegram {
             .send_json(body)
             .map_err(|e| HubError::Gateway(format!("telegram send: {e}")))?;
         let text_resp = resp.into_string().unwrap_or_default();
-        self.log(Direction::In, "telegram-send", text_resp.as_bytes());
+        self.log(Direction::In, "telegram-send", text_resp.as_bytes())?;
         Ok(())
     }
 }

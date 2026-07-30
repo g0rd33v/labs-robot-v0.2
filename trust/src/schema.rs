@@ -49,6 +49,18 @@ CREATE TABLE IF NOT EXISTS invites (
     created_at INTEGER NOT NULL,
     used_by    INTEGER
 );
+-- The boundary log is append-only by construction, not by convention: the
+-- hash chain makes edits detectable, and these make them fail outright.
+-- An attacker with the database must now also alter the schema, which is
+-- itself a visible change.
+CREATE TRIGGER IF NOT EXISTS boundary_log_no_update
+BEFORE UPDATE ON boundary_log BEGIN
+    SELECT RAISE(ABORT, 'boundary_log is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS boundary_log_no_delete
+BEFORE DELETE ON boundary_log BEGIN
+    SELECT RAISE(ABORT, 'boundary_log is append-only');
+END;
 ";
 
 pub fn init_core(conn: &Connection) -> Result<(), TrustError> {

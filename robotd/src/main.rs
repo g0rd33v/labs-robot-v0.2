@@ -82,17 +82,45 @@ async fn main() -> anyhow::Result<()> {
             let live = args.iter().any(|a| a == "--live");
             let gateway = if live {
                 match std::env::var("OPENROUTER_API_KEY") {
-                    Ok(key) if !key.trim().is_empty() => Some(std::sync::Arc::new(
-                        hub::ModelGateway::new(
+                    Ok(key) if !key.trim().is_empty() => {
+                        // Law #3 says every byte in and out of THE PROCESS.
+                        // This process makes 60 real API calls, so they are
+                        // logged like any other traffic -- an earlier version
+                        // exempted them in a code comment, which was not a
+                        // call this code got to make. (Safe against a running
+                        // daemon now that appends are transactional and
+                        // connections carry a busy timeout.)
+                        let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+                        let sink = trust::keys::KeyChain::load_or_create(
+                            &data_dir.join("kek.key"),
+                        )
+                        .and_then(|keys| {
+                            trust::cells::open_encrypted(
+                                &data_dir.join("core.db"),
+                                &keys.core_db_key(),
+                            )
+                        })
+                        .map(|conn| std::sync::Arc::new(std::sync::Mutex::new(conn)))
+                        .map_err(|e| {
+                            tracing::warn!("eval boundary sink unavailable: {e}");
+                        })
+                        .ok();
+                        if sink.is_none() {
+                            anyhow::bail!(
+                                "refusing to run live evals without a boundary log: \
+                                 law #3 covers this process too"
+                            );
+                        }
+                        Some(std::sync::Arc::new(hub::ModelGateway::new(
                             std::sync::Arc::new(hub::UreqApi::new(
                                 key.trim().to_string(),
                                 cfg.hub.base_url.clone(),
                             )),
                             cfg.hub.cast.clone(),
                             hub::GatewayConfig::default(),
-                            None, // eval calls are not this instance's traffic
-                        ),
-                    )),
+                            sink,
+                        )))
+                    }
                     _ => None,
                 }
             } else {

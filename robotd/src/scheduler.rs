@@ -65,18 +65,18 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
             let (effect_id, _) =
                 prism::outbox::enqueue(&cell, &intent_id, "surface:chat", &text)?;
             mind::reminders::mark_fired(&cell, &rem.id)?;
-            let outcome = prism::types::Outcome {
-                step_id: trust::ids::new_id("pstep"),
-                ok: true,
-                evidence: vec![prism::types::Evidence {
+            // the commitment really closed: the row moved to `fired`
+            let outcome = prism::types::Outcome::attested(
+                trust::ids::new_id("pstep"),
+                vec![prism::types::Evidence {
                     kind: "row".into(),
                     provider: "cell".into(),
                     external_id: rem.id.clone(),
                     hash: trust::ids::sha256_hex(rem.about.as_bytes()),
                     ts: now,
                 }],
-                detail: format!("reminder fired: {}", rem.about),
-            };
+                format!("reminder fired: {}", rem.about),
+            );
             prism::journal::step(
                 &cell,
                 &intent_id,

@@ -51,7 +51,34 @@ fn material(prev_hash: &str, ts: i64, c: &Crossing) -> String {
 }
 
 /// Append one crossing; returns (seq, entry_hash).
+///
+/// Reading the previous hash and inserting the new row happen inside one
+/// IMMEDIATE transaction: as two separate statements they could interleave
+/// with a second connection (the `backup`/`package` subcommands open the
+/// same core.db while the daemon is live), producing two rows that share a
+/// `prev_hash`. That forks the chain permanently, and `verify_chain` then
+/// reports false forever -- indistinguishable from tampering.
+///
+/// If the caller already owns a transaction, this joins it rather than
+/// nesting.
 pub fn append(conn: &Connection, c: &Crossing) -> Result<(i64, String), TrustError> {
+    if !conn.is_autocommit() {
+        return append_in_tx(conn, c);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    match append_in_tx(conn, c) {
+        Ok(v) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+fn append_in_tx(conn: &Connection, c: &Crossing) -> Result<(i64, String), TrustError> {
     let prev_hash: String = conn
         .query_row(
             "SELECT entry_hash FROM boundary_log ORDER BY seq DESC LIMIT 1",
@@ -181,16 +208,60 @@ mod tests {
         assert!(verify_chain(&conn).unwrap());
     }
 
+    /// Edits are refused outright by the append-only triggers.
     #[test]
-    fn tampering_is_detected() {
+    fn the_log_cannot_be_edited_or_deleted() {
         let conn = mem_core();
         append(&conn, &crossing(Direction::In, "h1")).unwrap();
         append(&conn, &crossing(Direction::Out, "h2")).unwrap();
-        conn.execute(
+
+        let edit = conn.execute(
             "UPDATE boundary_log SET payload_hash = 'forged' WHERE seq = 1",
+            [],
+        );
+        assert!(edit.is_err(), "boundary log must reject UPDATE");
+        let delete = conn.execute("DELETE FROM boundary_log WHERE seq = 1", []);
+        assert!(delete.is_err(), "boundary log must reject DELETE");
+
+        // and the chain is still intact after the refused attempts
+        assert!(verify_chain(&conn).unwrap());
+        assert_eq!(count(&conn).unwrap(), 2);
+    }
+
+    /// If a row ever does get in with a broken link (a forked chain from a
+    /// second connection, or a schema-level attack), verification says so.
+    #[test]
+    fn a_broken_link_fails_verification() {
+        let conn = mem_core();
+        append(&conn, &crossing(Direction::In, "h1")).unwrap();
+        // an appended row that does not commit to the real previous entry
+        conn.execute(
+            "INSERT INTO boundary_log \
+             (ts, direction, channel, counterparty, purpose, categories, payload_hash, \
+              size, trust_tag, prev_hash, entry_hash) \
+             VALUES (1, 'out', 'chat', 'x', 'y', '', 'h2', 1, 'owner', 'not-the-real-prev', 'zz')",
             [],
         )
         .unwrap();
         assert!(!verify_chain(&conn).unwrap());
+    }
+
+    /// Concurrent appends must not fork the chain: every row's prev_hash is
+    /// the previous row's entry_hash, with no duplicates.
+    #[test]
+    fn appends_are_serialized_into_one_chain() {
+        let conn = mem_core();
+        for i in 0..25 {
+            append(&conn, &crossing(Direction::In, &format!("h{i}"))).unwrap();
+        }
+        assert!(verify_chain(&conn).unwrap());
+        let distinct: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT prev_hash) FROM boundary_log",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct, 25, "each entry must commit to a unique predecessor");
     }
 }
