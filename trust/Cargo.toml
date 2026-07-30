@@ -1,0 +1,13 @@
+[package]
+name = "trust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }

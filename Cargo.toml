@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "robotd",
+    "prism",
+    "mind",
+    "hub",
+    "trust",
+    "surfaces",
+]
+
+# Shared settings inherited by every member via `<field>.workspace = true`.
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+
+# Every dependency in the workspace is declared here once (CLAUDE.md law:
+# no new dependencies without listing them). Members reference by name.
+[workspace.dependencies]
+# async runtime (arch sec 2a names tokio)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+# embedded web server for the built-in Chat + Dashboard-lite (arch sec 10a/10b)
+axum = "0.8"
+# SQLite with SQLCipher, vendored so builds are reproducible (Q4, arch sec 13/13a)
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
+# typed schemas and config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# hashing: boundary-log chain, content hashes, dedupe keys
+sha2 = "0.10"
+# key material, tokens, ids
+rand = "0.8"
+# AEAD for wrapping per-cell DEKs under the KEK (Q4 envelope encryption)
+chacha20poly1305 = "0.10"
+hex = "0.4"
+# structured logs
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# errors: thiserror in libraries, anyhow at the robotd top level
+thiserror = "2"
+anyhow = "1"
+
+# internal crates
+trust = { path = "trust" }
+prism = { path = "prism" }
+mind = { path = "mind" }
+hub = { path = "hub" }
+surfaces = { path = "surfaces" }

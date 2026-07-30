@@ -1,0 +1,11 @@
+# bender -- robot v0.2 instance configuration (example).
+# copy to robot.toml or let robotd write the default on first boot.
+# no secrets belong in this file.
+
+[robot]
+name = "bender"
+data_dir = "./data"
+
+[server]
+host = "127.0.0.1"
+port = 7777
