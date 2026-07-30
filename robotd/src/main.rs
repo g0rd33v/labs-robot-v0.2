@@ -1,8 +1,11 @@
 //! robotd: the one signed binary (arch sec 2). Boots the Robot, prints the
-//! Tier-3 slug URL, serves the built-in Chat.
+//! Tier-3 slug URL, serves the built-in Chat. Subcommands handle packaging,
+//! backup, and the eval suite.
 
+mod archive;
 mod backup;
 mod boot;
+mod cli;
 mod config;
 mod evals;
 mod maintenance;
@@ -11,7 +14,7 @@ mod robot;
 mod scheduler;
 mod telegram;
 
-use std::path::PathBuf;
+use cli::Cmd;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -22,116 +25,76 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let config_path = args
-        .iter()
-        .position(|a| a == "--config")
-        .and_then(|i| args.get(i + 1))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("robot.toml"));
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = match cli::parse(&argv) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{}", cli::USAGE);
+            std::process::exit(2);
+        }
+    };
 
-    let cfg = config::load(&config_path)?;
+    match cmd {
+        Cmd::Help => {
+            print!("{}", cli::USAGE);
+            Ok(())
+        }
+        Cmd::Version => {
+            println!("robotd {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
 
-    // subcommands: backup / backup-restore / eval
-    match args.get(1).map(String::as_str) {
-        Some("backup") => {
+        // `restore` deliberately does NOT load a config: it is run in a
+        // fresh directory, and loading would write a default robot.toml
+        // into the current one as a side effect.
+        Cmd::Restore {
+            pkg,
+            code,
+            into,
+            port,
+            force,
+        } => package::restore(&pkg, &code, &into, port, force),
+
+        Cmd::Backup { config } => {
+            let cfg = config::load(&config)?;
             let path = backup::run(&cfg)?;
             println!("backup sealed: {}", path.display());
-            return Ok(());
+            Ok(())
         }
-        Some("backup-restore") => {
-            let sealed = args.get(2).map(PathBuf::from).ok_or_else(|| {
-                anyhow::anyhow!("usage: robotd backup-restore <sealed> <dest-dir>")
-            })?;
-            let dest = args.get(3).map(PathBuf::from).ok_or_else(|| {
-                anyhow::anyhow!("usage: robotd backup-restore <sealed> <dest-dir>")
-            })?;
+        Cmd::BackupRestore {
+            config,
+            sealed,
+            dest,
+        } => {
+            let cfg = config::load(&config)?;
             backup::restore(&cfg, &sealed, &dest)?;
             println!("restored into {}", dest.display());
-            return Ok(());
+            Ok(())
         }
-        Some("package") => {
-            let dest = args.get(2).filter(|a| !a.starts_with("--")).map(PathBuf::from);
+        Cmd::Package { config, dest } => {
+            let cfg = config::load(&config)?;
             let (path, code) = package::export(&cfg, dest)?;
             println!("robot package: {}", path.display());
             println!("one-time code: {code}");
             println!("(the code is the seal -- carry it separately from the file)");
-            return Ok(());
+            Ok(())
         }
-        Some("restore") => {
-            let pkg = args.get(2).map(PathBuf::from).ok_or_else(|| {
-                anyhow::anyhow!("usage: robotd restore <pkg> --code <code> --into <dir> [--port N] [--force]")
-            })?;
-            let get = |flag: &str| {
-                args.iter()
-                    .position(|a| a == flag)
-                    .and_then(|i| args.get(i + 1))
-                    .cloned()
-            };
-            let code = get("--code")
-                .ok_or_else(|| anyhow::anyhow!("--code <code> is required"))?;
-            let into = PathBuf::from(
-                get("--into").ok_or_else(|| anyhow::anyhow!("--into <dir> is required"))?,
-            );
-            let port: u16 = get("--port").and_then(|p| p.parse().ok()).unwrap_or(7778);
-            let force = args.iter().any(|a| a == "--force");
-            package::restore(&pkg, &code, &into, port, force)?;
-            return Ok(());
-        }
-        Some("eval") => {
-            let live = args.iter().any(|a| a == "--live");
+        Cmd::Eval { config, live } => {
+            let cfg = config::load(&config)?;
             let gateway = if live {
-                match std::env::var("OPENROUTER_API_KEY") {
-                    Ok(key) if !key.trim().is_empty() => {
-                        // Law #3 says every byte in and out of THE PROCESS.
-                        // This process makes 60 real API calls, so they are
-                        // logged like any other traffic -- an earlier version
-                        // exempted them in a code comment, which was not a
-                        // call this code got to make. (Safe against a running
-                        // daemon now that appends are transactional and
-                        // connections carry a busy timeout.)
-                        let data_dir = std::path::Path::new(&cfg.robot.data_dir);
-                        let sink = trust::keys::KeyChain::load_or_create(
-                            &data_dir.join("kek.key"),
-                        )
-                        .and_then(|keys| {
-                            trust::cells::open_encrypted(
-                                &data_dir.join("core.db"),
-                                &keys.core_db_key(),
-                            )
-                        })
-                        .map(|conn| std::sync::Arc::new(std::sync::Mutex::new(conn)))
-                        .map_err(|e| {
-                            tracing::warn!("eval boundary sink unavailable: {e}");
-                        })
-                        .ok();
-                        if sink.is_none() {
-                            anyhow::bail!(
-                                "refusing to run live evals without a boundary log: \
-                                 law #3 covers this process too"
-                            );
-                        }
-                        Some(std::sync::Arc::new(hub::ModelGateway::new(
-                            std::sync::Arc::new(hub::UreqApi::new(
-                                key.trim().to_string(),
-                                cfg.hub.base_url.clone(),
-                            )),
-                            cfg.hub.cast.clone(),
-                            hub::GatewayConfig::default(),
-                            sink,
-                        )))
-                    }
-                    _ => None,
-                }
+                Some(evals::live_gateway(&cfg)?)
             } else {
                 None
             };
             let code = evals::run(live, gateway)?;
             std::process::exit(code);
         }
-        _ => {}
+        Cmd::Serve { config } => serve(&config).await,
     }
+}
 
+async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
+    let cfg = config::load(config_path)?;
     let booted = boot::bootstrap(&cfg)?;
 
     // the commitment ledger's background lane: due reminders fire
@@ -155,7 +118,10 @@ async fn main() -> anyhow::Result<()> {
         cfg.robot.name,
         cfg.robot.data_dir
     );
-    println!("\n  your robot is live. open this on this machine:\n\n  {}\n", booted.slug_url);
+    println!(
+        "\n  your robot is live. open this on this machine:\n\n  {}\n",
+        booted.slug_url
+    );
 
     surfaces::serve(booted.state, booted.addr, async {
         let _ = tokio::signal::ctrl_c().await;

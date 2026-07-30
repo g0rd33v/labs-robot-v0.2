@@ -178,6 +178,30 @@ impl Capabilities {
             })
     }
 
+    /// Owner-only gate for administrative capabilities.
+    ///
+    /// The role check comes FIRST, before any availability check. It used to
+    /// come second, behind `let Some(core) = ... else { return }`, and every
+    /// test constructed the router with `core: None` -- so the two cases
+    /// annotated "owner-only refusal path" short-circuited on availability
+    /// and never executed the comparison at all. Inverting or deleting the
+    /// check broke no test. It is the only authorization boundary in the
+    /// product.
+    fn require_owner(
+        &self,
+        cell: &Cell,
+        intent_id: &str,
+        what: &str,
+    ) -> Result<Arc<Mutex<Connection>>, String> {
+        let acting = Self::principal_of(cell, intent_id);
+        if acting != self.owner_principal {
+            return Err(format!("only the owner can {what}."));
+        }
+        self.core
+            .clone()
+            .ok_or_else(|| format!("{what} isn't available in this context."))
+    }
+
     /// The acting principal, from the journaled intent (role checks).
     fn principal_of(cell: &Cell, intent_id: &str) -> i64 {
         cell.with(|c| prism::journal::payload_of(c, intent_id, "intent_open"))
@@ -420,19 +444,10 @@ impl CapabilityRouter for Capabilities {
                 }
             }
             "member.invite" => {
-                let acting = Self::principal_of(cell, intent_id);
-                let Some(core) = &self.core else {
-                    return ok(
-                        vec![deterministic("member.invite")],
-                        "invite minting isn't available in this context.".into(),
-                    );
+                let core = match self.require_owner(cell, intent_id, "mint invites") {
+                    Ok(c) => c,
+                    Err(why) => return ok(vec![deterministic("member.invite")], why),
                 };
-                if acting != self.owner_principal {
-                    return ok(
-                        vec![deterministic("member.invite")],
-                        "only the owner can mint invites.".into(),
-                    );
-                }
                 let token = trust::ids::random_hex(12);
                 {
                     let core = core
@@ -454,19 +469,10 @@ impl CapabilityRouter for Capabilities {
                 )
             }
             "telegram.bind_code" => {
-                let acting = Self::principal_of(cell, intent_id);
-                let Some(core) = &self.core else {
-                    return ok(
-                        vec![deterministic("telegram.bind_code")],
-                        "telegram binding isn't available in this context.".into(),
-                    );
+                let core = match self.require_owner(cell, intent_id, "bind telegram") {
+                    Ok(c) => c,
+                    Err(why) => return ok(vec![deterministic("telegram.bind_code")], why),
                 };
-                if acting != self.owner_principal {
-                    return ok(
-                        vec![deterministic("telegram.bind_code")],
-                        "only the owner can bind telegram.".into(),
-                    );
-                }
                 let code = format!(
                     "{:06}",
                     u32::from_str_radix(&trust::ids::random_hex(4), 16).unwrap_or(0) % 1_000_000

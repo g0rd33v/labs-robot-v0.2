@@ -321,6 +321,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The only authorization boundary in the product, exercised for real:
+    /// an owner and a member, both with journaled intents, asserting the
+    /// ABSENCE of the effect for the member -- not just the refusal string.
+    /// The previous tests could not reach the check at all (see
+    /// `Capabilities::require_owner`).
+    #[test]
+    fn only_the_owner_can_mint_invites_and_bind_telegram() {
+        let (cfg, dir) = test_cfg();
+        let boot = bootstrap(&cfg).unwrap();
+        let owner = boot.robot.owner_principal;
+
+        // owner mints one -- an invites row appears
+        let reply = boot
+            .state
+            .robot
+            .handle_message(owner, "invite".into())
+            .unwrap();
+        assert!(reply.contains("/i/"), "{reply}");
+        let token = reply.split("/i/").nth(1).unwrap().trim().to_string();
+        let (member, _) = boot.state.robot.accept_invite(&token).unwrap();
+        assert_ne!(member, owner);
+
+        let invites_now = |r: &Arc<crate::robot::RobotCore>| -> i64 {
+            let core = r.core.lock().unwrap();
+            core.query_row("SELECT count(*) FROM invites", [], |row| row.get(0))
+                .unwrap()
+        };
+        let before = invites_now(&boot.robot);
+
+        // the member asks for an invite: refused, AND no row is created
+        let reply = boot
+            .state
+            .robot
+            .handle_message(member, "invite".into())
+            .unwrap();
+        assert!(
+            reply.contains("only the owner"),
+            "member should be refused: {reply}"
+        );
+        assert_eq!(
+            invites_now(&boot.robot),
+            before,
+            "a refused invite must not mint a token"
+        );
+
+        // same for the telegram bind code: refused, and no code is stored
+        let reply = boot
+            .state
+            .robot
+            .handle_message(member, "telegram code".into())
+            .unwrap();
+        assert!(reply.contains("only the owner"), "{reply}");
+        {
+            let core = boot.robot.core.lock().unwrap();
+            let stored = trust::schema::meta_get(&core, "tg_bind_code_hash").unwrap();
+            assert!(stored.is_none(), "a refused request must not store a code");
+        }
+
+        // ...and the owner still can
+        let reply = boot
+            .state
+            .robot
+            .handle_message(owner, "telegram code".into())
+            .unwrap();
+        assert!(reply.contains("bind code"), "{reply}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn second_boot_reuses_identity_and_slug() {
         let (cfg, dir) = test_cfg();

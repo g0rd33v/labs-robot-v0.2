@@ -4,11 +4,10 @@
 //! blank directory into a ready-to-run Robot -- memory, receipts, persona
 //! intact. Move (sec 8a): the flow is symmetric, state travels both ways.
 
-use crate::backup::{copy_tree, snapshot_db};
+use crate::archive::{self, StageSpec};
 use crate::config::RobotConfig;
 use anyhow::{bail, Context};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use trust::keys::KeyChain;
 
 /// Export the Robot Package. Returns (package path, one-time code).
@@ -17,49 +16,30 @@ pub fn export(cfg: &RobotConfig, dest: Option<PathBuf>) -> anyhow::Result<(PathB
     let keys = KeyChain::load_or_create(&data_dir.join("kek.key"))?;
     let ts = trust::ids::ts_ms();
     let staging = std::env::temp_dir().join(format!("bender-pkg-{ts}"));
-    std::fs::create_dir_all(staging.join("data").join("cells"))?;
+    std::fs::create_dir_all(&staging)?;
 
-    // essence: every cell (online snapshot, cipher preserved), media, core
-    // last -- and the keys, because the package IS the robot and the seal
-    // code is the new perimeter (sec 8: recoverable without any service)
-    let core_path = data_dir.join("core.db");
-    let core = trust::cells::open_encrypted(&core_path, &keys.core_db_key())?;
-    let cell_ids: Vec<String> = {
-        let mut stmt = core.prepare("SELECT cell_id FROM cell_keys")?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids
-    };
-    let mut manifest_cells = vec![];
-    for cell_id in &cell_ids {
-        let dek = crate::robot::ensure_cell_key(&core, &keys, cell_id)?;
-        let src = data_dir.join("cells").join(format!("{cell_id}.db"));
-        if !src.exists() {
-            continue;
-        }
-        let dest_db = staging.join("data").join("cells").join(format!("{cell_id}.db"));
-        snapshot_db(&src, &dek, &dest_db)?;
-        manifest_cells.push(serde_json::json!({
-            "cell_id": cell_id,
-            "bytes": std::fs::metadata(&dest_db)?.len(),
-        }));
-    }
-    let media_files = copy_tree(&data_dir.join("media"), &staging.join("data").join("media"))?;
-    snapshot_db(&core_path, &keys.core_db_key(), &staging.join("data").join("core.db"))?;
-    let robot_id = trust::schema::meta_get(&core, "robot_id")?.unwrap_or_default();
-    drop(core);
-    std::fs::copy(data_dir.join("kek.key"), staging.join("data").join("kek.key"))?;
+    // essence: every cell, media, core last -- and the keys, because the
+    // package IS the robot and the one-time code is the new perimeter
+    // (sec 8: recoverable without any hosted service)
+    let staged = archive::stage(
+        &StageSpec {
+            data_dir,
+            inner_prefix: "data",
+            include_keyfile: true,
+        },
+        &keys,
+        &staging,
+    )?;
 
     let manifest = serde_json::json!({
         "kind": "bender-robot-package",
         "format_version": 1,
-        "robot_id": robot_id,
+        "robot_id": staged.robot_id,
         "robot_name": cfg.robot.name,
         "runtime_version": env!("CARGO_PKG_VERSION"),
         "created_at": ts,
-        "cells": manifest_cells,
-        "media_files": media_files,
+        "cells": staged.cells,
+        "media_files": staged.media_files,
         "excluded": ["models (runtime, re-fetchable)", "backups"],
     });
     std::fs::write(
@@ -67,26 +47,11 @@ pub fn export(cfg: &RobotConfig, dest: Option<PathBuf>) -> anyhow::Result<(PathB
         serde_json::to_string_pretty(&manifest)?,
     )?;
 
-    // tar, then seal under a one-time code the owner carries separately
-    let tar_path = std::env::temp_dir().join(format!("bender-pkg-{ts}.tar"));
-    let status = Command::new("tar")
-        .arg("-cf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(&staging)
-        .arg(".")
-        .status()
-        .context("running tar")?;
-    if !status.success() {
-        bail!("tar failed: {status}");
-    }
     let code = trust::ids::random_hex(5); // 10 hex chars, carried by the owner
-    let tar_bytes = std::fs::read(&tar_path)?;
-    let sealed = trust::keys::seal_bytes(&trust::keys::passphrase_key(&code), &tar_bytes)?;
+    let sealed = archive::seal_dir(&staging, &trust::keys::passphrase_key(&code))?;
     let out = dest.unwrap_or_else(|| PathBuf::from(format!("bender-robot-{ts}.pkg")));
     std::fs::write(&out, sealed)?;
-    std::fs::remove_file(&tar_path)?;
-    std::fs::remove_dir_all(&staging)?;
+    std::fs::remove_dir_all(&staging).ok();
     Ok((out, code))
 }
 
@@ -101,8 +66,6 @@ pub fn restore(
     force: bool,
 ) -> anyhow::Result<()> {
     let sealed = std::fs::read(pkg).with_context(|| format!("reading {}", pkg.display()))?;
-    let tar_bytes = trust::keys::open_bytes(&trust::keys::passphrase_key(code), &sealed)
-        .context("unsealing the package (wrong code?)")?;
 
     if into.join("data").exists() {
         if !force {
@@ -115,20 +78,7 @@ pub fn restore(
         std::fs::rename(into.join("data"), &aside)?;
         println!("existing data moved aside to {}", aside.display());
     }
-    std::fs::create_dir_all(into)?;
-    let tar_path = into.join("incoming.pkg.tar");
-    std::fs::write(&tar_path, tar_bytes)?;
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(into)
-        .status()
-        .context("running tar -x")?;
-    if !status.success() {
-        bail!("tar -x failed: {status}");
-    }
-    std::fs::remove_file(&tar_path)?;
+    archive::unseal_into(&sealed, &trust::keys::passphrase_key(code), into)?;
 
     // manifest sanity + integrity check: the cells must open with the
     // travelled keys (sec 8a gate: integrity check on the target)

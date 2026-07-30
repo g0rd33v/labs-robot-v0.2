@@ -40,6 +40,8 @@ pub enum FloorMatch {
     Invite,
     /// mint a telegram bind code (owner only)
     TelegramCode,
+    /// an explicit request to look something up on the web
+    WebSearch { query: String },
 }
 
 /// Whole-utterance commands. Matching is EXACT, never substring: an
@@ -128,8 +130,10 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
     let lower: Vec<String> = original
         .iter()
         .map(|t| {
+            // ':' and ';' are stripped too, so "search the web:" and
+            // "remember:" normalize to the same head as their spaced forms
             t.to_lowercase()
-                .trim_matches(|c: char| ",.!?".contains(c))
+                .trim_matches(|c: char| ",.!?:;".contains(c))
                 .to_string()
         })
         .collect();
@@ -161,6 +165,9 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
     if let Some(m) = parse_reminder(&lower, &original, now) {
         return Some(m);
     }
+    if let Some(m) = parse_web_search(&lower, &original, &joined) {
+        return Some(m);
+    }
 
     // ---- 2. whole-utterance phrase commands (exact match only) ----
 
@@ -189,6 +196,52 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         return Some(FloorMatch::TelegramCode);
     }
 
+    None
+}
+
+/// An explicit "look this up on the web" is high-signal and deterministic --
+/// exactly what the floor is for (Q17). Leaving it to the verdict made
+/// search unreliable in practice: the same class of question routed to
+/// research one day and to a plain model answer the next, which replied
+/// "I can't search the web" instead of searching.
+fn parse_web_search(lower: &[String], original: &[&str], joined: &str) -> Option<FloorMatch> {
+    const HEADS: [(&str, usize); 12] = [
+        ("search the web for", 4),
+        ("search the web", 3),
+        ("search online for", 3),
+        ("search for", 2),
+        ("look up", 2),
+        ("google", 1),
+        ("найди в интернете", 3),
+        ("поищи в интернете", 3),
+        ("найди в сети", 3),
+        ("погугли", 1),
+        ("поищи", 1),
+        ("найди", 1),
+    ];
+    for (head, tokens) in HEADS {
+        let hit = joined == head || joined.starts_with(&format!("{head} "));
+        if !hit {
+            continue;
+        }
+        let mut idx = tokens;
+        // strip a linking word left over from the longer forms
+        if matches!(
+            lower.get(idx).map(String::as_str),
+            Some("for") | Some("about") | Some(":") | Some("про") | Some("о")
+        ) {
+            idx += 1;
+        }
+        let query = original[idx.min(original.len())..]
+            .join(" ")
+            .trim_start_matches(':')
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return None; // "google" alone is not a search request
+        }
+        return Some(FloorMatch::WebSearch { query });
+    }
     None
 }
 
@@ -455,6 +508,32 @@ mod tests {
 
     /// Conversational phrasings are NOT floor commands -- they belong to the
     /// verdict path (Q17: the floor is the high-signal set, not an NLU).
+    /// Explicit search requests are deterministic, not left to the verdict.
+    #[test]
+    fn explicit_web_search_is_a_floor_command() {
+        for (text, expect) in [
+            ("search the web for rust 1.97 features", "rust 1.97 features"),
+            ("search the web: rust 1.97 features", "rust 1.97 features"),
+            ("search for the best coffee in lisbon", "the best coffee in lisbon"),
+            ("look up the weather in porto", "the weather in porto"),
+            ("google rust release notes", "rust release notes"),
+            ("найди в интернете новости про rust", "новости про rust"),
+            ("погугли погоду в лиссабоне", "погоду в лиссабоне"),
+        ] {
+            match scan(text, now()) {
+                Some(FloorMatch::WebSearch { query }) => assert_eq!(query, expect, "{text}"),
+                other => panic!("{text} -> {other:?}"),
+            }
+        }
+        // a bare verb is not a search request
+        assert_eq!(scan("google", now()), None);
+        // and a reminder that mentions searching is still a reminder
+        assert!(matches!(
+            scan("remind me at 9 to google the answer", now()),
+            Some(FloorMatch::Remind { .. })
+        ));
+    }
+
     #[test]
     fn near_miss_phrasings_fall_through_to_the_verdict() {
         for text in [

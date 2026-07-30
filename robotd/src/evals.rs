@@ -10,6 +10,41 @@ use prism::verdict::FallbackVerdict;
 use prism::{Envelope, PrismError, TurnDeps, CRASH_POINTS};
 use std::time::Instant;
 
+/// Build the gateway used by `eval --live`.
+///
+/// Law #3 says every byte in and out of THE PROCESS. This process makes
+/// real API calls, so they are logged like any other traffic -- an earlier
+/// version exempted them in a code comment, which was not a call this code
+/// got to make. (Safe against a running daemon: appends are transactional
+/// and connections carry a busy timeout.)
+pub fn live_gateway(
+    cfg: &crate::config::RobotConfig,
+) -> anyhow::Result<std::sync::Arc<hub::ModelGateway>> {
+    let key = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("OPENROUTER_API_KEY is not set"))?;
+    let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+    let keys = trust::keys::KeyChain::load_or_create(&data_dir.join("kek.key"))?;
+    let conn = trust::cells::open_encrypted(&data_dir.join("core.db"), &keys.core_db_key())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to run live evals without a boundary log \
+                 (law #3 covers this process too): {e}"
+            )
+        })?;
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(conn));
+    Ok(std::sync::Arc::new(hub::ModelGateway::new(
+        std::sync::Arc::new(hub::UreqApi::new(
+            key.trim().to_string(),
+            cfg.hub.base_url.clone(),
+        )),
+        cfg.hub.cast.clone(),
+        hub::GatewayConfig::default(),
+        Some(sink),
+    )))
+}
+
 pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> anyhow::Result<i32> {
     let mut hard_failures = 0;
 

@@ -50,3 +50,10 @@
 {"text": "can you show me my reminders please", "expect": "none"}
 {"text": "i wonder what time it is", "expect": "none"}
 {"text": "remind me in 5000 hours to x", "expect": "none"}
+{"text": "search the web for rust 1.97 features", "expect": "web_search"}
+{"text": "look up the weather in porto", "expect": "web_search"}
+{"text": "google rust release notes", "expect": "web_search"}
+{"text": "найди в интернете новости про rust", "expect": "web_search"}
+{"text": "погугли погоду в лиссабоне", "expect": "web_search"}
+{"text": "remind me at 9 to google the answer", "expect": "remind"}
+{"text": "google", "expect": "none"}

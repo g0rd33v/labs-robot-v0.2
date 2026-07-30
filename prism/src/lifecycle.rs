@@ -291,6 +291,11 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
                 serde_json::json!({}),
                 Effect::ReversibleWrite,
             )],
+            FloorMatch::WebSearch { query } => vec![step(
+                "web.research",
+                serde_json::json!({ "query": query }),
+                Effect::Read,
+            )],
         },
         Decision::Verdict { v } => {
             // the verdict routes; capabilities execute. chitchat with a
