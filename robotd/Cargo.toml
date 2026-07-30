@@ -19,3 +19,8 @@ prism = { workspace = true }
 mind = { workspace = true }
 hub = { workspace = true }
 surfaces = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

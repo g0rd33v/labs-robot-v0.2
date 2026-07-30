@@ -1,20 +1,8 @@
-//! robotd: the one signed binary (arch sec 2). Boots the Robot, prints the
-//! Tier-3 slug URL, serves the built-in Chat. Subcommands handle packaging,
-//! backup, and the eval suite.
+//! robotd: the one signed binary (arch sec 2). A thin dispatcher over the
+//! library -- boot the Robot and serve, or run an operational subcommand.
 
-mod archive;
-mod backup;
-mod boot;
-mod cli;
-mod config;
-mod evals;
-mod maintenance;
-mod package;
-mod robot;
-mod scheduler;
-mod telegram;
-
-use cli::Cmd;
+use robotd::cli::{self, Cmd};
+use robotd::{backup, boot, config, evals, maintenance, package, scheduler};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -109,7 +97,7 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
                 token.trim().to_string(),
                 Some(booted.robot.core.clone()),
             ));
-            telegram::spawn(booted.robot.clone(), tg);
+            robotd::telegram::spawn(booted.robot.clone(), tg);
         }
     }
 

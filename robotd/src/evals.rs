@@ -4,7 +4,8 @@
 //! (deterministic floor <= 300ms, sec 2c), and -- live, with keys -- the
 //! 20-case prompt-injection suite against the exact production framing.
 
-use crate::robot::{research_system_prompt, Capabilities};
+use crate::caps::Registry;
+use crate::prompts::research_system_prompt;
 use hub::gateway::{Msg, Role};
 use prism::verdict::FallbackVerdict;
 use prism::{Envelope, PrismError, TurnDeps, CRASH_POINTS};
@@ -140,7 +141,7 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
             ran += 1;
             let ok = (|| -> anyhow::Result<bool> {
                 let (cell, path) = temp_cell(point)?;
-                let router = Capabilities::default();
+                let router = Registry::offline();
                 let crash = |p: &str| p == point;
                 let deps = TurnDeps {
                     router: &router,
@@ -184,7 +185,7 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
 
 fn eval_latency() -> anyhow::Result<i32> {
     let (cell, path) = temp_cell("latency")?;
-    let router = Capabilities::default();
+    let router = Registry::offline();
     let deps = TurnDeps {
         router: &router,
         verdicts: &FallbackVerdict,
