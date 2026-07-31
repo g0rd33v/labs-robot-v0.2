@@ -66,6 +66,17 @@ impl MergeReport {
     pub fn total(&self) -> usize {
         self.messages + self.facts + self.reminders + self.media + self.deleted
     }
+
+    /// What moved that the person would care about.
+    ///
+    /// Messages are excluded on purpose. A sync notice is itself a chat
+    /// message, so it syncs, so the next sweep has a row to move, so it
+    /// announces itself again -- a trickle that sustains itself forever and
+    /// makes the log look busy while nothing is happening. Announce
+    /// KNOWLEDGE moving; let the transcript catch up quietly.
+    pub fn knowledge(&self) -> usize {
+        self.facts + self.reminders + self.media + self.deleted
+    }
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }

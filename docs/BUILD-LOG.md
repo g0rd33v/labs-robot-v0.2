@@ -105,6 +105,17 @@ stop reading. A peer that is present but *unusable* is reported in chat,
 as is any sync that actually moved something: the owner's memory crossing
 between machines is not a thing to do quietly.
 
+**A defect only the browser could show.** Watching the chat, the notices
+repeated: `pulled 1 rows`, over and over, with nothing happening. **The
+sync notice is itself a chat message, so it synced, so the next sweep had
+a row to move, so it announced itself again** — a trickle that sustains
+itself forever and makes the log look busy while the robot is idle. No
+test caught it, because every test asserted on state and this was a
+property of the *conversation*. The lane now announces when **knowledge**
+moves — facts, reminders, media, deletions — and lets the transcript catch
+up quietly. Verified after: four sweeps, zero notices; then a real fact,
+and both sides announced it.
+
 **Config.** `[sync] peers = [...]`, `every_minutes = 10`. `robotd sync
 --with <path>` always works regardless.
 

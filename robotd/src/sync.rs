@@ -54,6 +54,14 @@ impl SyncReport {
         self.pulled.is_empty() && self.pushed.is_empty() && self.media_files == 0
     }
 
+    /// Did anything the person would care about move? See
+    /// `MergeReport::knowledge` for why the transcript itself does not
+    /// count -- announcing it makes the announcement into the next thing to
+    /// announce.
+    pub fn moved_knowledge(&self) -> bool {
+        self.pulled.knowledge() + self.pushed.knowledge() + self.media_files > 0
+    }
+
     /// One line for the journal and the owner. Counts only -- a sync report
     /// naming contents would be a second copy of the data in the log.
     pub fn summary(&self) -> String {

@@ -50,8 +50,13 @@ pub fn sweep(robot: &RobotCore, peers: &[String]) {
                     continue;
                 }
                 tracing::info!("{}", rep.summary());
-                // the owner's memory moved between machines: say so
-                let _ = robot.tell_owner(&rep.summary());
+                // Say so only when KNOWLEDGE moved. A sync that merely
+                // carried the transcript across -- including the last
+                // notice -- is not news, and announcing it would create the
+                // next thing to announce.
+                if rep.moved_knowledge() {
+                    let _ = robot.tell_owner(&rep.summary());
+                }
             }
             Err(e) => {
                 // present but unusable is worth a word -- a wrong path, a
