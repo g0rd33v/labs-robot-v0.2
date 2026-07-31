@@ -5,7 +5,9 @@
 //! encrypted media vault (sec 4a), and Registry-lite (sec 4b): list with
 //! sources, correct (supersession), forget (deletes for real).
 
+pub mod connections;
 pub mod facts;
+pub mod files;
 pub mod merge;
 pub mod reminders;
 pub mod vault;
@@ -41,6 +43,27 @@ pub fn install_vec() {
 /// Embedding dimension for the vector table (bge-m3-class seat: e5-small,
 /// 384-d). A model change means re-index with a new table (Q24).
 pub const EMBED_DIM: usize = 384;
+
+/// Bring an existing table up to the current shape, one column at a time.
+///
+/// Idempotent and additive only. SQLite can add a column with a default in
+/// place, which covers every column this schema has gained; anything
+/// needing a rewrite would need a real migration and should not sneak in
+/// here.
+fn add_missing_columns(conn: &Connection, wanted: &[(&str, &str, &str)]) -> Result<(), MindError> {
+    for (table, column, ddl) in wanted {
+        let present: bool = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == column);
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl};"))?;
+        }
+    }
+    Ok(())
+}
 
 /// Per-cell memory tables. Idempotent.
 pub fn init_cell_schema(conn: &Connection) -> Result<(), MindError> {
@@ -101,17 +124,55 @@ CREATE TABLE IF NOT EXISTS media (
     pinned     INTEGER NOT NULL DEFAULT 0,
     source     TEXT
 );
+-- A file is a name over vault content: the vault knows bytes, this knows
+-- documents. Separate tables so two names cost one copy, and so a file
+-- carries its own class (sec 7) and its own provenance (law 5).
+CREATE TABLE IF NOT EXISTS files (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    hash          TEXT NOT NULL REFERENCES media(hash),
+    size          INTEGER NOT NULL,
+    class         TEXT NOT NULL DEFAULT 'owner_private',
+    source_msg_id TEXT NOT NULL REFERENCES messages(id),
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tombstones (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL,
     deleted_at INTEGER NOT NULL,
     origin     TEXT NOT NULL
 );
+-- Connected accounts. The most dangerous rows in the cell: a refresh token
+-- is standing, renewable access to someone's mailbox. They live here
+-- because the cell is encrypted at rest; they are absent from merge::export
+-- because a token on a USB stick is standing access on a USB stick.
+CREATE TABLE IF NOT EXISTS connections (
+    provider      TEXT PRIMARY KEY,
+    account       TEXT NOT NULL,
+    scopes        TEXT NOT NULL,
+    access_token  TEXT NOT NULL,
+    refresh_token TEXT,
+    expires_at    INTEGER NOT NULL,
+    connected_at  INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cell_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 ",
+    )?;
+
+    // `CREATE TABLE IF NOT EXISTS` creates tables; it never adds a column
+    // to one that already exists. So every column added after a cell was
+    // first written is invisible to that cell, and the failure is not a
+    // startup error -- it is a query, months later, against the one
+    // instance that happens to be older. That is exactly how `class`
+    // silently broke sync with a USB stick written before it existed.
+    add_missing_columns(
+        conn,
+        &[("facts", "class", "TEXT NOT NULL DEFAULT 'owner_private'")],
     )?;
 
     // the vector door is optional equipment: present when sqlite-vec is
@@ -128,6 +189,60 @@ CREATE TABLE IF NOT EXISTS cell_meta (
         params![if vec_ready { "1" } else { "0" }],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// The failure this fixes, reproduced: a cell written before `class`
+    /// existed. `CREATE TABLE IF NOT EXISTS` leaves it alone, so every
+    /// query naming the column fails -- and it fails on the OTHER instance,
+    /// months later, as "no such column: class" in the middle of a sync.
+    #[test]
+    fn an_older_cell_gains_columns_it_was_written_without() {
+        let conn = Connection::open_in_memory().unwrap();
+        // the shape of `facts` before sec 7's classification landed
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, ts INTEGER NOT NULL,
+                 direction TEXT NOT NULL, surface TEXT NOT NULL, lang TEXT,
+                 content TEXT NOT NULL, media_ref TEXT);
+             CREATE TABLE facts (
+                 id TEXT PRIMARY KEY, entity TEXT, content TEXT NOT NULL,
+                 source_msg_id TEXT NOT NULL REFERENCES messages(id),
+                 intent_id TEXT UNIQUE, status TEXT NOT NULL DEFAULT 'stable',
+                 confidence REAL NOT NULL DEFAULT 1.0,
+                 created_at INTEGER NOT NULL, superseded_by TEXT);
+             INSERT INTO messages(id, ts, direction, surface, content)
+                 VALUES ('m1', 1, 'in', 'chat', 'older words');
+             INSERT INTO facts(id, content, source_msg_id, created_at)
+                 VALUES ('f1', 'an older fact', 'm1', 1);",
+        )
+        .unwrap();
+
+        assert!(
+            conn.query_row("SELECT class FROM facts", [], |r| r.get::<_, String>(0))
+                .is_err(),
+            "precondition: the old cell has no class column"
+        );
+
+        init_cell_schema(&conn).unwrap();
+
+        // the column is there, and the rows that predate it land on the
+        // protective default rather than on nothing
+        let class: String = conn
+            .query_row("SELECT class FROM facts WHERE id = 'f1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(class, "owner_private");
+
+        // and the export that broke sync now runs
+        let d = crate::merge::export(&conn, 0).unwrap();
+        assert_eq!(d.facts.len(), 1);
+
+        // idempotent: running it again is a no-op, not a duplicate column
+        init_cell_schema(&conn).unwrap();
+        assert_eq!(crate::merge::export(&conn, 0).unwrap().facts.len(), 1);
+    }
 }
 
 /// Record one message verbatim in its source language (arch sec 2d: memory

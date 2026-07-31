@@ -5,6 +5,163 @@ dependencies introduced. Newest first.
 
 ---
 
+## Reach — calendar, email, files (2026-07-31)
+
+Items 4–6 of `docs/GAP-ANALYSIS.md`. §14 names five capabilities; two
+existed. All five exist now.
+
+### Files (item 6) — done, and demonstrated
+
+`file.save/list/read/delete`, scoped to the person's own encrypted vault.
+There is no path from any of them to the host filesystem: a robot that can
+be asked to read `/etc/passwd` has a file-read primitive, not a file
+capability.
+
+The design decision worth recording is that a **file is not a blob**. The
+vault is content-addressed — it knows bytes. A file is a *name* pointing at
+those bytes, with its own data class and its own source message, so
+`mind::files` is a separate table. Two names over identical text cost one
+copy, a rename is free, and saving twice under one name is a new version of
+one file rather than two files.
+
+`clean_name` strips separators rather than rejecting them. A refusal teaches
+the caller to try the next encoding; a name that *cannot contain* a
+separator has nothing to encode around. `../../etc/passwd` becomes a file
+called `etcpasswd`, which is harmless and slightly funny.
+
+Files sync. Rule 2 of `mind::merge` — *conflicting edits both survive* —
+needed an answer for documents, which have no supersession chain: the newer
+edit keeps the name and the older is preserved beside it as a *conflicted
+copy* whose id is derived from its content hash, so both instances compute
+the same copy and a second sync finds nothing new. A random id there would
+breed a fresh copy on every sweep, forever.
+
+### Email (item 5) — built, and its gate holds
+
+Search, read and draft run automatically. `email.send` declares
+`Approval::Required` beside the code that sends, so config can widen the
+requirement but never remove it.
+
+*Gate: a send parks for approval and cannot execute without it.* **Met.**
+`robotd/tests/approval.rs` drives the whole path — registry, plan,
+lifecycle, journal — through a router that **counts executions**, because a
+test reading replies could pass while the mail went out. A send reaches
+execution zero times before approval, zero after a decline, zero after a
+crash replay, and exactly once after a yes. Also demonstrated live, in
+Russian, surviving a process restart.
+
+Header injection is closed at both ends: `valid_address` rejects a
+recipient containing CR or LF, and `compose_raw` flattens them anyway, so a
+smuggled `Bcc:` never becomes its own header line.
+
+### Calendar (item 4) — built, gate blocked on a credential
+
+`calendar.list/create/cancel`, OAuth 2.0 authorization-code + PKCE per Q29,
+loopback redirect to the embedded server at `/oauth/google/callback`.
+
+`calendar.create` declares `Irreversible` even though an event with no
+attendees is deletable. The effect class is static and the presence of
+attendees is per-call; declaring the gentler class and hoping would mean an
+event that mails six people slipping past the confirmation gate. Cancel
+refuses to guess: if more than one event matches, it cancels none and lists
+what matched.
+
+**What is not demonstrated, and why.** Nobody has issued a Google OAuth
+client id for this instance, so no live call has been made. Everything that
+does not require one is tested: PKCE against RFC 7636's own worked vector,
+the authorization URL, the token-exchange form, single-use `state` compared
+in full, refresh-before-expiry, timed vs all-day event bodies, the parse
+back, and Google's error shapes turned into sentences a person can act on.
+`GOOGLE_OAUTH_CLIENT_ID` (plus secret) in the environment is the only thing
+between here and the gate; `scripts/run-local.sh` already reads both from
+the Keychain, and their absence logs a warning and turns the capabilities
+off rather than failing.
+
+### Tokens
+
+A refresh token is standing, renewable access to someone's mailbox, and
+unlike a password it was never memorised, so its loss is invisible. Three
+properties, enforced rather than remembered:
+
+* **They live in the cell**, encrypted at rest under the cell's own DEK.
+* **They never travel.** `merge::export` does not name the table.
+* **They never reach a model.** A token leaves `mind::connections` only as a
+  `Secret` — redacted `Debug`, no `Display`, no `Serialize` — so it cannot
+  fall into a log line or a `Rendering` by accident.
+
+`Secret` exists because of a lock ordering problem, not fastidiousness. The
+original design kept the token inside a closure, which would have held the
+cell's mutex across a 20-second Google round trip and stalled every other
+turn for that person behind someone else's server. The token has to become a
+value; making it a value that resists printing is the compensation.
+
+### Three defects found by running it
+
+Each of these was invisible to the test suite and obvious within a minute of
+using the robot — the same pattern as every previous session.
+
+**1. No schema migrations existed at all.** `CREATE TABLE IF NOT EXISTS`
+creates tables; it never adds a column to one that already exists. So the
+`class` column added in items 1–3 was invisible to any cell written before
+it — and the failure surfaced not at startup but *months later, on the other
+instance*, as `no such column: class` in the middle of a sync with the USB
+stick. Fixed with an additive `add_missing_columns` pass, and a test that
+reproduces a pre-`class` cell. Sync with the stick recovered on the next
+sweep.
+
+**2. A send was gated twice.** `email.send` is irreversible *and* declares
+`Approval::Required`, so it hit the inferred-irreversible confirmation gate
+first and the durable approval gate immediately after — two prompts for one
+message. The declared gate is strictly stronger (journaled, survives
+restarts, answerable days later from any surface), so the confirmation gate
+now stands aside when a capability declares one.
+
+**3. The persona was editing consent.** Asked to send mail, the robot
+rendered a correct approval prompt and the mentor stance appended *"shall I
+add a link to the updated calendar?"* — leaving one word, "yes", with two
+possible referents, one of which sends mail to a third party. `approval_needed`
+and `confirm_irreversible` joined the control surfaces that are translated
+but never re-voiced. A persona may shape how the robot talks; it may not add
+a second question to the one thing a person is being asked to consent to.
+
+Also: the approval prompt never showed its arguments. "Yes" to the bare
+words `email.send` is consent to nothing in particular, so it now spells out
+recipient, subject and body. And the confirmation wording said "permanently
+delete" — true when the only irreversible capability was `memory.forget`,
+wrong now that it covers sends and calendar events.
+
+### Gate
+
+207 tests, clippy clean, `robotd eval` PASS (66 routing cases, 0 misroutes;
+kill-suite 12/12; floor p95 1.6 ms). Live: `file.save` and `file.list` in
+English and Russian with verified receipts, a file syncing to the peer
+instance, `/connect` refusing honestly with no client configured, and a send
+parking for approval and being declined without sending.
+
+### Assumptions
+
+* **`file.delete` was added** beyond the item's stated "save/read/list".
+  Without it a saved file could never be removed, which contradicts the
+  erase right the rest of the system honours.
+* **`connect.start` is floor-only** (`exposed() == false`), reachable by
+  typing `/connect` and not present in any tool catalog. It mints a URL
+  granting standing access to a mailbox; nothing a model can be talked into
+  should be able to produce one.
+* **Scopes recorded are the ones Google granted**, not the ones requested —
+  a person may untick one on the consent screen, and believing we hold a
+  permission we do not is how a capability fails with an opaque 403.
+* **`prompt=consent` and `access_type=offline`** are always set, because
+  without a refresh token the connection dies in an hour and looks like a
+  server fault.
+
+### Dependencies
+
+None. `base64` was already declared for the STT seat and is now also used
+for PKCE and Gmail's `raw` encoding; `ureq` and `chrono` were already in the
+workspace.
+
+---
+
 ## The authority model — grants, approvals, data classes (2026-07-31)
 
 Items 1–3 of `docs/GAP-ANALYSIS.md`, which read the architecture against

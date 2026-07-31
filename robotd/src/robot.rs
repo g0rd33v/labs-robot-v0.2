@@ -67,6 +67,13 @@ pub struct RobotCore {
     pub embedder: Option<Arc<hub::Embedder>>,
     pub gateway: Option<Arc<hub::ModelGateway>>,
     pub research: Option<Arc<hub::Research>>,
+    pub google: Option<Arc<hub::google::Google>>,
+    pub oauth_app: Option<Arc<hub::oauth::App>>,
+    /// Authorization attempts waiting for their callback. In memory on
+    /// purpose: the PKCE verifier is the proof of possession for a code, it
+    /// is useful for ten minutes, and writing it to disk would give it a
+    /// lifetime it has no business having.
+    pub pending_auth: Arc<Mutex<HashMap<String, hub::oauth::Attempt>>>,
     pub ultra_daily_cap: u32,
     /// Q26's sample rate for routine turns; acting turns are always checked.
     pub verify_percent: u32,
@@ -94,6 +101,8 @@ impl RobotCore {
         public_base: String,
         robot_name: String,
         instance_id: String,
+        google: Option<Arc<hub::google::Google>>,
+        oauth_app: Option<Arc<hub::oauth::App>>,
     ) -> Self {
         Self {
             owner_principal,
@@ -106,6 +115,9 @@ impl RobotCore {
             embedder,
             gateway,
             research,
+            google,
+            oauth_app,
+            pending_auth: Arc::new(Mutex::new(HashMap::new())),
             ultra_daily_cap,
             verify_percent,
             approval_required,
@@ -255,6 +267,57 @@ impl RobotCore {
     /// Put an operational notice into the owner's chat, journaled and
     /// receipted like any other action. Used by background lanes: a lane
     /// that fails silently is worse than one that does not run.
+    /// Finish an OAuth sign-in: the callback arrived with a code.
+    ///
+    /// The attempt is REMOVED from the pending map before anything else, so
+    /// a state value is single-use whatever happens next -- a replayed
+    /// callback finds nothing and is refused, which is the property that
+    /// makes an interceptable loopback URL safe to use.
+    pub fn complete_google_auth(&self, state: &str, code: &str) -> anyhow::Result<String> {
+        let attempt = {
+            let mut pending = self
+                .pending_auth
+                .lock()
+                .map_err(|_| anyhow!("pending sign-ins unavailable"))?;
+            pending.remove(state)
+        };
+        let attempt = attempt.ok_or_else(|| anyhow!("unknown or already-used sign-in"))?;
+        hub::oauth::check_callback(&attempt, state, trust::ids::ts_ms())?;
+
+        let (Some(google), Some(app)) = (&self.google, &self.oauth_app) else {
+            return Err(anyhow!("no google client configured"));
+        };
+        let now = trust::ids::ts_ms();
+        let tokens = google.exchange(&hub::oauth::code_exchange_form(app, &attempt, code))?;
+        let account = google.whoami(&tokens.access_token)?;
+
+        // Record the scopes GOOGLE granted, not the ones we asked for. A
+        // person may untick one on the consent screen, and believing we
+        // have a permission we do not is how a capability fails with an
+        // opaque 403 instead of saying what is missing.
+        let granted: Vec<String> = tokens
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_else(|| attempt.scopes.clone());
+
+        let handle = self.cell(attempt.principal)?;
+        handle.cell.with(|c| {
+            mind::connections::save(
+                c,
+                &attempt.provider,
+                &account,
+                &granted,
+                &tokens.access_token,
+                tokens.refresh_token.as_deref(),
+                tokens.expires_at(now),
+            )
+            .map_err(|e| prism::PrismError::Capability(e.to_string()))
+        })?;
+        self.notify(attempt.principal);
+        Ok(account)
+    }
+
     pub fn tell_owner(&self, text: &str) -> anyhow::Result<()> {
         let handle = self.cell(self.owner_principal)?;
         let cell = &handle.cell;
@@ -293,12 +356,19 @@ impl RobotCore {
     }
 
     /// The capability registry for this robot (also used by boot-time replay).
-    pub fn router(&self) -> Registry {
+    ///
+    /// Takes the acting cell's vault: it is keyed from that cell's DEK, so
+    /// there is no instance-wide one to hold on `self`.
+    pub fn router(&self, vault: Option<Arc<mind::vault::MediaVault>>) -> Registry {
         let mut reg = Registry::new(
             Services {
                 embedder: self.embedder.clone(),
                 gateway: self.gateway.clone(),
                 research: self.research.clone(),
+                vault,
+                google: self.google.clone(),
+                oauth_app: self.oauth_app.clone(),
+                pending_auth: Some(self.pending_auth.clone()),
             },
             Policy {
                 ultra_daily_cap: self.ultra_daily_cap,
@@ -367,7 +437,7 @@ impl RobotCore {
                 device_trust: "session".into(),
                 source_msg_id: Some(msg_id),
             };
-            let router = self.router();
+            let router = self.router(Some(handle.vault.clone()));
             let verdicts: Box<dyn VerdictProvider> = match &self.gateway {
                 Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
                 None => Box::new(FallbackVerdict),
@@ -493,6 +563,14 @@ pub fn cell_lang(cell: &Cell) -> String {
 const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus", "flac"];
 
 impl surfaces::Robot for RobotCore {
+    fn complete_google_auth(&self, state: &str, code: &str) -> anyhow::Result<String> {
+        RobotCore::complete_google_auth(self, state, code)
+    }
+
+    fn tell_owner(&self, text: &str) -> anyhow::Result<()> {
+        RobotCore::tell_owner(self, text)
+    }
+
     fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<String> {
         self.turn(principal, text, "chat")
     }
@@ -966,7 +1044,9 @@ mod tests {
             )),
             "нет, не надо",
         );
-        assert!(no.reply.contains("nothing was deleted"), "{}", no.reply);
+        // the wording is effect-neutral now that irreversible covers sends
+        // and calendar events as well as deletions
+        assert!(no.reply.contains("nothing happened"), "{}", no.reply);
         assert_eq!(cell.with(|c| Ok(mind::facts::count_active(c))).unwrap().unwrap(), 1);
 
         // ask again, then say yes -- and this time it really goes

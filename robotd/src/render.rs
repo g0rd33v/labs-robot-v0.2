@@ -61,6 +61,70 @@ fn n(v: &serde_json::Value, k: &str) -> i64 {
     v.get(k).and_then(|x| x.as_i64()).unwrap_or(0)
 }
 
+/// An RFC 3339 instant as a person reads it. Falls back to the raw string
+/// rather than inventing a time -- a date that failed to parse is better
+/// shown than guessed at.
+fn clock(rfc3339: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(rfc3339) {
+        Ok(dt) => dt
+            .with_timezone(&Local)
+            .format("%H:%M on %a, %-d %b")
+            .to_string(),
+        Err(_) => rfc3339.to_string(),
+    }
+}
+
+/// Spell out a pending action so a "yes" means something specific.
+///
+/// Generic by design: it names the capability and lays out whatever
+/// arguments it carries, so a capability added tomorrow is described
+/// tomorrow without a second list to keep in step. The known ones get a
+/// sentence a person can check at a glance.
+fn what_exactly(capability: &str, args: &serde_json::Value) -> String {
+    match capability {
+        "email.send" => format!(
+            "send an email\n  to: {}\n  subject: {}\n\n{}",
+            s(args, "to"),
+            s(args, "subject"),
+            s(args, "body")
+        ),
+        "calendar.create" => format!(
+            "put \"{}\" on your calendar at {}{}",
+            s(args, "title"),
+            clock(&s(args, "start")),
+            match args["attendees"].as_array() {
+                Some(who) if !who.is_empty() => format!(", inviting {}", who.len()),
+                _ => String::new(),
+            }
+        ),
+        _ => {
+            let detail = args
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| format!("  {k}: {}", v.as_str().unwrap_or(&v.to_string())))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            if detail.is_empty() {
+                capability.to_string()
+            } else {
+                format!("{capability}\n{detail}")
+            }
+        }
+    }
+}
+
+/// Bytes as a person reads them. Nobody wants "4096".
+fn size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
 fn items(v: &serde_json::Value) -> Vec<serde_json::Value> {
     v.get("items")
         .and_then(|x| x.as_array())
@@ -94,6 +158,10 @@ pub fn english(r: &Rendering) -> String {
              - registry -- \"my facts\" (every fact and its source), \"forget fact \
              2\", \"correct fact 1: ...\"\n\
              - search -- \"look up the weather in porto\"\n\
+             - files -- \"save this as packing list\", \"what files do i have\"\n\
+             - calendar and mail, once you connect them -- \"/connect\"; then \
+             \"what's on tomorrow\", \"did anna reply\". i draft mail freely and \
+             ask before i send any\n\
              - \"who are you\" -- about me\n\
              write in any language; the english phrasings above are just the ones \
              that answer without asking a model."
@@ -181,6 +249,165 @@ pub fn english(r: &Rendering) -> String {
         ),
         "correct_missing" => format!("no fact #{} to correct.", n(a, "n")),
 
+        // ---- calendar ----
+        "calendar_list" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| {
+                    let head = if it["all_day"].as_bool().unwrap_or(false) {
+                        format!("all day -- {}", s(it, "title"))
+                    } else {
+                        format!("{} -- {}", clock(&s(it, "start")), s(it, "title"))
+                    };
+                    let where_ = match it.get("location").and_then(|x| x.as_str()) {
+                        Some(l) if !l.is_empty() => format!(" @ {l}"),
+                        _ => String::new(),
+                    };
+                    let who = match n(it, "attendees") {
+                        0 => String::new(),
+                        1 => " (1 guest)".into(),
+                        k => format!(" ({k} guests)"),
+                    };
+                    format!("- {head}{where_}{who}")
+                })
+                .collect();
+            format!("on your calendar:\n{}", lines.join("\n"))
+        }
+        "calendar_empty" => "nothing on your calendar in that window.".into(),
+        "calendar_created" => {
+            let who = match n(a, "attendees") {
+                0 => String::new(),
+                k => format!(" -- {k} invited"),
+            };
+            format!("added: {} at {}{}", s(a, "title"), clock(&s(a, "start")), who)
+        }
+        "calendar_cancelled" => format!(
+            "cancelled: {} ({})",
+            s(a, "title"),
+            clock(&s(a, "start"))
+        ),
+        "calendar_no_match" => format!("nothing called \"{}\" in that window.", s(a, "title")),
+        "calendar_ambiguous" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| format!("- {} ({})", s(it, "title"), clock(&s(it, "start"))))
+                .collect();
+            format!(
+                "that matches more than one, so i cancelled nothing:\n{}\nsay which.",
+                lines.join("\n")
+            )
+        }
+
+        // ---- email ----
+        "email_list" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| {
+                    format!(
+                        "- {} -- {}\n  {}\n  id: {}",
+                        s(it, "from"),
+                        s(it, "subject"),
+                        s(it, "preview"),
+                        s(it, "id")
+                    )
+                })
+                .collect();
+            format!("{}\n(these are other people's words)", lines.join("\n"))
+        }
+        "email_none" => format!("no mail matching {}.", s(a, "query")),
+        "email_message" => {
+            let cut = if a["truncated"].as_bool().unwrap_or(false) {
+                "\n\n[...the rest is longer than i'll quote here]"
+            } else {
+                ""
+            };
+            format!(
+                "from: {}\nsubject: {}\ndate: {}\n\n{}{}",
+                s(a, "from"),
+                s(a, "subject"),
+                s(a, "date"),
+                s(a, "body"),
+                cut
+            )
+        }
+        "email_drafted" => format!(
+            "drafted to {} -- \"{}\". it's sitting in your drafts, not sent.",
+            s(a, "to"),
+            s(a, "subject")
+        ),
+        "email_sent" => format!("sent to {} -- \"{}\".", s(a, "to"), s(a, "subject")),
+
+        // ---- connected accounts ----
+        "connect_status" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| {
+                    let mut can = vec![];
+                    if it["calendar"].as_bool().unwrap_or(false) {
+                        can.push("calendar");
+                    }
+                    if it["mail_read"].as_bool().unwrap_or(false) {
+                        can.push("read mail");
+                    }
+                    if it["mail_send"].as_bool().unwrap_or(false) {
+                        can.push("send mail");
+                    }
+                    if can.is_empty() {
+                        can.push("nothing yet");
+                    }
+                    format!(
+                        "- {} as {} -- {}",
+                        s(it, "provider"),
+                        s(it, "account"),
+                        can.join(", ")
+                    )
+                })
+                .collect();
+            format!("connected accounts:\n{}", lines.join("\n"))
+        }
+        "connect_none" => "no outside accounts connected. \"/connect google\" links your \
+             calendar and mail."
+            .into(),
+        "connect_start" => format!(
+            "open this to connect {} -- it's google's own consent screen, and the \
+             link works once, for 10 minutes:\n\n{}\n\ni'll only ask for what i \
+             need: your calendar, and reading and drafting mail. sending stays off \
+             until you turn it on.",
+            s(a, "provider"),
+            s(a, "url")
+        ),
+        "connect_done" => format!(
+            "connected: {} as {}. try \"what's on my calendar tomorrow\".",
+            s(a, "provider"),
+            s(a, "account")
+        ),
+        "connect_forgotten" => format!(
+            "disconnected {} -- the stored access is deleted. you may also want to \
+             remove this robot at myaccount.google.com/permissions.",
+            s(a, "provider")
+        ),
+        "connect_absent" => format!("{} wasn't connected.", s(a, "provider")),
+        "connector_failed" => format!("i couldn't reach google: {}", s(a, "why")),
+        "connect_unconfigured" => "this robot has no google client set up, so there's \
+             nothing to connect to yet. whoever runs it needs to set \
+             GOOGLE_OAUTH_CLIENT_ID and restart."
+            .into(),
+
+        // ---- files ----
+        "file_saved" => format!("saved {} ({}).", s(a, "name"), size(n(a, "size"))),
+        "file_list" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| format!("- {} ({})", s(it, "name"), size(n(it, "size"))))
+                .collect();
+            format!("your files:\n{}", lines.join("\n"))
+        }
+        "file_list_empty" => "no files yet -- say \"save this as ...\" and i'll keep one."
+            .into(),
+        "file_read" => format!("{}:\n\n{}", s(a, "name"), s(a, "content")),
+        "file_missing" => format!("no file called {}.", s(a, "name")),
+        "file_deleted" => format!("deleted {} -- the row is gone, not hidden.", s(a, "name")),
+
         // ---- admin ----
         "invite_created" => format!(
             "one-time invite link (works once, member role, their own sealed \
@@ -229,14 +456,14 @@ pub fn english(r: &Rendering) -> String {
 
         // ---- confirmation (sec 6b) ----
         "confirm_irreversible" => format!(
-            "that would permanently delete something ({}), and i inferred it \
-             rather than being told outright -- say yes and i'll do it, or no \
-             and i won't. nothing has happened yet.",
+            "that can't be undone ({}), and i inferred it rather than being \
+             told outright -- say yes and i'll do it, or no and i won't. \
+             nothing has happened yet.",
             s(a, "tool")
         ),
-        "confirmation_declined" => "alright -- nothing was deleted.".into(),
-        "confirmation_stale" => "that yes came too late to use -- nothing was \
-             deleted. ask me again if you still want it gone."
+        "confirmation_declined" => "alright -- nothing happened.".into(),
+        "confirmation_stale" => "that yes came too late to use -- nothing \
+             happened. ask me again if you still want it."
             .into(),
 
         // ---- soul (sec 5 / Q27) ----
@@ -319,11 +546,15 @@ pub fn english(r: &Rendering) -> String {
              something changed, but this turn performed no such action. nothing was \
              created, saved or deleted, and the receipt records that.]"
             .into(),
+        // An approval that does not say WHAT is being approved is not an
+        // approval -- "yes" to "email.send" is consent to nothing in
+        // particular. The parked args are already carried here; they just
+        // have to be shown.
         "approval_needed" => format!(
-            "that one needs your say-so before i run it ({}). reply yes and \
+            "that one needs your say-so before i run it:\n\n{}\n\nreply yes and \
              i'll do it, or no and i won't -- it'll wait as long as it takes, \
              even if i restart. nothing has happened yet.",
-            s(a, "capability")
+            what_exactly(&s(a, "capability"), &a["args"])
         ),
         "approval_declined" => format!(
             "alright -- i didn't run {}. nothing changed.",
@@ -370,21 +601,28 @@ fn action_block(actions: &[ActionRecord]) -> String {
     format!("\n\n― {}", lines.join("  "))
 }
 
-/// Renderings that report the robot's own configuration.
+/// Renderings the persona may not touch.
 ///
-/// These are **never re-voiced**, whatever stance is set. Two reasons, and
-/// the second is the important one:
+/// These are **never re-voiced**, whatever stance is set. They are still
+/// TRANSLATED for a person who does not read English — translating a
+/// readout is not the same as re-voicing it.
 ///
-/// 1. `/soul` promises an answer from stored state with no model call.
-///    Shaping it broke that -- measured at 22 seconds for a query that is
-///    three SQL reads.
-/// 2. If the mentor persona could reword the dial readout, you would be
-///    reading the instrument through the thing you are trying to inspect.
-///    A gauge that changes its wording depending on the setting it is
-///    reporting is not a gauge.
+/// Two families, for two different reasons.
 ///
-/// They are still TRANSLATED for a person who does not read English --
-/// translating a readout is not the same as re-voicing it.
+/// **Instrument readouts.** `/soul` promises an answer from stored state
+/// with no model call; shaping it broke that (measured at 22 seconds for
+/// three SQL reads). And if the mentor persona could reword the dial
+/// readout, you would be reading the instrument through the thing you are
+/// trying to inspect. A gauge that changes its wording depending on the
+/// setting it reports is not a gauge.
+///
+/// **Questions whose answer authorises something.** Observed live: asked to
+/// send an email, the robot rendered a correct approval prompt and the
+/// mentor stance appended *"shall I add a link to the updated calendar?"*
+/// — leaving one word, "yes", with two possible referents, one of which
+/// sends mail to a third party. A persona may shape how the robot talks; it
+/// may not add a second question to the one thing a person is being asked
+/// to consent to.
 fn is_control_surface(id: &str) -> bool {
     matches!(
         id,
@@ -395,6 +633,8 @@ fn is_control_surface(id: &str) -> bool {
             | "soul_evolution"
             | "soul_stance"
             | "soul_refused"
+            | "approval_needed"
+            | "confirm_irreversible"
     )
 }
 
@@ -789,6 +1029,12 @@ mod control_surface_tests {
             "soul_evolution",
             "soul_stance",
             "soul_refused",
+            // and the questions whose answer authorises something: a
+            // persona that appends "shall i also...?" to an approval
+            // leaves "yes" pointing at two different things, one of which
+            // sends mail to a third party
+            "approval_needed",
+            "confirm_irreversible",
         ] {
             assert!(is_control_surface(id), "{id} must not be re-voiced");
         }

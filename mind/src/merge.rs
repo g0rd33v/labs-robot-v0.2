@@ -39,6 +39,10 @@ pub struct CellDelta {
     pub reminders: Vec<Row>,
     #[serde(default)]
     pub media: Vec<Row>,
+    /// Names over that media. Travels separately because the bytes are
+    /// content-addressed and the name is not.
+    #[serde(default)]
+    pub files: Vec<Row>,
     #[serde(default)]
     pub tombstones: Vec<Row>,
     /// Soul's relationship state. Knowledge, so it travels -- the robot on
@@ -62,6 +66,7 @@ pub struct MergeReport {
     pub facts: usize,
     pub reminders: usize,
     pub media: usize,
+    pub files: usize,
     pub deleted: usize,
     /// Rows that arrived for something already deleted here, and were
     /// therefore refused. A non-zero count is the erase right working.
@@ -70,7 +75,7 @@ pub struct MergeReport {
 
 impl MergeReport {
     pub fn total(&self) -> usize {
-        self.messages + self.facts + self.reminders + self.media + self.deleted
+        self.messages + self.facts + self.reminders + self.media + self.files + self.deleted
     }
 
     /// What moved that the person would care about.
@@ -81,7 +86,7 @@ impl MergeReport {
     /// makes the log look busy while nothing is happening. Announce
     /// KNOWLEDGE moving; let the transcript catch up quietly.
     pub fn knowledge(&self) -> usize {
-        self.facts + self.reminders + self.media + self.deleted
+        self.facts + self.reminders + self.media + self.files + self.deleted
     }
     pub fn is_empty(&self) -> bool {
         self.total() == 0
@@ -151,6 +156,16 @@ pub fn export(conn: &Connection, since: i64) -> Result<CellDelta, MindError> {
             "SELECT hash, mime, size, created_at, source FROM media WHERE created_at > ?1",
             since,
         )?,
+        files: rows(
+            conn,
+            // classes gate files exactly as they gate facts: what must not
+            // leave the machine does not leave it in a document either.
+            "SELECT id, name, hash, size, class, source_msg_id, created_at, updated_at \
+             FROM files WHERE updated_at > ?1 \
+               AND class NOT IN ('local_only', 'credential')",
+            since,
+        )
+        .unwrap_or_default(),
         tombstones: rows(
             conn,
             "SELECT id, kind, deleted_at, origin FROM tombstones WHERE deleted_at > ?1",
@@ -219,8 +234,9 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
             "UPDATE facts SET superseded_by = NULL WHERE superseded_by = ?1",
             params![id],
         )?;
-        let gone = tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
-        if existed == 1 || gone == 1 {
+        let mut gone = tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
+        gone += tx.execute("DELETE FROM files WHERE id = ?1", params![id])?;
+        if existed == 1 || gone > 0 {
             rep.deleted += gone;
         }
     }
@@ -335,6 +351,96 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
         )?;
     }
 
+    // Files. Rule 2 applies here as it does to facts: when both instances
+    // edited one document, the newer edit keeps the name and the older is
+    // preserved beside it rather than discarded. The conflict copy's id and
+    // name are DERIVED from the losing content hash, so both instances
+    // compute the same copy and a second sync finds nothing new -- a random
+    // id here would breed a fresh copy on every sweep, forever.
+    for f in &d.files {
+        let (Some(id), Some(name), Some(hash)) = (s(f, "id"), s(f, "name"), s(f, "hash")) else {
+            continue;
+        };
+        if tombstoned(&tx, &id)? {
+            rep.refused_resurrections += 1;
+            continue;
+        }
+        // law 5 travels with the file, exactly as with a fact
+        let Some(src) = s(f, "source_msg_id") else { continue };
+        let have_src: bool = tx
+            .query_row("SELECT 1 FROM messages WHERE id = ?1", params![src], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        if !have_src {
+            continue;
+        }
+        let class = s(f, "class").unwrap_or_else(|| "owner_private".into());
+        let theirs_at = i(f, "updated_at");
+
+        let mine: Option<(String, String, i64)> = tx
+            .query_row(
+                "SELECT id, hash, updated_at FROM files WHERE id = ?1 OR name = ?2",
+                params![id, name],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+
+        match mine {
+            // nothing here by that id or name: take theirs
+            None => {
+                rep.files += tx.execute(
+                    "INSERT OR IGNORE INTO files(id, name, hash, size, class, \
+                     source_msg_id, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        id,
+                        name,
+                        hash,
+                        i(f, "size"),
+                        class,
+                        src,
+                        i(f, "created_at"),
+                        theirs_at
+                    ],
+                )?;
+            }
+            // same content: already agreed
+            Some((_, mine_hash, _)) if mine_hash == hash => {}
+            // divergent content. The newer edit takes the name; the other
+            // is kept beside it under a derived name.
+            Some((mine_id, mine_hash, mine_at)) => {
+                let (keep_hash, keep_size, keep_at, copy_hash) = if theirs_at > mine_at {
+                    (hash.clone(), i(f, "size"), theirs_at, mine_hash)
+                } else {
+                    (mine_hash.clone(), 0i64, mine_at, hash.clone())
+                };
+                if theirs_at > mine_at {
+                    tx.execute(
+                        "UPDATE files SET hash = ?2, size = ?3, updated_at = ?4 WHERE id = ?1",
+                        params![mine_id, keep_hash, keep_size, keep_at],
+                    )?;
+                    rep.files += 1;
+                }
+                let copy_id = format!("fil_c{}", &copy_hash[..copy_hash.len().min(16)]);
+                let copy_name = format!("{name} (conflicted copy)");
+                let size: i64 = tx
+                    .query_row(
+                        "SELECT size FROM media WHERE hash = ?1",
+                        params![copy_hash],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+                rep.files += tx.execute(
+                    "INSERT OR IGNORE INTO files(id, name, hash, size, class, \
+                     source_msg_id, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
+                    params![copy_id, copy_name, copy_hash, size, class, src, keep_at],
+                )?;
+            }
+        }
+    }
+
     // the dial: newest write per dimension wins. Two people cannot both be
     // adjusting one person's dial, so this is a straight recency merge --
     // and the bounds travel with the value, so a pin set on the machine is
@@ -433,6 +539,107 @@ mod tests {
             params![id, content, src, ts],
         )
         .unwrap();
+    }
+
+    fn doc(conn: &Connection, id: &str, name: &str, hash: &str, src: &str, at: i64) {
+        conn.execute(
+            "INSERT OR IGNORE INTO media(hash, size, created_at) VALUES (?1, 10, ?2)",
+            params![hash, at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, name, hash, size, class, source_msg_id, \
+                               created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 10, 'owner_private', ?4, ?5, ?5)",
+            params![id, name, hash, src, at],
+        )
+        .unwrap();
+    }
+
+    fn names(conn: &Connection) -> Vec<String> {
+        let mut st = conn.prepare("SELECT name FROM files ORDER BY name").unwrap();
+        let v = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        v
+    }
+
+    /// A document written on the stick is a document on the machine.
+    #[test]
+    fn files_travel_with_their_bytes_and_their_class() {
+        let a = cell();
+        let b = cell();
+        say(&a, "m1", "save this", 10);
+        doc(&a, "f1", "notes.md", "hash_a", "m1", 20);
+        // a local-only file is not a travelling file -- that is the class
+        say(&a, "m2", "and this", 10);
+        a.execute(
+            "INSERT INTO files(id, name, hash, size, class, source_msg_id, \
+                               created_at, updated_at) \
+             VALUES ('f2', 'secret.md', 'hash_a', 10, 'local_only', 'm2', 20, 20)",
+            [],
+        )
+        .unwrap();
+
+        let d = export(&a, 0).unwrap();
+        assert_eq!(d.files.len(), 1, "local_only never leaves");
+        let rep = apply(&b, &d).unwrap();
+        assert_eq!(rep.files, 1);
+        assert_eq!(names(&b), vec!["notes.md"]);
+
+        // idempotent: the same delta twice changes nothing
+        assert_eq!(apply(&b, &d).unwrap().files, 0);
+    }
+
+    /// Rule 2 for documents: the newer edit keeps the name, the older is
+    /// kept beside it. Losing a document edit silently is the one outcome
+    /// worth any amount of ugliness to avoid.
+    #[test]
+    fn a_document_edited_on_both_sides_loses_neither_edit() {
+        let a = cell();
+        let b = cell();
+        say(&a, "m1", "save this", 10);
+        say(&b, "m1", "save this", 10);
+        doc(&a, "f1", "notes.md", "hash_new", "m1", 200);
+        doc(&b, "f1", "notes.md", "hash_old", "m1", 100);
+
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert_eq!(
+            names(&b),
+            vec!["notes.md", "notes.md (conflicted copy)"],
+            "both edits survive"
+        );
+        let winner: String = b
+            .query_row("SELECT hash FROM files WHERE name = 'notes.md'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(winner, "hash_new", "the newer edit keeps the name");
+
+        // and it converges: syncing again breeds no further copies
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert_eq!(names(&b).len(), 2);
+    }
+
+    /// A deleted document must not come back from the other instance.
+    #[test]
+    fn a_deleted_file_stays_deleted_across_a_sync() {
+        let a = cell();
+        let b = cell();
+        say(&a, "m1", "save this", 10);
+        say(&b, "m1", "save this", 10);
+        doc(&a, "f1", "notes.md", "hash_a", "m1", 20);
+        doc(&b, "f1", "notes.md", "hash_a", "m1", 20);
+
+        assert!(crate::files::delete(&b, "notes.md", "stick").unwrap());
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert!(names(&b).is_empty(), "the erasure held");
+
+        // and it propagates the other way
+        apply(&a, &export(&b, 0).unwrap()).unwrap();
+        assert!(names(&a).is_empty());
     }
 
     /// Sync twice, in either order, and both sides agree. Anything less is

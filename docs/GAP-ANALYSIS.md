@@ -60,6 +60,10 @@ connectors, no `email.send` approval path.
 This is the largest single gap between the document and the product. The
 kernel that governs actions is finished; the actions are two of five.
 
+> **Closed, 2026-07-31.** All five now exist. Files and email's approval
+> gate are demonstrated end to end; calendar and email's *live* Google calls
+> await an OAuth client id for this instance — see §4 items 4–6.
+
 ### B. Grants are minted but never checked (§3)
 
 `Grant` objects are created, journaled, given an `expires_at` — and nothing
@@ -228,16 +232,33 @@ capability.
 
 ### Next — make the Robot useful (§14's four capabilities)
 
-**4. Calendar.** (Q29: Google, native OAuth in Hub, PKCE, loopback
-redirect.) ~4–5 days.
+**4. Calendar.** ✅ **built, gate not yet demonstrated.** (Q29: Google,
+native OAuth in Hub, PKCE, loopback redirect.) `calendar.list/create/cancel`
+against the Calendar API; OAuth 2.0 + PKCE in `hub::oauth` with the RFC 7636
+vector as a test; tokens in the cell as `mind::connections`, leaving it only
+as a `Secret` with no `Display` and no `Serialize`, absent from
+`merge::export` so they never reach a stick.
 *Gate: create, update and delete an event with verified receipts; token in
-the vault, never in model context.*
+the vault, never in model context.* — **blocked on a Google OAuth client
+id**, which nobody has issued for this instance. Everything that does not
+need one is tested: PKCE, the authorization URL, the token exchange form,
+single-use `state`, refresh-before-expiry, the event body for timed and
+all-day events, and the parse back. Set `GOOGLE_OAUTH_CLIENT_ID` (and the
+secret) and the gate is one `/connect` away.
 
-**5. Email.** Search/read/draft auto; **`send` behind approval-always** —
-which is why #2 comes first. ~4–5 days.
-*Gate: a send parks for approval and cannot execute without it.*
+**5. Email.** ✅ **built, and its gate holds.** Search/read/draft
+automatic; `email.send` declares `Approval::Required` beside the code that
+sends.
+*Gate: a send parks for approval and cannot execute without it.* — **met.**
+`robotd/tests/approval.rs` counts executions through the real registry: a
+send reaches execution zero times before approval, zero after a decline,
+zero after a crash replay, and exactly once after a yes. Demonstrated live
+in Russian, including across a restart.
 
-**6. Files.** Vault-scoped save/read/list. ~2 days.
+**6. Files.** ✅ **done.** `file.save/list/read/delete`, vault-scoped, with
+`mind::files` as a name→content index so two names cost one copy. Names are
+stripped of separators rather than rejected. Files sync between instances,
+conflicting edits both survive, and deletions travel as tombstones.
 
 ### Then — the headline feature, completed (§4b)
 

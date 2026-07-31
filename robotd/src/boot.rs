@@ -167,6 +167,30 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         }
     };
 
+    // The Google connector. The client id is not a secret (it ships in
+    // every installed app); the secret is read from the environment like
+    // every other credential and never written to disk.
+    let (google, oauth_app) = match std::env::var("GOOGLE_OAUTH_CLIENT_ID") {
+        Ok(id) if !id.trim().is_empty() => {
+            let secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            (
+                Some(Arc::new(hub::google::Google::new(Some(core.clone())))),
+                Some(Arc::new(hub::oauth::App::loopback(
+                    id.trim().to_string(),
+                    secret,
+                    cfg.server.port,
+                ))),
+            )
+        }
+        _ => {
+            tracing::warn!("GOOGLE_OAUTH_CLIENT_ID not set -- calendar and email off");
+            (None, None)
+        }
+    };
+
     let addr = SocketAddr::new(
         cfg.server.host.parse().context("server.host")?,
         cfg.server.port,
@@ -191,6 +215,8 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         public_base,
         cfg.robot.name.clone(),
         instance_id,
+        google,
+        oauth_app,
     ));
 
     if !broken.is_empty() {
@@ -207,9 +233,9 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     // crash replay (arch sec 3): resume every intent the last run left open
     // in every principal's cell; an intent without a terminal receipt is a
     // bug, never a silent drop
-    let router = robot.router();
     for principal in robot.principals_active()? {
         let handle = robot.cell(principal)?;
+        let router = robot.router(Some(handle.vault.clone()));
         let replayed =
             prism::replay::resume_incomplete(&handle.cell, &router, &crate::render::Speak::offline())?;
         if replayed.resumed + replayed.closed_failed > 0 {

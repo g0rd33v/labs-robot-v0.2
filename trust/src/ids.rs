@@ -28,6 +28,17 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// The raw digest. Hex is for logs; protocols that hash into base64url
+/// (PKCE, for one) need the bytes.
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+/// Fill a buffer with cryptographic randomness.
+pub fn fill_random(buf: &mut [u8]) {
+    rand::thread_rng().fill_bytes(buf);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

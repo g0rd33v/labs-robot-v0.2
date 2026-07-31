@@ -11,6 +11,8 @@
 pub mod escalation;
 pub mod evaluator;
 pub mod gateway;
+pub mod google;
+pub mod oauth;
 pub mod research;
 pub mod telegram;
 pub mod verdicts;

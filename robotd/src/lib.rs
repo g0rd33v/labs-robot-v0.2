@@ -13,6 +13,7 @@ pub mod boot;
 pub mod caps;
 pub mod cli;
 pub mod config;
+pub mod connectors;
 pub mod evals;
 pub mod maintenance;
 pub mod notify;

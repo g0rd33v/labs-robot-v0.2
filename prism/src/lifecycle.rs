@@ -574,7 +574,14 @@ fn validate_proposal(
             cell.with(|conn| journal::step(conn, intent_id, "call.accepted", &ok, None))?;
             // sec 6b: an inference does not get to destroy anything. Park
             // it, ask, and let the answer release it.
-            if effect == Effect::Irreversible {
+            //
+            // Unless the capability already DECLARES that it needs a person
+            // (§3b.2). That gate is strictly stronger -- journaled, durable,
+            // answerable days later from any surface -- and running both
+            // would ask about one `email.send` twice: once here, and again
+            // the moment the first yes released it.
+            let declared = deps.router.approval_for(&c.tool) == Approval::Required;
+            if effect == Effect::Irreversible && !declared {
                 let parked =
                     cell.with(|conn| pending::park(conn, intent_id, &c.tool, &c.args))?;
                 let note =
@@ -669,6 +676,12 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
             )],
             FloorMatch::SoulShow => {
                 vec![step("soul.show", serde_json::json!({}), Effect::Read)]
+            }
+            FloorMatch::ConnectStart => {
+                vec![step("connect.start", serde_json::json!({}), Effect::Read)]
+            }
+            FloorMatch::ConnectStatus => {
+                vec![step("connect.status", serde_json::json!({}), Effect::Read)]
             }
             FloorMatch::WebSearch { query } => vec![step(
                 "web.research",
@@ -896,7 +909,7 @@ pub(crate) fn reply_parts(outcomes: &[Outcome], receipt: &Receipt) -> Vec<ReplyP
 /// is not the phrase-list problem returning -- a phrase list had to be
 /// written once per language and could be evaded by writing in a language
 /// nobody listed. This list is written once, full stop.
-const EFFECT_CLAIMS: [&str; 8] = [
+const EFFECT_CLAIMS: [&str; 15] = [
     "reminder_created",
     "reminder_cancelled",
     "remembered",
@@ -905,6 +918,13 @@ const EFFECT_CLAIMS: [&str; 8] = [
     "invite_created",
     "telegram_bind_code",
     "media_stored",
+    "file_saved",
+    "file_deleted",
+    "calendar_created",
+    "calendar_cancelled",
+    "email_drafted",
+    "email_sent",
+    "connect_forgotten",
 ];
 
 /// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set

@@ -14,6 +14,10 @@
 pub mod admin;
 pub mod answer;
 pub mod basics;
+pub mod calendar;
+pub mod connect;
+pub mod email;
+pub mod files;
 pub mod memory;
 pub mod reminders;
 pub mod research;
@@ -31,6 +35,19 @@ pub struct Services {
     pub embedder: Option<Arc<hub::Embedder>>,
     pub gateway: Option<Arc<hub::ModelGateway>>,
     pub research: Option<Arc<hub::Research>>,
+    /// The Google connector and its client registration. Both or neither:
+    /// a client with no app to authenticate as cannot call anything.
+    pub google: Option<Arc<hub::google::Google>>,
+    pub oauth_app: Option<Arc<hub::oauth::App>>,
+    /// Authorization attempts waiting for their callback, shared with the
+    /// web surface that receives it. In memory on purpose: a PKCE verifier
+    /// is useful for ten minutes and writing it to disk would give it a
+    /// lifetime it has no business having.
+    pub pending_auth: Option<Arc<Mutex<HashMap<String, hub::oauth::Attempt>>>>,
+    /// The acting cell's vault. Per-cell rather than instance-wide because
+    /// its key is derived from that cell's DEK -- vault bytes shred with the
+    /// cell they belong to, which only holds if there is one vault per cell.
+    pub vault: Option<Arc<mind::vault::MediaVault>>,
 }
 
 impl Services {
@@ -85,6 +102,36 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// The acting cell's vault, or a refusal. Absent only in the offline
+    /// registry, where there is no cell on disk to have one.
+    pub fn vault(&self) -> Result<&Arc<mind::vault::MediaVault>, PrismError> {
+        self.services
+            .vault
+            .as_ref()
+            .ok_or_else(|| PrismError::Capability("no vault in this context".into()))
+    }
+
+    /// Everything needed to reach Google. The refusal names the missing
+    /// piece: "not connected" is the person's problem to fix and "no client
+    /// configured" is the operator's, and one message for both wastes an
+    /// evening.
+    pub fn google(&self) -> Result<crate::connectors::Reach<'_>, PrismError> {
+        let (Some(google), Some(app)) = (&self.services.google, &self.services.oauth_app) else {
+            return Err(PrismError::Capability(
+                "this robot has no google client configured -- set \
+                 GOOGLE_OAUTH_CLIENT_ID (and secret) and restart"
+                    .into(),
+            ));
+        };
+        Ok(crate::connectors::Reach { google, app })
+    }
+
+    /// Which installation is acting -- what a deletion is attributed to, so
+    /// a tombstone made here can be told from one that arrived in a sync.
+    pub fn origin(&self) -> &str {
+        &self.instance.instance_id
+    }
+
     /// Provenance anchor (law #5): the source message id journaled at
     /// intent_open. Capabilities that store knowledge refuse without it.
     pub fn source_msg(&self) -> Result<String, PrismError> {
@@ -367,6 +414,20 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(admin::TelegramBindCode),
         Box::new(answer::ModelAnswer),
         Box::new(research::WebResearch),
+        Box::new(calendar::List),
+        Box::new(calendar::Create),
+        Box::new(calendar::Cancel),
+        Box::new(email::Search),
+        Box::new(email::Read),
+        Box::new(email::Draft),
+        Box::new(email::Send),
+        Box::new(connect::Start),
+        Box::new(connect::Status),
+        Box::new(connect::Disconnect),
+        Box::new(files::Save),
+        Box::new(files::List),
+        Box::new(files::Read),
+        Box::new(files::Delete),
         Box::new(soul::Show),
         Box::new(soul::Set),
         Box::new(soul::Bounds),

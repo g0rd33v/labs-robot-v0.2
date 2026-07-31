@@ -35,6 +35,11 @@ pub enum FloorMatch {
     Invite,
     TelegramCode,
     SoulShow,
+    /// Begin linking an outside account. Deliberately floor-only: it mints
+    /// a URL that grants standing access to someone's mail, and nothing a
+    /// model can be talked into should be able to produce one.
+    ConnectStart,
+    ConnectStatus,
     WebSearch { query: String },
 }
 
@@ -42,7 +47,7 @@ pub enum FloorMatch {
 // Whole-utterance commands. Matched EXACTLY, never as substrings: an
 // utterance that merely contains one of these is not that command.
 // ---------------------------------------------------------------------
-const EXACT: [(&str, &str); 38] = [
+const EXACT: [(&str, &str); 42] = [
     ("time", "time_now"),
     ("what time is it", "time_now"),
     ("what time is it now", "time_now"),
@@ -78,6 +83,10 @@ const EXACT: [(&str, &str); 38] = [
     ("show facts", "registry_list"),
     ("telegram code", "telegram_code"),
     ("telegram", "telegram_code"),
+    ("/connect", "connect_start"),
+    ("/connections", "connect_status"),
+    ("connected accounts", "connect_status"),
+    ("what is connected", "connect_status"),
     ("/soul", "soul_show"),
     ("soul", "soul_show"),
     ("how are you set to speak", "soul_show"),
@@ -200,6 +209,8 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         "invite" => Some(FloorMatch::Invite),
         "telegram_code" => Some(FloorMatch::TelegramCode),
         "soul_show" => Some(FloorMatch::SoulShow),
+        "connect_start" => Some(FloorMatch::ConnectStart),
+        "connect_status" => Some(FloorMatch::ConnectStatus),
         _ => None,
     }
 }

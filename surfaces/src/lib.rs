@@ -44,6 +44,10 @@ pub trait Robot: Send + Sync {
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<i64>;
     fn dashboard(&self, principal: i64) -> anyhow::Result<DashData>;
     fn owner_principal(&self) -> i64;
+    /// Finish an OAuth sign-in; returns which account was connected.
+    fn complete_google_auth(&self, state: &str, code: &str) -> anyhow::Result<String>;
+    /// Say something to the owner in their chat, unprompted.
+    fn tell_owner(&self, text: &str) -> anyhow::Result<()>;
 }
 
 /// Sessions live in memory only. They are capped and aged so a long-lived
@@ -133,6 +137,7 @@ pub fn router(state: Arc<WebState>) -> Router {
         .route("/api/history", get(api_history))
         .route("/api/upload", post(api_upload))
         .route("/api/stream", get(api_stream))
+        .route("/oauth/google/callback", get(oauth_callback))
         .with_state(state)
 }
 
@@ -184,6 +189,77 @@ async fn open_invite(State(st): State<Arc<WebState>>, Path(token): Path<String>)
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "invite failed").into_response(),
     }
+}
+
+/// The loopback redirect Google sends the person back to (Q29).
+///
+/// Deliberately NOT session-authenticated: the browser arriving here has
+/// come from Google's consent screen, not from the robot's own pages, and
+/// requiring a session would break the flow for anyone whose consent opened
+/// in a different browser. What stands in for a session is the `state`
+/// value -- unguessable, single-use, and minted only by a person typing
+/// `/connect` in an authenticated chat.
+async fn oauth_callback(
+    State(st): State<Arc<WebState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    // the person declined on Google's screen, or Google refused
+    if let Some(err) = q.get("error") {
+        return Html(done_page(&format!(
+            "sign-in was not completed ({}). nothing was connected.",
+            html_escape(err)
+        )))
+        .into_response();
+    }
+    let (Some(state), Some(code)) = (q.get("state"), q.get("code")) else {
+        return (StatusCode::BAD_REQUEST, "missing code or state").into_response();
+    };
+    let (state, code) = (state.clone(), code.clone());
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.complete_google_auth(&state, &code)).await {
+        Ok(Ok(account)) => {
+            let account: String = account;
+            // the robot says so in the chat too, so the connection is
+            // visible where the person actually is
+            let _ = st.robot.tell_owner(&format!(
+                "connected google as {account}. try \"what's on my calendar tomorrow\"."
+            ));
+            Html(done_page(&format!(
+                "connected as {}. you can close this tab and go back to the chat.",
+                html_escape(&account)
+            )))
+            .into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("google sign-in failed: {e}");
+            (
+                StatusCode::FORBIDDEN,
+                Html(done_page(
+                    "that sign-in link was already used or has expired. \
+                     type /connect in the chat to get a fresh one.",
+                )),
+            )
+                .into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sign-in failed").into_response(),
+    }
+}
+
+/// The only page a person sees from an outside redirect. No scripts, no
+/// state, nothing to interact with -- it exists to say what happened.
+fn done_page(message: &str) -> String {
+    format!(
+        "<!doctype html><meta charset=utf-8><title>robot</title>\
+         <body style=\"font:16px/1.6 system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem\">\
+         <p>{message}</p></body>"
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 async fn chat_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
@@ -347,6 +423,13 @@ mod tests {
 
     struct Echo;
     impl Robot for Echo {
+        fn complete_google_auth(&self, _state: &str, _code: &str) -> anyhow::Result<String> {
+            anyhow::bail!("no connector in the test double")
+        }
+        fn tell_owner(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn handle_message(&self, p: i64, t: String) -> anyhow::Result<String> {
             Ok(format!("echo[{p}]: {t}"))
         }
