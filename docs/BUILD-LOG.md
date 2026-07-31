@@ -5,6 +5,130 @@ dependencies introduced. Newest first.
 
 ---
 
+## The authority model — grants, approvals, data classes (2026-07-31)
+
+Items 1–3 of `docs/GAP-ANALYSIS.md`, which read the architecture against
+the code and found the action path governed in name more than in fact.
+
+**Why these three, and why before calendar and email.** All three are
+cross-cutting properties of the action path, and that path is about to grow
+three capabilities that touch the world. Each is a day's work now and a
+migration later. Building the authority model while there are two
+capabilities to retrofit rather than five is the whole argument.
+
+### 1. Grants are read now
+
+They were minted, journaled, given an `expires_at` — and never consulted.
+That is an authority model in costume.
+
+Three checks now stand between a grant and a step: the **capability** must
+match, the **authority must not have lapsed**, and **every argument the step
+carries must be the one the grant was issued for**. Authority may exceed
+use; use may never exceed authority.
+
+The scope check is what makes §3's word *narrow* mean something: a grant
+for `memory.forget{index: 2}` does not authorise `index: 3`. It matters
+most on replay, where the plan is read back from the journal and the grant
+is the thing certifying it is still the plan that was authorised.
+
+The expiry check is the one with teeth in ordinary operation — a turn
+interrupted by a crash and resumed hours later, or a step that waited for
+an approval nobody gave. A refusal is journaled as `grant.refused` with an
+honest failed receipt, never a silent skip.
+
+Also fixed: `principal: 0` on every grant. A grant that records the same
+principal for everyone records nothing.
+
+### 2. Durable interrupts (§3b.2)
+
+`Approval::Required` was defined and never emitted; every step was `Auto`.
+
+A step needing a person now parks the intent and stops. **Not a queue and
+not a timer**: a parked intent is an open intent whose last state is
+`awaiting_approval`, so it survives a crash for free — the same property
+that makes replay work makes waiting work.
+
+Two decisions shaped it:
+
+- **Replay must not resume a parked intent.** It is not stalled; it is
+  waiting for a person. Resuming it on boot would execute the very thing
+  the approval exists to gate — the worst available failure.
+- **The authority is minted at approval, not at parking.** A grant issued
+  before the wait would have to outlive it, defeating time-boxing, or
+  expire during it. The approval *is* the fresh authority.
+
+The receipt for a parked turn is `Proposed` and deliberately **not
+terminal**: the intent is open, and a terminal receipt would assert an
+outcome that has not happened.
+
+Approval is declared by the capability beside its `effect()`; owner policy
+in `[policy] approval_required` may only **add** to it. A capability that
+says it needs a person is making a statement about itself, and a setting
+should not overrule it. `email.send` lands here when it exists.
+
+Answering in chat is deliberately narrow — a short, unambiguous yes or no
+while something is parked. Anything longer is a real message and takes the
+normal path: someone who types a paragraph has moved on, and reading that
+as consent to a parked action would be the worst kind of helpful.
+
+### 3. Data classes (§7)
+
+The point was never the label. §6's routing begins with eligibility
+filtering — *"private data → cloud eliminated"* — and a filter needs
+something to filter on. Without a class on the object, every rule about
+what may leave the contour is re-derived from context at the moment it
+matters, which is the moment it gets skipped.
+
+Eight classes, two questions: **may this leave the machine**, and **may it
+travel to the owner's own premises**. Different bars — `restricted` means
+no external call, not no backup; the owner's own stick is still theirs.
+
+- **The default is `owner_private`, not `public`.** The objects nobody
+  classified are always the majority, and a scheme defaulting to the
+  permissive end protects nothing. An unreadable or absent class also lands
+  on the protective default.
+- **Derived objects inherit the strictest class of their sources.** A
+  summary of a restricted document is a restricted summary; otherwise
+  paraphrase is a laundering channel.
+- The filter runs in `answer.model` — the one place a person's own
+  knowledge is put in front of an external model, and therefore the one
+  place that has to ask whether it may be.
+
+### Two defects found while wiring item 3, both worse than the gap
+
+**The class did not travel in sync.** Mark something restricted on the
+machine, and it arrives on the stick as ordinary — cleared to reach a model
+there. A classification that protects exactly one machine is *worse* than
+none, because it reads as protection. It travels now.
+
+**`local_only` did not mean local_only** — it synced like anything else.
+Export refuses to carry `local_only` and `credential` at all, which is the
+only place that can enforce it.
+
+### Gates (all demonstrated)
+
+- **Grants** — a wrong capability, a wrong argument, and an expired
+  authority are each refused; a wider grant still covers a narrower step.
+- **Approvals** — park a step, **kill the process**, come back, approve:
+  it completes exactly once. A second yes has nothing to spend; a decline
+  closes the intent honestly rather than asking forever.
+- **Data classes** — a restricted fact stays **known** (registry shows it,
+  recall finds it, nothing forgotten) and never reaches model context,
+  while an ordinary fact beside it still does. A filter that withheld
+  everything would pass a careless test.
+
+`cargo test --workspace` — **168 passed** (was 152). Clippy clean.
+`robotd eval` PASS, kill-suite 12/12 — which was the real risk here, since
+a resumed turn must not be refused by its own expired authority.
+
+**One process note.** The first commit of this run stated "154 tests,
+clippy clean" when the true numbers were 157 and one clippy error: the gate
+command piped through `head -8` and printed `CLIPPY_OK` unconditionally, so
+both figures were read before the run finished. Corrected in the following
+commit. A gate that can report success without having passed is not a gate.
+
+---
+
 ## Soul S1 + S2 — the dial, the stance, and the evaluator seat (2026-07-31)
 
 Design and plan: `docs/SOUL.md`. Q40's `soul` crate, deferred through the
