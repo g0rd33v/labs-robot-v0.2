@@ -93,28 +93,39 @@ wins. Resurrecting a cancelled reminder is worse than dropping a
 resurrection: one nags about something called off, the other does nothing.
 Between `cancelled` and `fired`, take the earlier — both are done.
 
-## 5. Transport
+## 5. Transport — changed during implementation
 
-A **sealed delta**, in the shape the package already uses:
+**Planned:** a sealed delta file written to the peer path and imported by
+the other side.
+
+**Built:** the peer's cells are opened and merged **in place**. Both
+instances are the same robot, so restore carried the KEK, so their
+databases are already SQLCipher files this instance can open. A delta file
+would have meant inventing a format, and leaving a decrypted-in-transit
+artifact on the very stick most likely to be lost. Merging in place adds no
+new plaintext anywhere.
+
+It also made the tombstone rule work. Collection requires knowing the peer
+has applied a deletion; with a file you can only hope it was read, but with
+one two-way pass you know, because you did it.
 
 ```
-robotd sync --with <path>       # e.g. the stick, or a mounted volume
+robotd sync --with <path>       # the stick, a mounted volume, a folder
 ```
 
-1. Read the watermark for that peer (`last_synced_at`, per instance id).
-2. Export everything newer into one file, encrypted under a key derived
-   from the KEK — a stick left in a taxi leaks nothing.
-3. Import the peer's file the same way.
-4. Advance both watermarks, boundary-log both directions, and write a
-   receipt: rows in, rows out, conflicts resolved, tombstones applied.
+1. Open the peer, check `robot_id` matches — refuse otherwise.
+2. For every cell both sides hold the key for: pull theirs, push ours.
+3. Copy content-addressed media the other side is missing (temp file then
+   rename, so a torn blob never appears under its own hash).
+4. Collect tombstones both sides have now applied.
+5. Advance the watermark and boundary-log both directions, counts only.
 
-Both instances share a `robot_id` (restore preserves it) but need a
-distinct `instance_id`, minted at restore, so watermarks and origins are
-attributable. Sync refuses across different `robot_id`s — merging two
-different robots' memories is never what anyone meant.
+Both instances share a `robot_id` and differ by `instance_id`, minted at
+first boot. Restore clears it deliberately, so a copy mints its own — a
+copy that believed it was the original could not hold a watermark against
+its peer, and that was a real bug the first live run caught.
 
-The delta is a file, so this works for anything that can hold one: a USB
-stick, a shared folder, an object store. Nothing here is USB-specific.
+Nothing here is USB-specific: a peer is a path.
 
 ## 6. Decisions, as taken
 
