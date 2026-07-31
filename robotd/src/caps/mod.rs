@@ -19,7 +19,7 @@ pub mod reminders;
 pub mod research;
 pub mod soul;
 
-use prism::types::{Effect, Evidence, Outcome, Rendering, ToolDef};
+use prism::types::{Approval, Effect, Evidence, Outcome, Rendering, ToolDef};
 use prism::{Cell, CapabilityRouter, PrismError};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -148,6 +148,16 @@ pub trait Capability: Send + Sync {
     /// so the check cannot drift from the code it guards.
     fn validate(&self, args: &serde_json::Value) -> Result<(), String>;
 
+    /// Does this capability need a person's yes before it runs?
+    ///
+    /// Declared beside the code that performs it, like `effect()`. The
+    /// owner can widen this in config but never narrow it -- a capability
+    /// that says it needs approval is making a statement about itself, and
+    /// a setting should not be able to overrule it.
+    fn approval(&self) -> Approval {
+        Approval::Auto
+    }
+
     /// Whether this capability appears in the catalog offered to a model.
     /// The fallback answer path is a capability but not a tool: it is where
     /// a turn goes when NO tool fits, so offering it would let the model
@@ -260,6 +270,8 @@ pub fn mind_err(e: impl std::fmt::Display) -> PrismError {
 
 pub struct Registry {
     caps: HashMap<&'static str, Box<dyn Capability>>,
+    /// Capability names the owner has asked to approve by hand.
+    pub approval_policy: Vec<String>,
     pub services: Services,
     pub policy: Policy,
     pub instance: Instance,
@@ -273,6 +285,7 @@ impl Registry {
         }
         Self {
             caps,
+            approval_policy: vec![],
             services,
             policy,
             instance,
@@ -289,6 +302,25 @@ impl Registry {
 
     pub fn effect_of(&self, name: &str) -> Option<Effect> {
         self.caps.get(name).map(|c| c.effect())
+    }
+
+    /// What this capability needs, widened by owner policy.
+    ///
+    /// Policy may only ADD approval requirements. A capability that
+    /// declares it needs a person is making a statement about itself --
+    /// `email.send` is not a setting -- and config should not be able to
+    /// switch that off.
+    pub fn approval_of(&self, name: &str) -> Approval {
+        let declared = self
+            .caps
+            .get(name)
+            .map(|c| c.approval())
+            .unwrap_or(Approval::Auto);
+        if declared == Approval::Required || self.approval_policy.iter().any(|n| n == name) {
+            Approval::Required
+        } else {
+            Approval::Auto
+        }
     }
 
     /// The tool catalog offered to a model: generated from the registry,
@@ -343,6 +375,10 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
 }
 
 impl CapabilityRouter for Registry {
+    fn approval_for(&self, capability: &str) -> Approval {
+        self.approval_of(capability)
+    }
+
     fn describe(&self, cell: &Cell) -> Vec<ToolDef> {
         let mut tools = self.catalog();
         // the answering tool exists only around a question -- while one is

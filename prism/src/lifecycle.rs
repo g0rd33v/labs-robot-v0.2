@@ -6,7 +6,7 @@
 use crate::floor::{self, FloorMatch};
 use crate::types::*;
 use crate::verdict::VerdictProvider;
-use crate::{journal, outbox, pending, receipts, Cell, Envelope, PrismError};
+use crate::{approval, journal, outbox, pending, receipts, Cell, Envelope, PrismError};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use trust::ids;
@@ -33,6 +33,14 @@ pub trait CapabilityRouter: Send + Sync {
     /// while a question is open.
     fn describe(&self, cell: &Cell) -> Vec<ToolDef>;
 
+    /// Does this capability need a person's yes? Consulted at plan time so
+    /// the requirement lives with the capability rather than being
+    /// rediscovered at execution.
+    fn approval_for(&self, capability: &str) -> Approval {
+        let _ = capability;
+        Approval::Auto
+    }
+
     /// Does this proposed call name a real tool with arguments that
     /// typecheck? Returns the registry's own effect class, so a caller
     /// cannot assert a gentler one than the code actually performs.
@@ -54,6 +62,84 @@ pub const CONFIRM_DECLINED: &str = "confirmation.declined";
 /// a "yes" that quietly turns into small talk leaves the person believing
 /// something happened.
 pub const CONFIRM_STALE: &str = "confirmation.stale";
+
+/// Close a parked intent the person declined. Nothing ran; the receipt
+/// says exactly that, because a decline that closed silently would look
+/// identical to a drop.
+pub(crate) fn close_declined(
+    cell: &Cell,
+    intent_id: &str,
+    plan: &Plan,
+    deps: &TurnDeps,
+    parked: &approval::Parked,
+) -> Result<TurnOutput, PrismError> {
+    let receipt = failed_receipt(
+        intent_id,
+        &format!("{} was declined by the owner; nothing ran", parked.capability),
+        "approval",
+    );
+    let receipt = cell.with(|c| receipts::store(c, &receipt))?;
+    let parts = vec![ReplyPart::Say(Rendering::new(
+        "approval_declined",
+        serde_json::json!({ "capability": parked.capability }),
+    ))];
+    let reply = deps.renderer.render(&plan.lang, &parts, &[]).text;
+    let (reply_effect_id, _) =
+        cell.with(|c| outbox::enqueue(c, intent_id, "surface:chat", &reply))?;
+    cell.with(|c| outbox::mark(c, &reply_effect_id, "sent", None))?;
+    cell.with(|c| journal::intent_close(c, intent_id, receipt.status.as_str()))?;
+    Ok(TurnOutput {
+        intent_id: intent_id.to_string(),
+        reply,
+        lang: plan.lang.clone(),
+        receipt,
+        reply_effect_id,
+    })
+}
+
+/// A receipt for a turn that is waiting rather than finished.
+///
+/// `Proposed` and deliberately NOT terminal: the intent is still open, and
+/// a terminal receipt would assert an outcome that has not happened. The
+/// watchdog's rule -- an intent without a terminal receipt is an alarm --
+/// is relaxed for exactly this state, which is why it has its own name in
+/// the journal rather than looking like a stall.
+fn awaiting_receipt(intent_id: &str, capability: &str) -> Receipt {
+    Receipt {
+        receipt_id: ids::new_id("rcpt"),
+        intent_id: intent_id.into(),
+        status: ReceiptStatus::Proposed,
+        claims: vec![Claim {
+            claim: format!("{capability} is waiting for the owner's approval; nothing has run"),
+            evidence: vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "approval".into(),
+                external_id: capability.into(),
+                hash: String::new(),
+                ts: ids::ts_ms(),
+            }],
+        }],
+        models_used: vec![],
+        data_disclosures: vec![],
+    }
+}
+
+/// How long a step's authority lives. Long enough that an ordinary crash
+/// and restart resumes inside it; short enough that a turn resumed days
+/// later has to be re-authorised rather than executing on stale consent.
+pub const GRANT_TTL_MS: i64 = 15 * 60_000;
+
+/// Who this turn is acting for. Read from the journaled intent rather than
+/// assumed -- a grant that records principal 0 for everyone records
+/// nothing.
+fn acting_principal(cell: &Cell, intent_id: &str) -> i64 {
+    cell.with(|c| journal::payload_of(c, intent_id, "intent_open"))
+        .ok()
+        .flatten()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+        .and_then(|v| v["principal_id"].as_i64())
+        .unwrap_or(-1)
+}
 
 /// Milliseconds since the epoch as RFC 3339 local time -- the one wire
 /// representation for a moment, whether the floor computed it or a model
@@ -192,7 +278,8 @@ pub fn run_turn(
     cell.with(|c| journal::step(c, &intent_id, "decision", &decision_json, None))?;
     crash_check(deps, "after_decision")?;
 
-    let plan = plan_from_decision(&intent_id, &decision, &env.content);
+    let mut plan = plan_from_decision(&intent_id, &decision, &env.content);
+    apply_approval_policy(&mut plan, deps.router);
     let plan_json = serde_json::to_string(&plan)?;
     cell.with(|c| journal::step(c, &intent_id, "plan", &plan_json, None))?;
     crash_check(deps, "after_plan")?;
@@ -209,6 +296,18 @@ pub(crate) fn finish_planned_intent(
     deps: &TurnDeps,
     live: bool,
 ) -> Result<TurnOutput, PrismError> {
+    finish_planned_intent_with(cell, intent_id, plan, deps, live, &[])
+}
+
+/// As above, with the set of step ids a person has already approved.
+pub(crate) fn finish_planned_intent_with(
+    cell: &Cell,
+    intent_id: &str,
+    plan: &Plan,
+    deps: &TurnDeps,
+    live: bool,
+    approved: &[String],
+) -> Result<TurnOutput, PrismError> {
     // execute steps, reusing journaled outcomes on replay (never re-run a
     // completed effect)
     let prior: Vec<Outcome> = cell
@@ -222,19 +321,78 @@ pub(crate) fn finish_planned_intent(
             outcomes.push(done.clone());
             continue;
         }
+        // sec 3b.2: a step needing a person parks the intent in the journal
+        // and stops here. Not a queue, not a timer -- an open intent whose
+        // last state is `awaiting_approval`, which survives a crash for
+        // free because replay already understands open intents.
+        if step.approval == Approval::Required && !approved.contains(&step.step_id) {
+            let parked = approval::park(cell, intent_id, step)?;
+            let parts = vec![ReplyPart::Say(Rendering::new(
+                "approval_needed",
+                serde_json::json!({
+                    "capability": parked.capability,
+                    "args": parked.args,
+                }),
+            ))];
+            let reply = deps.renderer.render(&plan.lang, &parts, &[]).text;
+            let (reply_effect_id, _) =
+                cell.with(|c| outbox::enqueue(c, intent_id, "surface:chat", &reply))?;
+            // the intent stays OPEN: it is waiting, not finished, and a
+            // receipt now would be a receipt for something that has not
+            // happened
+            return Ok(TurnOutput {
+                intent_id: intent_id.to_string(),
+                reply,
+                lang: plan.lang.clone(),
+                receipt: awaiting_receipt(intent_id, &parked.capability),
+                reply_effect_id,
+            });
+        }
+
         // grants: scoped, time-boxed authority for anything that writes
         if step.effect != Effect::Read {
             let grant = Grant {
                 grant_id: ids::new_id("grant"),
                 capability: step.capability.clone(),
                 scope: step.args.clone(),
-                principal: 0,
-                expires_at: ids::ts_ms() + 5 * 60_000,
+                principal: acting_principal(cell, intent_id),
+                expires_at: ids::ts_ms() + GRANT_TTL_MS,
                 issued_by: "policy:auto".into(),
             };
             let grant_json = serde_json::to_string(&grant)?;
             cell.with(|c| journal::step(c, intent_id, "grant", &grant_json, None))?;
             crash_check(deps, "after_grant")?;
+
+            // ...and then READ it. A grant that is minted, journaled and
+            // never checked is an authority model in costume. The check is
+            // here rather than at mint time because the interesting cases
+            // are the ones where time passes in between: a crash resumed
+            // hours later, a step that waited for an approval.
+            if let Err(denial) = grant.authorises(&step.capability, &step.args, ids::ts_ms()) {
+                let refused = serde_json::json!({
+                    "grant_id": grant.grant_id,
+                    "capability": step.capability,
+                    "reason": denial.to_string(),
+                })
+                .to_string();
+                cell.with(|c| journal::step(c, intent_id, "grant.refused", &refused, None))?;
+                outcomes.push(Outcome::failed(
+                    step.step_id.clone(),
+                    vec![Evidence {
+                        kind: "deterministic".into(),
+                        provider: "grant-check".into(),
+                        external_id: grant.grant_id.clone(),
+                        hash: String::new(),
+                        ts: ids::ts_ms(),
+                    }],
+                    format!("refused: {denial}"),
+                    Rendering::new(
+                        "grant_refused",
+                        serde_json::json!({ "why": denial.to_string() }),
+                    ),
+                ));
+                continue;
+            }
         }
         // the cell is NOT locked here: a capability may spend seconds in a
         // model call, and the person's other requests must not queue on it
@@ -451,6 +609,9 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
         approval: Approval::Auto,
         deps: vec![],
     };
+    // approval is a property of the capability, applied to every step
+    // uniformly -- a requirement that depended on which branch built the
+    // plan would be a requirement with holes in it.
     let steps = match decision {
         Decision::Floor { m, .. } => match m {
             FloorMatch::TimeNow => vec![step("time.now", serde_json::json!({}), Effect::Read)],
@@ -562,6 +723,14 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
         intent_id: intent_id.into(),
         lang,
         steps,
+    }
+}
+
+/// Stamp each step with what its capability requires. Applied after the
+/// plan is built so no branch can forget it.
+pub(crate) fn apply_approval_policy(plan: &mut Plan, router: &dyn CapabilityRouter) {
+    for step in &mut plan.steps {
+        step.approval = router.approval_for(&step.capability);
     }
 }
 

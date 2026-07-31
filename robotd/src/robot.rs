@@ -70,6 +70,8 @@ pub struct RobotCore {
     pub ultra_daily_cap: u32,
     /// Q26's sample rate for routine turns; acting turns are always checked.
     pub verify_percent: u32,
+    /// Capabilities the owner has asked to approve by hand.
+    pub approval_required: Vec<String>,
     pub public_base: String,
     pub robot_name: String,
     pub started_at: i64,
@@ -88,6 +90,7 @@ impl RobotCore {
         research: Option<Arc<hub::Research>>,
         ultra_daily_cap: u32,
         verify_percent: u32,
+        approval_required: Vec<String>,
         public_base: String,
         robot_name: String,
         instance_id: String,
@@ -105,6 +108,7 @@ impl RobotCore {
             research,
             ultra_daily_cap,
             verify_percent,
+            approval_required,
             public_base,
             robot_name,
             started_at: trust::ids::ts_ms(),
@@ -290,7 +294,7 @@ impl RobotCore {
 
     /// The capability registry for this robot (also used by boot-time replay).
     pub fn router(&self) -> Registry {
-        Registry::new(
+        let mut reg = Registry::new(
             Services {
                 embedder: self.embedder.clone(),
                 gateway: self.gateway.clone(),
@@ -305,7 +309,9 @@ impl RobotCore {
                 public_base: self.public_base.clone(),
                 instance_id: self.instance_id.clone(),
             },
-        )
+        );
+        reg.approval_policy = self.approval_required.clone();
+        reg
     }
 
     fn boundary_crossing(
@@ -378,7 +384,16 @@ impl RobotCore {
             };
             // the cell is locked only in short bursts inside run_turn; the
             // model call in the middle happens with it free
-            let out = prism::run_turn(cell, &env, &deps)?;
+            // sec 3b.2: if something is parked, this message is most
+            // likely the answer to it. Checked BEFORE routing, because a
+            // model asked to interpret "yes" with no idea a question is
+            // open will happily interpret it as something else.
+            let out = match parked_answer(cell, &env.content)? {
+                Some((intent, yes)) => prism::approval::respond(cell, &intent, yes, &deps)?
+                    .map(Ok)
+                    .unwrap_or_else(|| prism::run_turn(cell, &env, &deps))?,
+                None => prism::run_turn(cell, &env, &deps)?,
+            };
             // remember what language this person speaks to us in, so the
             // lanes that talk to them when they are not asking -- a
             // reminder firing at 03:00, a backup failure -- do it in their
@@ -420,6 +435,31 @@ pub fn remember_lang(conn: &Connection, lang: &str) {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![lang],
     );
+}
+
+/// Is this message an answer to something parked, and which way?
+///
+/// Deliberately narrow and deterministic: a short, unambiguous yes or no
+/// while a step is waiting. Anything longer is a real message and goes
+/// through the normal path -- someone who types a paragraph has moved on,
+/// and treating it as consent to a parked action would be the worst kind
+/// of helpful.
+fn parked_answer(cell: &Cell, text: &str) -> anyhow::Result<Option<(String, bool)>> {
+    let waiting = prism::approval::waiting(cell)?;
+    let Some(p) = waiting.last() else {
+        return Ok(None);
+    };
+    let t = text.trim().to_lowercase();
+    let t = t.trim_matches(|c: char| ",.!?".contains(c));
+    const YES: [&str; 8] = ["yes", "y", "approve", "approved", "do it", "go ahead", "ok", "okay"];
+    const NO: [&str; 6] = ["no", "n", "cancel", "decline", "don't", "stop"];
+    if YES.contains(&t) {
+        return Ok(Some((p.intent_id.clone(), true)));
+    }
+    if NO.contains(&t) {
+        return Ok(Some((p.intent_id.clone(), false)));
+    }
+    Ok(None)
 }
 
 /// Soul's instruction for this cell, or `None` when nothing needs shaping.

@@ -148,6 +148,7 @@ mod tests {
                 script: String::new(),
             },
             sync: Default::default(),
+            policy: Default::default(),
         }
     }
 

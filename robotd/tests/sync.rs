@@ -43,6 +43,7 @@ fn cfg_at(dir: &Path) -> RobotConfig {
             script: String::new(),
         },
         sync: Default::default(),
+        policy: Default::default(),
     }
 }
 
@@ -259,6 +260,83 @@ fn the_persona_dial_survives_a_restart_and_reaches_the_other_instance() {
             .unwrap();
         assert!(refused.is_err(), "a pin must survive the crossing");
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Item 2's gate, and the whole point of a DURABLE interrupt: park a step,
+/// **kill the process**, come back, approve, and watch it complete exactly
+/// once. Nothing waits in memory.
+#[test]
+fn an_approval_survives_a_restart_and_runs_once() {
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("appr-{}", trust::ids::random_hex(6)));
+    let mut cfg = cfg_at(&dir);
+    // the owner asks to approve invites by hand
+    cfg.policy.approval_required = vec!["member.invite".into()];
+
+    let invites = |c: &RobotConfig| -> i64 {
+        let boot = robotd::boot::bootstrap(c).unwrap();
+        let core = boot.robot.core.lock().unwrap();
+        core.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(invites(&cfg), 0);
+
+    // ask for one: it parks rather than running
+    let asked = say(&cfg, "invite");
+    assert!(asked.contains("needs your say-so"), "{asked}");
+    assert!(!asked.contains("/i/"), "no link before approval: {asked}");
+    assert_eq!(invites(&cfg), 0, "nothing ran");
+
+    // the process is gone and back -- each `say` boots a fresh robot, so
+    // this is a real restart, not a simulated one
+    {
+        let boot = robotd::boot::bootstrap(&cfg).unwrap();
+        let owner = boot.robot.owner_principal;
+        let cell = boot.robot.cell(owner).unwrap();
+        let w = prism::approval::waiting(&cell.cell).unwrap();
+        assert_eq!(w.len(), 1, "the wait survived the restart");
+        assert_eq!(w[0].capability, "member.invite");
+    }
+
+    // approve
+    let done = say(&cfg, "yes");
+    assert!(done.contains("/i/"), "the invite should exist now: {done}");
+    assert_eq!(invites(&cfg), 1);
+
+    // and a second yes has nothing left to run
+    say(&cfg, "yes");
+    assert_eq!(invites(&cfg), 1, "an approval is spent once");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Declining closes the intent honestly rather than leaving it parked
+/// forever or, worse, running it anyway.
+#[test]
+fn declining_an_approval_runs_nothing() {
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("decl-{}", trust::ids::random_hex(6)));
+    let mut cfg = cfg_at(&dir);
+    cfg.policy.approval_required = vec!["member.invite".into()];
+
+    say(&cfg, "invite");
+    let no = say(&cfg, "no");
+    assert!(no.contains("didn't run"), "{no}");
+
+    let boot = robotd::boot::bootstrap(&cfg).unwrap();
+    let count: i64 = {
+        let core = boot.robot.core.lock().unwrap();
+        core.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count, 0);
+    let cell = boot.robot.cell(boot.robot.owner_principal).unwrap();
+    assert!(
+        prism::approval::waiting(&cell.cell).unwrap().is_empty(),
+        "a decline must end the wait, not leave it asking forever"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

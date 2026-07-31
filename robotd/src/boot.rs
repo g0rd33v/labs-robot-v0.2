@@ -187,6 +187,7 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         research,
         cfg.hub.ultra_daily_cap,
         cfg.hub.verify_percent,
+        cfg.policy.approval_required.clone(),
         public_base,
         cfg.robot.name.clone(),
         instance_id,
@@ -275,6 +276,7 @@ mod tests {
                 script: String::new(),
             },
             sync: Default::default(),
+            policy: Default::default(),
         };
         (cfg, dir)
     }

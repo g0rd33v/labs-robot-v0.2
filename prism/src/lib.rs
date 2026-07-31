@@ -5,6 +5,7 @@
 //! -> plan -> grant -> execute -> verify -> receipt -> reply, all journaled,
 //! with crash replay (`replay`) and a transactional outbox (Q10/Q11).
 
+pub mod approval;
 pub mod floor;
 pub mod journal;
 pub mod lifecycle;

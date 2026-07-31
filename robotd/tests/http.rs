@@ -49,6 +49,7 @@ fn boot_test_robot() -> TestRobot {
                 script: String::new(),
             },
             sync: Default::default(),
+            policy: Default::default(),
     };
     // hermetic: never pick up a developer's keys from the environment
     std::env::remove_var("OPENROUTER_API_KEY");

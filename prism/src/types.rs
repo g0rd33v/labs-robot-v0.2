@@ -121,6 +121,87 @@ pub struct Grant {
     pub issued_by: String,
 }
 
+/// Why a grant did not authorise a step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantDenial {
+    /// The authority lapsed before the step ran. Reachable in ordinary
+    /// operation: a turn interrupted by a crash and resumed later, or a
+    /// step that waited for an approval that never came.
+    Expired { by_ms: i64 },
+    /// The grant authorises a different capability than the step performs.
+    WrongCapability { granted: String, attempted: String },
+    /// The step's arguments are not the ones the grant was issued for.
+    /// This is the check that makes "narrow" mean something: authority for
+    /// `reminder.create{about: "call mark"}` is not authority for
+    /// `reminder.create{about: anything else}`.
+    OutOfScope { field: String },
+}
+
+impl std::fmt::Display for GrantDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GrantDenial::Expired { by_ms } => {
+                write!(f, "the authority for this step expired {by_ms} ms ago")
+            }
+            GrantDenial::WrongCapability { granted, attempted } => write!(
+                f,
+                "the authority covers {granted}, not {attempted}"
+            ),
+            GrantDenial::OutOfScope { field } => {
+                write!(f, "the authority does not cover this step's '{field}'")
+            }
+        }
+    }
+}
+
+impl Grant {
+    /// Does this grant authorise this exact step, right now?
+    ///
+    /// Minting a grant and never reading it is the shape of an authority
+    /// model that only looks like one. The three checks below are what make
+    /// arch sec 3's sentence true -- *"narrow, time-boxed authority: may use
+    /// `calendar.create`, on this calendar, for this event, until Friday"*
+    /// -- rather than aspirational.
+    ///
+    /// Scope is checked field by field against the step's arguments, so a
+    /// grant issued for one reminder cannot execute a different one. That
+    /// matters most on replay: the plan is read back from the journal, and
+    /// the grant is the thing that says it is still the plan that was
+    /// authorised.
+    pub fn authorises(
+        &self,
+        capability: &str,
+        args: &serde_json::Value,
+        now_ms: i64,
+    ) -> Result<(), GrantDenial> {
+        if self.capability != capability {
+            return Err(GrantDenial::WrongCapability {
+                granted: self.capability.clone(),
+                attempted: capability.into(),
+            });
+        }
+        if now_ms > self.expires_at {
+            return Err(GrantDenial::Expired {
+                by_ms: now_ms - self.expires_at,
+            });
+        }
+        // every argument the step carries must be the one the grant was
+        // issued for. A grant with a wider scope than the step is fine --
+        // authority may exceed use; use may never exceed authority.
+        if let Some(want) = args.as_object() {
+            for (k, v) in want {
+                match self.scope.get(k) {
+                    Some(granted) if granted == v => {}
+                    _ => {
+                        return Err(GrantDenial::OutOfScope { field: k.clone() });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------- receipt
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,5 +536,92 @@ mod tests {
         assert!(ReceiptStatus::Failed.is_terminal());
         assert!(!ReceiptStatus::Proposed.is_terminal());
         assert!(!ReceiptStatus::Submitted.is_terminal());
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    fn grant(cap: &str, scope: serde_json::Value, expires_at: i64) -> Grant {
+        Grant {
+            grant_id: "g1".into(),
+            capability: cap.into(),
+            scope,
+            principal: 7,
+            expires_at,
+            issued_by: "test".into(),
+        }
+    }
+
+    /// The gate for item 1: a grant that does not cover the step refuses
+    /// it. Before this, grants were minted, journaled, given an expiry --
+    /// and never read. An authority model nothing consults is decoration.
+    #[test]
+    fn a_grant_authorises_exactly_what_it_says() {
+        let args = serde_json::json!({ "index": 2 });
+        let g = grant("memory.forget", args.clone(), 1_000);
+
+        assert!(g.authorises("memory.forget", &args, 999).is_ok());
+
+        // a different capability
+        assert_eq!(
+            g.authorises("memory.correct", &args, 999),
+            Err(GrantDenial::WrongCapability {
+                granted: "memory.forget".into(),
+                attempted: "memory.correct".into()
+            })
+        );
+
+        // the same capability on a DIFFERENT object -- the check that makes
+        // "narrow" mean something
+        assert_eq!(
+            g.authorises("memory.forget", &serde_json::json!({ "index": 3 }), 999),
+            Err(GrantDenial::OutOfScope {
+                field: "index".into()
+            })
+        );
+
+        // and an argument the grant never mentioned
+        assert!(matches!(
+            g.authorises(
+                "memory.forget",
+                &serde_json::json!({ "index": 2, "force": true }),
+                999
+            ),
+            Err(GrantDenial::OutOfScope { .. })
+        ));
+    }
+
+    /// Authority lapses. This is the case that actually happens: a turn
+    /// interrupted by a crash and resumed hours later, or a step that
+    /// waited for an approval nobody gave.
+    #[test]
+    fn authority_expires_and_a_late_resume_is_refused() {
+        let args = serde_json::json!({ "about": "call mark" });
+        let g = grant("reminder.create", args.clone(), 1_000);
+        assert!(g.authorises("reminder.create", &args, 1_000).is_ok());
+        assert_eq!(
+            g.authorises("reminder.create", &args, 1_500),
+            Err(GrantDenial::Expired { by_ms: 500 })
+        );
+    }
+
+    /// Authority may exceed use; use may never exceed authority. A grant
+    /// scoped more widely than the step is fine -- the reverse is not.
+    #[test]
+    fn a_wider_grant_still_covers_a_narrower_step() {
+        let g = grant(
+            "reminder.create",
+            serde_json::json!({ "about": "call mark", "fire_at": "t", "extra": 1 }),
+            1_000,
+        );
+        assert!(g
+            .authorises(
+                "reminder.create",
+                &serde_json::json!({ "about": "call mark" }),
+                999
+            )
+            .is_ok());
     }
 }

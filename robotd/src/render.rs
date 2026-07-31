@@ -309,6 +309,33 @@ pub fn english(r: &Rendering) -> String {
              something changed, but this turn performed no such action. nothing was \
              created, saved or deleted, and the receipt records that.]"
             .into(),
+        "approval_needed" => format!(
+            "that one needs your say-so before i run it ({}). reply yes and \
+             i'll do it, or no and i won't -- it'll wait as long as it takes, \
+             even if i restart. nothing has happened yet.",
+            s(a, "capability")
+        ),
+        "approval_declined" => format!(
+            "alright -- i didn't run {}. nothing changed.",
+            s(a, "capability")
+        ),
+        "approval_none" => "nothing is waiting for your approval.".into(),
+        "approval_list" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .enumerate()
+                .map(|(i, it)| format!("{}. {}", i + 1, s(it, "capability")))
+                .collect();
+            format!(
+                "waiting for you:\n{}\n(reply yes or no)",
+                lines.join("\n")
+            )
+        }
+        "grant_refused" => format!(
+            "i didn't do that -- {}. nothing was changed. ask me again and \
+             i'll take it from the top.",
+            s(a, "why")
+        ),
         "ops_notice" => "(operational notice)".into(),
         "media_stored" => format!("stored: {}", s(a, "filename")),
 
@@ -534,6 +561,11 @@ mod tests {
             ("soul_evolution", serde_json::json!({"on": true})),
             ("soul_stance", serde_json::json!({"stance": "mentor"})),
             ("soul_refused", serde_json::json!({"why": "x"})),
+            ("approval_needed", serde_json::json!({"capability": "member.invite"})),
+            ("approval_declined", serde_json::json!({"capability": "member.invite"})),
+            ("approval_none", serde_json::json!({})),
+            ("approval_list", serde_json::json!({"items": []})),
+            ("grant_refused", serde_json::json!({"why": "x"})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),
         ] {

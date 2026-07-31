@@ -13,6 +13,8 @@ use rusqlite::Connection;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ReplaySummary {
+    /// Left alone because a person has not answered yet.
+    pub awaiting: usize,
     /// resumed to a terminal state by re-running remaining steps
     pub resumed: usize,
     /// closed as failed (interrupted before any decision was journaled)
@@ -43,6 +45,13 @@ pub fn resume_incomplete(
     };
 
     for intent_id in cell.with(journal::open_intents)? {
+        // A parked intent is not stalled -- it is waiting for a person.
+        // Resuming it on boot would execute the very thing the approval
+        // exists to gate, which is the worst possible way to fail.
+        if crate::approval::waiting_for(cell, &intent_id)?.is_some() {
+            summary.awaiting += 1;
+            continue;
+        }
         // receipt already exists -> just close honestly on it
         if let Some(r) = cell.with(|c| receipts::get(c, &intent_id))? {
             cell.with(|c| fail_undelivered_replies(c, &intent_id))?;

@@ -51,6 +51,13 @@ script = "./scripts/backup-offsite.sh"
 # silently. 0 disables the lane.
 peers = []
 every_minutes = 10
+
+[policy]
+# capabilities that must be approved by hand before they run. the robot
+# parks the step, asks, and waits -- across restarts, for as long as it
+# takes. anything a capability declares for itself is always required
+# regardless of this list.
+approval_required = []
 "#;
 
 #[derive(Debug, Deserialize, Default)]
@@ -62,6 +69,7 @@ pub struct RobotConfig {
     pub hub: HubSection,
     pub backup: BackupSection,
     pub sync: SyncSection,
+    pub policy: PolicySection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +121,18 @@ impl Default for MindSection {
             model_cache: "./data/models".into(),
         }
     }
+}
+
+/// Owner policy over the action path.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct PolicySection {
+    /// Capabilities that must be approved by hand before they run.
+    ///
+    /// Policy may only ADD to what a capability declares about itself. A
+    /// capability that says it needs a person is making a statement about
+    /// itself; a setting should not be able to switch that off.
+    pub approval_required: Vec<String>,
 }
 
 /// Other instances of THIS robot to stay in agreement with.
