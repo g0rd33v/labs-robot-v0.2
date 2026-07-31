@@ -96,6 +96,26 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
              longer be trusted end to end. this is reported in the dashboard."
         );
     }
+
+    // Anchors: heads this robot already published with its backups. A chain
+    // that verifies internally can still have been rewritten wholesale by
+    // someone holding the KEK -- recomputing every hash from a new genesis
+    // is easy. What they cannot do is reach back into a manifest that left
+    // for two off-site destinations last week. Any anchor that no longer
+    // matches means history changed behind a point we had already committed
+    // to in public.
+    let broken = trust::boundary::broken_anchors(&core)?;
+    if !broken.is_empty() {
+        tracing::error!(
+            "BOUNDARY LOG REWRITTEN behind {} published anchor(s) -- the earliest \
+             is seq {} ({}). the chain may verify against itself and still be a \
+             different history than the one this robot published. compare \
+             chain_head in your off-site backup manifests.",
+            broken.len(),
+            broken[0].seq,
+            broken[0].published_to
+        );
+    }
     schema::core_journal(
         &core,
         "boot",
@@ -170,6 +190,17 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         cfg.robot.name.clone(),
         instance_id,
     ));
+
+    if !broken.is_empty() {
+        let _ = robot.tell_owner(&format!(
+            "the boundary log no longer matches {} head(s) i published with earlier \
+             backups -- the earliest is entry {}. that means history changed behind \
+             a point already recorded off-site. compare `chain_head` in the backup \
+             manifests on your storage box and in spaces.",
+            broken.len(),
+            broken[0].seq
+        ));
+    }
 
     // crash replay (arch sec 3): resume every intent the last run left open
     // in every principal's cell; an intent without a terminal receipt is a

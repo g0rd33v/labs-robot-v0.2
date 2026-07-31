@@ -52,6 +52,55 @@ async fn main() -> anyhow::Result<()> {
             println!("backup sealed: {}", path.display());
             Ok(())
         }
+        Cmd::Chain { config } => {
+            let cfg = config::load(&config)?;
+            let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+            let keys = trust::keys::KeyChain::load_or_create(&data_dir.join("kek.key"))?;
+            let core = trust::cells::open_encrypted(
+                &data_dir.join("core.db"),
+                &keys.core_db_key(),
+            )?;
+            // opened outside boot, so the schema has not run here
+            trust::schema::init_core(&core)?;
+            let ok = trust::boundary::verify_chain(&core)?;
+            let n = trust::boundary::count(&core)?;
+            println!(
+                "boundary log: {n} crossings, chain {}",
+                if ok { "intact" } else { "BROKEN" }
+            );
+            match trust::boundary::head(&core)? {
+                Some((seq, hash, ts)) => println!("head: seq {seq}  {hash}  (ts {ts})"),
+                None => println!("head: (empty log)"),
+            }
+            let anchors = trust::boundary::anchors(&core)?;
+            let broken = trust::boundary::broken_anchors(&core)?;
+            println!("\npublished anchors ({}):", anchors.len());
+            for a in &anchors {
+                let mark = if broken.iter().any(|b| b.seq == a.seq) {
+                    "MISMATCH"
+                } else {
+                    "ok"
+                };
+                println!("  seq {:<8} {}  {}  [{}]", a.seq, a.hash, a.published_to, mark);
+            }
+            if !broken.is_empty() {
+                println!(
+                    "\n{} anchor(s) no longer match: history changed behind a head \
+                     this robot already published. compare `chain_head` in your \
+                     off-site backup manifests.",
+                    broken.len()
+                );
+            } else if anchors.is_empty() {
+                println!(
+                    "\nno anchors yet -- they are written by `robotd backup`. the \
+                     chain is unkeyed on purpose: an HMAC would be keyed under the \
+                     KEK, and the log lives in a database encrypted under that same \
+                     KEK, so anyone who could forge an entry already holds the key. \
+                     publishing the head off-site is what makes a rewrite visible."
+                );
+            }
+            Ok(())
+        }
         Cmd::Sync { config, peer } => {
             let cfg = config::load(&config)?;
             let booted = boot::bootstrap(&cfg)?;

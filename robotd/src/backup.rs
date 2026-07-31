@@ -32,6 +32,21 @@ pub fn run(cfg: &RobotConfig) -> anyhow::Result<PathBuf> {
         &staging,
     )?;
 
+    // The boundary chain's head, published with the backup.
+    //
+    // This is the anchor. The chain is unkeyed on purpose -- an HMAC would
+    // be keyed under the KEK, and the log lives in a database encrypted
+    // under that same KEK, so anyone able to rewrite an entry already holds
+    // the key the MAC would use. What actually helps is a copy of the head
+    // somewhere this machine cannot reach: an adversary with the KEK can
+    // rewrite local history, but not a hash that already left for two
+    // independent destinations.
+    let core = trust::cells::open_encrypted(&data_dir.join("core.db"), &keys.core_db_key())?;
+    // `robotd backup` can run against a robot that has never booted this
+    // build, so the anchors table may not exist yet. Idempotent.
+    trust::schema::init_core(&core)?;
+    let head = trust::boundary::head(&core)?;
+
     let manifest = serde_json::json!({
         "kind": "bender-backup",
         "version": env!("CARGO_PKG_VERSION"),
@@ -39,13 +54,36 @@ pub fn run(cfg: &RobotConfig) -> anyhow::Result<PathBuf> {
         "created_at": ts,
         "cells": staged.cells,
         "media_files": staged.media_files,
+        "chain_head": head.as_ref().map(|(seq, hash, at)| serde_json::json!({
+            "seq": seq, "hash": hash, "ts": at,
+        })),
         "note": "restore requires the instance kek.key; contents are encrypted \
                  at rest and the tarball is sealed",
+        "chain_note": "chain_head is this robot's boundary-log head at backup \
+                       time. keep it: comparing a later chain against this \
+                       record is what makes a rewrite of history detectable, \
+                       and it is the reason the chain is not HMAC'd (the key \
+                       would be the one an attacker already needs).",
     });
     std::fs::write(
         staging.join("manifest.json"),
         serde_json::to_string_pretty(&manifest)?,
     )?;
+
+    // record locally too: the off-site copy settles an argument, this one
+    // trips at the next boot if something rewrote history in the meantime
+    if let Some((seq, hash, at)) = head {
+        trust::boundary::record_anchor(
+            &core,
+            &trust::boundary::Anchor {
+                seq,
+                hash,
+                ts: at,
+                published_to: format!("backup:{ts}"),
+            },
+        )?;
+    }
+    drop(core);
 
     let sealed = archive::seal_dir(&staging, &backup_key(&keys))?;
     let sealed_path = data_dir

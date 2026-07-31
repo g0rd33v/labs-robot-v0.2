@@ -265,3 +265,189 @@ mod tests {
         assert_eq!(distinct, 25, "each entry must commit to a unique predecessor");
     }
 }
+
+// ------------------------------------------------------- anchoring
+
+/// The chain's current head: (seq, entry_hash, ts). `None` on an empty log.
+pub fn head(conn: &Connection) -> Result<Option<(i64, String, i64)>, TrustError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT seq, entry_hash, ts FROM boundary_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
+}
+
+/// The hash recorded at one position, for checking an anchor.
+pub fn hash_at(conn: &Connection, seq: i64) -> Result<Option<String>, TrustError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT entry_hash FROM boundary_log WHERE seq = ?1",
+            rusqlite::params![seq],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// A published head: what the chain looked like at a moment, recorded
+/// somewhere this machine can no longer reach.
+///
+/// The chain is unkeyed on purpose. An HMAC would have to be keyed under
+/// the KEK, and the log lives inside a database encrypted under that same
+/// KEK -- so anyone able to rewrite an entry already holds the key the MAC
+/// would use. It would look like protection and provide none.
+///
+/// What does help is putting the head somewhere the machine cannot rewrite
+/// afterwards. An adversary holding the KEK can rewrite local history; they
+/// cannot rewrite a hash that left for two off-site destinations last week.
+/// The row below is the local copy of that record: sloppy tampering trips
+/// it at the next boot, and the off-site copy is what settles an argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    pub seq: i64,
+    pub hash: String,
+    pub ts: i64,
+    /// where the head was published -- a backup destination, a manifest
+    pub published_to: String,
+}
+
+pub fn record_anchor(conn: &Connection, a: &Anchor) -> Result<(), TrustError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO chain_anchors(seq, hash, ts, published_to) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![a.seq, a.hash, a.ts, a.published_to],
+    )?;
+    Ok(())
+}
+
+pub fn anchors(conn: &Connection) -> Result<Vec<Anchor>, TrustError> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, hash, ts, published_to FROM chain_anchors ORDER BY seq ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(Anchor {
+                seq: r.get(0)?,
+                hash: r.get(1)?,
+                ts: r.get(2)?,
+                published_to: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Every anchor that no longer matches the chain: history was rewritten
+/// behind a point we had already published.
+///
+/// An anchor whose `seq` is missing entirely counts too -- truncating the
+/// log is a rewrite, and the loudest kind.
+pub fn broken_anchors(conn: &Connection) -> Result<Vec<Anchor>, TrustError> {
+    let mut broken = vec![];
+    for a in anchors(conn)? {
+        match hash_at(conn, a.seq)? {
+            Some(h) if h == a.hash => {}
+            _ => broken.push(a),
+        }
+    }
+    Ok(broken)
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn core() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::init_core(&conn).unwrap();
+        conn
+    }
+
+    fn crossing(purpose: &str) -> Crossing {
+        Crossing {
+            direction: Direction::Out,
+            channel: "test".into(),
+            counterparty: "peer".into(),
+            purpose: purpose.into(),
+            categories: String::new(),
+            payload_hash: String::new(),
+            size: 0,
+            trust_tag: "test".into(),
+        }
+    }
+
+    /// The attack the anchor exists for: an adversary holding the KEK can
+    /// rewrite the log AND recompute every hash, so `verify_chain` passes on
+    /// a history that never happened. Only a head published somewhere they
+    /// could not reach exposes it.
+    #[test]
+    fn a_rewritten_history_verifies_but_fails_its_anchor() {
+        let c = core();
+        for i in 0..5 {
+            append(&c, &crossing(&format!("real-{i}"))).unwrap();
+        }
+        let (seq, hash, ts) = head(&c).unwrap().unwrap();
+        record_anchor(
+            &c,
+            &Anchor {
+                seq,
+                hash,
+                ts,
+                published_to: "backup:offsite".into(),
+            },
+        )
+        .unwrap();
+        assert!(broken_anchors(&c).unwrap().is_empty());
+
+        // rewrite the whole log from genesis, as someone with the key could
+        c.execute("DROP TRIGGER boundary_log_no_delete", []).unwrap();
+        c.execute("DELETE FROM boundary_log", []).unwrap();
+        c.execute("DELETE FROM sqlite_sequence WHERE name='boundary_log'", [])
+            .ok();
+        for i in 0..5 {
+            append(&c, &crossing(&format!("forged-{i}"))).unwrap();
+        }
+
+        // the chain is internally perfect -- and a different history
+        assert!(
+            verify_chain(&c).unwrap(),
+            "a recomputed chain verifies against itself; that is the point"
+        );
+        let broken = broken_anchors(&c).unwrap();
+        assert_eq!(broken.len(), 1, "the published head no longer matches");
+        assert_eq!(broken[0].published_to, "backup:offsite");
+    }
+
+    /// Truncation is a rewrite too, and the loudest kind.
+    #[test]
+    fn a_truncated_log_fails_its_anchor() {
+        let c = core();
+        for i in 0..4 {
+            append(&c, &crossing(&format!("e{i}"))).unwrap();
+        }
+        let (seq, hash, ts) = head(&c).unwrap().unwrap();
+        record_anchor(
+            &c,
+            &Anchor {
+                seq,
+                hash,
+                ts,
+                published_to: "backup:offsite".into(),
+            },
+        )
+        .unwrap();
+
+        c.execute("DROP TRIGGER boundary_log_no_delete", []).unwrap();
+        c.execute("DELETE FROM boundary_log WHERE seq >= ?1", [seq])
+            .unwrap();
+        assert_eq!(
+            broken_anchors(&c).unwrap().len(),
+            1,
+            "an anchor whose entry is simply gone must count as broken"
+        );
+    }
+}

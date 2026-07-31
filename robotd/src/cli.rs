@@ -21,6 +21,8 @@ usage:
   robotd backup [--config <file>]               write a sealed backup
   robotd sync --with <path> [--config <file>]   two-way sync with another
                                                 instance of this robot
+  robotd chain [--config <file>]                boundary-log head, published
+                                                anchors, and verification
   robotd backup-restore <sealed> <dir> [--config <file>]
   robotd package [<dest.pkg>] [--config <file>] export the robot package
   robotd restore <pkg> --code <code> --into <dir> [--port <n>] [--force]
@@ -52,6 +54,9 @@ pub enum Cmd {
     Sync {
         config: PathBuf,
         peer: PathBuf,
+    },
+    Chain {
+        config: PathBuf,
     },
     BackupRestore {
         config: PathBuf,
@@ -145,6 +150,10 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
         Some("backup") => {
             reject_extra(&rest, "backup")?;
             Ok(Cmd::Backup { config })
+        }
+        Some("chain") => {
+            reject_extra(&rest, "chain")?;
+            Ok(Cmd::Chain { config })
         }
         Some("sync") => {
             // `--with <path>` reads as a sentence and leaves room for other

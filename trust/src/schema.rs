@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS invites (
 -- hash chain makes edits detectable, and these make them fail outright.
 -- An attacker with the database must now also alter the schema, which is
 -- itself a visible change.
+CREATE TABLE IF NOT EXISTS chain_anchors (
+    seq          INTEGER PRIMARY KEY,
+    hash         TEXT NOT NULL,
+    ts           INTEGER NOT NULL,
+    published_to TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS boundary_log_no_update
 BEFORE UPDATE ON boundary_log BEGIN
     SELECT RAISE(ABORT, 'boundary_log is append-only');
