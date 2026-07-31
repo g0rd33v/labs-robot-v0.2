@@ -5,6 +5,110 @@ dependencies introduced. Newest first.
 
 ---
 
+## Deep review + the two-location test (2026-07-31)
+
+### Review: four defects, found by reading and by running
+
+**1. The hedge was firing on every turn.** Measured a non-floor turn at
+**9.2 s** against a hedge deadline of 2.5 s — so essentially every
+non-English turn was firing a duplicate routing request and paying twice
+for the most expensive call in it. That deadline was sized for a one-line
+doorman classification, not for a prompt carrying the whole catalog.
+Routing now has its own (`route_hedge_after_ms`, 8 s): it still protects
+the tail we actually observed, without doubling the median.
+
+**2. A "yes" that could not be spent said nothing.** The confirmation is
+deliberately spent *before* the call is planned — between a double-
+submitted yes and a double deletion, the deletion is far worse. But the
+leftover cases fell through to small talk, so someone who said yes twice
+got a chat reply while believing they had confirmed a deletion. Now
+answered deterministically (`confirmation.stale`).
+
+**Found by running it, not by reading it:** on the stick, a second yes
+produced sensible model prose from conversation history — which meant the
+path just built could never fire, because the answering tool is only in
+the catalog while a question is *open*, and that is exactly when it is
+absent. The tool is now offered while a question is open **and briefly
+after it closes**, so a late yes reaches the deterministic answer instead
+of being settled by prose.
+
+**3. The renderer was not admitting what it disclosed.** English is
+rendered here, from local templates: nothing about the person leaves the
+machine to make a sentence. Every other language is rendered by a model —
+which means the slots go with it: their facts, their reminders, the
+sources in their registry. A system that logs every byte crossing the
+boundary should not be quiet about the one it causes itself. `Renderer`
+now returns what it disclosed and the turn journals `render.disclosed`.
+
+**4. The rendering-id list could drift.** It was hand-written. It now scans
+every crate for construction sites and demands a template for each, so a
+new capability cannot ship a reply that renders as a bare `[id]`.
+
+Verified while reading rather than assumed: `forget_by_index` is op-marker
+guarded, so a replayed confirmation cannot delete twice; and every cell
+open runs `init_cell_schema`, so a cell restored from an older package
+gains `pending_calls` on first use.
+
+Two eval-corpus expectations were also wrong — calibrated to an earlier,
+over-inclusive model output. Korean `내가 녹차를 마신다는 걸` carries the
+nominaliser attaching the clause to "remember": request framing, not the
+fact. The tighter description correctly drops it. Expectations are now the
+semantic core, so a tight answer and a slightly wide one both pass.
+
+### The two-location test
+
+| | main folder | USB folder |
+| --- | --- | --- |
+| `cargo test --workspace` | **114 passed** | (built from the same tree) |
+| `cargo clippy -D warnings` | clean | — |
+| `robotd eval` | **PASS** — routing 66/0, kill-suite 12/12, floor p95 2.0 ms | **PASS** — 66/0, 12/12, p95 1.5 ms |
+| `robotd eval --live` | **PASS** — 60 multilingual / **0 misroutes** / 0 not-their-words / 0 timeouts; injection 69 calls, 0 leaks | **PASS** — 60 / 1 misroute (bar ≤3) / 0 not-their-words; injection 69 calls, 0 leaks |
+| starts locally | 7777 | **7788** |
+
+**Transfer.** `robotd package` from the main folder (sealed, one-time code
+printed separately) → `robotd restore --into` the USB folder: *2 cells,
+integrity ok*. Same `robot_id`, **same slug token** — identity carried,
+not regenerated. The old data was moved aside rather than deleted.
+
+**It has what the main robot knows.** From the stick: all three facts with
+their sources and their Russian intact, and the reminders made on the main
+machine that morning — including *both* Turkish ones, from before and
+after the description fix.
+
+**It works from the stick**, not just remembers: the English floor answers
+offline; the confirmation gate fires in Russian, declines, and rejects a
+late yes deterministically; and Thai — a language used nowhere in this
+project, ever — created a real reminder:
+
+```
+พรุ่งนี้ 9 โมงเช้าเตือนให้ผมโทรหาหมอ
+→ เรียบร้อย -- เดี๋ยวจะเตือนอีกทีตอน 09:00 น. วันเสาร์ที่ 1 ส.ค.: โทรหาหมอ
+  ― ✓ reminder.create
+```
+
+### It is a copy, not a sync — say so plainly
+
+"Synchronizes" invites a wrong reading, so the difference was tested. The
+two robots are **identical at the moment of transfer and independent
+afterwards**. The Thai reminder created on the stick does not exist on the
+main robot:
+
+```
+MAIN (7777):  1. spor salonuna gitmemi hatırlat  2. spor salonuna gitmemi  3. позвонить маме
+USB  (7788):  1. spor salonuna gitmemi hatırlat  2. spor salonuna gitmemi  3. позвонить маме  4. โทรหาหมอ
+```
+
+That is the Robot Package as specified (§8): transferability, not
+replication. Carrying the robot somewhere gives you the robot; it does not
+give you two robots that agree. If two-way convergence is ever wanted, it
+is a different mechanism and a different decision.
+
+**Operational note.** Copying a new binary over a *running* one kills it
+(exit 137) and takes the next invocation with it. Replace it atomically —
+`cp` to a temp name in the same directory, then `mv`.
+
+---
+
 ## The tool-calling language boundary (2026-07-31)
 
 Replaces the language packs shipped this morning. Plan and rationale:
