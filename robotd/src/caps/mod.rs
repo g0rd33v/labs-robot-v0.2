@@ -362,6 +362,7 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(memory::RegistryList),
         Box::new(memory::Forget),
         Box::new(memory::Correct),
+        Box::new(memory::Classify),
         Box::new(admin::Invite),
         Box::new(admin::TelegramBindCode),
         Box::new(answer::ModelAnswer),

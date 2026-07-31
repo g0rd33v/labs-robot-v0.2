@@ -74,7 +74,11 @@ CREATE TABLE IF NOT EXISTS facts (
                   CHECK (status IN ('tentative','contextual','stable','contested','superseded')),
     confidence    REAL NOT NULL DEFAULT 1.0,
     created_at    INTEGER NOT NULL,
-    superseded_by TEXT REFERENCES facts(id)
+    superseded_by TEXT REFERENCES facts(id),
+    -- arch sec 7: every object carries a classification. Defaulted to the
+    -- protective end, because the objects nobody classified are always the
+    -- majority and a scheme that defaults to permissive protects nothing.
+    class         TEXT NOT NULL DEFAULT 'owner_private'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     content, content='facts', content_rowid='rowid'

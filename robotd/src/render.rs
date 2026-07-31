@@ -163,6 +163,16 @@ pub fn english(r: &Rendering) -> String {
             s(a, "content")
         ),
         "forget_missing" => format!("no fact #{} to forget.", n(a, "n")),
+        "classified" => {
+            let c = s(a, "class");
+            let note = match c.as_str() {
+                "restricted" | "local_only" => " -- i'll use it here, but it won't \
+                     go to any model.",
+                "sensitive" => " -- i'll use it when it's relevant, never volunteer it.",
+                _ => ".",
+            };
+            format!("marked as {}: {}{}", c, s(a, "content"), note)
+        }
         "corrected" => format!(
             "corrected: \"{}\" -> \"{}\" (the old fact is kept as superseded -- \
              history stays inspectable)",
@@ -565,6 +575,7 @@ mod tests {
             ("approval_declined", serde_json::json!({"capability": "member.invite"})),
             ("approval_none", serde_json::json!({})),
             ("approval_list", serde_json::json!({"items": []})),
+            ("classified", serde_json::json!({"content": "x", "class": "restricted"})),
             ("grant_refused", serde_json::json!({"why": "x"})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),

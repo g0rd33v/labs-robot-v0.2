@@ -2,6 +2,7 @@
 //! log, core schema, and identifiers. Everything the other organs stand on.
 
 pub mod boundary;
+pub mod classes;
 pub mod cells;
 pub mod ids;
 pub mod keys;

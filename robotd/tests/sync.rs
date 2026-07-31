@@ -340,3 +340,71 @@ fn declining_an_approval_runs_nothing() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Item 3's gate end to end: a fact marked restricted stays known to the
+/// robot and stays off the wire. Checked by driving the real recall path
+/// and the real filter, not by trusting the flag.
+#[test]
+fn a_restricted_fact_is_known_locally_and_withheld_from_a_model() {
+    let _serial = serial();
+    let dir = std::env::temp_dir().join(format!("class-{}", trust::ids::random_hex(6)));
+    let cfg = cfg_at(&dir);
+
+    say(&cfg, "remember that my passport number is QQ7788");
+    say(&cfg, "remember that i drink green tea");
+
+    let boot = robotd::boot::bootstrap(&cfg).unwrap();
+    let owner = boot.robot.owner_principal;
+    let cell = boot.robot.cell(owner).unwrap();
+
+    // find the passport fact and restrict it
+    let n = {
+        let listed = cell
+            .cell
+            .with(|c| Ok(mind::facts::registry_list(c, 50).unwrap()))
+            .unwrap();
+        listed
+            .iter()
+            .position(|(f, _, _)| f.content.contains("QQ7788"))
+            .expect("the fact is stored")
+            + 1
+    };
+    cell.cell
+        .with(|c| {
+            mind::facts::classify_by_index(c, n, "restricted").unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    // the robot still KNOWS it -- the registry shows it, recall finds it
+    let facts = say(&cfg, "my facts");
+    assert!(facts.contains("QQ7788"), "still known locally: {facts}");
+
+    // but the model-context filter drops it while keeping the rest
+    let recalled = cell
+        .cell
+        .with(|c| Ok(mind::facts::recall(c, "passport tea", None, 10).unwrap()))
+        .unwrap();
+    assert!(
+        recalled.iter().any(|f| f.content.contains("QQ7788")),
+        "recall itself does not hide it"
+    );
+    let sendable: Vec<_> = recalled
+        .iter()
+        .filter(|f| {
+            trust::classes::DataClass::parse(&f.class)
+                .unwrap_or_default()
+                .may_leave_the_machine()
+        })
+        .collect();
+    assert!(
+        !sendable.iter().any(|f| f.content.contains("QQ7788")),
+        "a restricted fact must not reach model context"
+    );
+    assert!(
+        sendable.iter().any(|f| f.content.contains("green tea")),
+        "and the filter must not be a blanket refusal"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

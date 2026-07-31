@@ -102,10 +102,27 @@ impl Capability for ModelAnswer {
         // all read under short locks so the model call below runs with the
         // person's cell free
         let emb = ctx.services.query_embedding(query);
-        let facts = ctx
+        let recalled = ctx
             .cell
             .with(|c| Ok(mind::facts::recall(c, query, emb.as_deref(), 5)))?
             .unwrap_or_default();
+        // arch sec 6 eligibility filtering / sec 7 data classes: this is the
+        // one place a person's own knowledge is put in front of an external
+        // model, so it is the one place that has to ask whether it may be.
+        // A class that says "not off this machine" is not advice.
+        let before = recalled.len();
+        let facts: Vec<_> = recalled
+            .into_iter()
+            .filter(|f| {
+                trust::classes::DataClass::parse(&f.class)
+                    .unwrap_or_default()
+                    .may_leave_the_machine()
+            })
+            .collect();
+        let withheld = before - facts.len();
+        if withheld > 0 {
+            tracing::debug!("{withheld} fact(s) withheld from model context by class");
+        }
         let mut system = persona();
         if !facts.is_empty() {
             system.push_str(
@@ -154,5 +171,47 @@ impl Capability for ModelAnswer {
                 ),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod class_tests {
+    use trust::classes::DataClass;
+
+    /// Item 3's gate, at the boundary it exists to guard.
+    ///
+    /// `answer.model` is the one place a person's own knowledge is put in
+    /// front of an external model. This asserts the filter it applies is
+    /// the class rule and nothing softer -- if this list and
+    /// `may_leave_the_machine` ever disagree, the disagreement is the bug.
+    #[test]
+    fn only_classes_cleared_to_leave_reach_model_context() {
+        let cleared: Vec<DataClass> = [
+            DataClass::Public,
+            DataClass::OwnerPrivate,
+            DataClass::Sensitive,
+            DataClass::Derived,
+            DataClass::OrgConfidential,
+            DataClass::Restricted,
+            DataClass::LocalOnly,
+            DataClass::Credential,
+        ]
+        .into_iter()
+        .filter(|c| c.may_leave_the_machine())
+        .collect();
+
+        assert!(!cleared.contains(&DataClass::Restricted));
+        assert!(!cleared.contains(&DataClass::LocalOnly));
+        assert!(!cleared.contains(&DataClass::Credential));
+        assert_eq!(cleared.len(), 5);
+    }
+
+    /// An unrecognised class must not be treated as permissive. Corrupt or
+    /// future values fall to the default, which is protective.
+    #[test]
+    fn an_unknown_class_is_not_a_free_pass() {
+        let c = DataClass::parse("something_from_a_newer_version").unwrap_or_default();
+        assert_eq!(c, DataClass::OwnerPrivate);
+        assert!(DataClass::parse("").is_none());
     }
 }

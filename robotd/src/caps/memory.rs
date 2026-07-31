@@ -355,3 +355,77 @@ mod tests {
         assert!(Forget.validate(&serde_json::json!({"index": "two"})).is_err());
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassifyArgs {
+    index: u32,
+    class: String,
+}
+
+pub struct Classify;
+
+impl Capability for Classify {
+    fn name(&self) -> &'static str {
+        "memory.classify"
+    }
+    fn effect(&self) -> Effect {
+        Effect::ReversibleWrite
+    }
+    fn description(&self) -> &'static str {
+        "Mark how sensitive a stored fact is, by its number in the registry. \
+         Use when the person says something should stay on this machine, is \
+         private, or is sensitive. 'restricted' and 'local_only' mean the \
+         fact is never put in front of an external model at all -- the robot \
+         can still use it locally, but it will not travel. 'sensitive' means \
+         usable but never volunteered. 'owner_private' is the default."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer", "minimum": 1,
+                    "description": "The fact's number as shown in the registry."
+                },
+                "class": {
+                    "type": "string",
+                    "enum": ["public", "owner_private", "sensitive",
+                             "restricted", "local_only"],
+                    "description": "restricted and local_only never reach an \
+                                    external model."
+                }
+            },
+            "required": ["index", "class"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String> {
+        let a: ClassifyArgs = typed(args)?;
+        one_based(a.index)?;
+        trust::classes::DataClass::parse(&a.class)
+            .map(|_| ())
+            .ok_or_else(|| format!("no data class {}", a.class))
+    }
+    fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        let a: ClassifyArgs = typed(args).map_err(PrismError::Capability)?;
+        let index = a.index as usize;
+        match ctx.cell.with(|c| {
+            mind::facts::classify_by_index(c, index, &a.class).map_err(mind_err)
+        })? {
+            Some(content) => attested(
+                row_evidence("memory.classify", ""),
+                format!("classified fact {index} as {}", a.class),
+                Rendering::new(
+                    "classified",
+                    serde_json::json!({ "content": content, "class": a.class }),
+                ),
+            ),
+            None => attested(
+                note_evidence("memory.classify"),
+                format!("no fact #{index} to classify"),
+                Rendering::new("forget_missing", serde_json::json!({ "n": index })),
+            ),
+        }
+    }
+}

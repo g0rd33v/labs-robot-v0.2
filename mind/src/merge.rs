@@ -127,8 +127,17 @@ pub fn export(conn: &Connection, since: i64) -> Result<CellDelta, MindError> {
         )?,
         facts: rows(
             conn,
+            // `class` travels with the fact. Without it a restricted fact
+            // arrives on the other instance as ordinary and is cleared to
+            // reach a model there -- the classification would protect
+            // exactly one machine, which is worse than none because it
+            // reads as protection.
+            //
+            // `local_only` does not travel at all: that is what the class
+            // means, and enforcing it at export is the only place that can.
             "SELECT id, entity, content, source_msg_id, intent_id, status, \
-             confidence, created_at, superseded_by FROM facts WHERE created_at > ?1",
+             confidence, created_at, superseded_by, class FROM facts \
+             WHERE created_at > ?1 AND class NOT IN ('local_only', 'credential')",
             since,
         )?,
         reminders: rows(
@@ -255,7 +264,8 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
         // is set in a second pass once every row exists
         rep.facts += tx.execute(
             "INSERT OR IGNORE INTO facts(id, entity, content, source_msg_id, intent_id, \
-             status, confidence, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             status, confidence, created_at, class) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 s(f, "entity"),
@@ -264,7 +274,10 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
                 s(f, "intent_id"),
                 s(f, "status").unwrap_or_else(|| "stable".into()),
                 f.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0),
-                i(f, "created_at")
+                i(f, "created_at"),
+                // an unreadable or absent class lands on the protective
+                // default, never on "no restriction"
+                s(f, "class").unwrap_or_else(|| "owner_private".into())
             ],
         )?;
     }
@@ -557,6 +570,34 @@ mod tests {
                 .unwrap();
             assert_eq!(st, "cancelled", "a called-off reminder must stay called off");
         }
+    }
+
+    /// A class that protected one machine and not the other would be worse
+    /// than none, because it would read as protection.
+    #[test]
+    fn a_facts_class_travels_with_it_and_local_only_does_not_travel_at_all() {
+        let a = cell();
+        let b = cell();
+        say(&a, "m1", "my passport number", 100);
+        fact(&a, "f1", "my passport number", "m1", 100);
+        say(&a, "m2", "the wifi code", 110);
+        fact(&a, "f2", "the wifi code", "m2", 110);
+        a.execute("UPDATE facts SET class='restricted' WHERE id='f1'", [])
+            .unwrap();
+        a.execute("UPDATE facts SET class='local_only' WHERE id='f2'", [])
+            .unwrap();
+
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+
+        let class: String = b
+            .query_row("SELECT class FROM facts WHERE id='f1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(class, "restricted", "the class crossed with the fact");
+
+        let local: i64 = b
+            .query_row("SELECT COUNT(*) FROM facts WHERE id='f2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(local, 0, "local_only means local_only");
     }
 
     /// A fact whose source message did not travel is not stored. Law 5 is a

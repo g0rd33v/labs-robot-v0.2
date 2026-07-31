@@ -12,6 +12,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fact {
+    /// arch sec 7 data class; decides whether this may enter an external call.
+    pub class: String,
     pub id: String,
     pub entity: Option<String>,
     pub content: String,
@@ -24,7 +26,7 @@ pub struct Fact {
 }
 
 const COLS: &str =
-    "id, entity, content, source_msg_id, intent_id, status, confidence, created_at, superseded_by";
+    "id, entity, content, source_msg_id, intent_id, status, confidence, created_at, superseded_by, class";
 
 fn row_to_fact(r: &rusqlite::Row<'_>) -> Result<Fact, rusqlite::Error> {
     Ok(Fact {
@@ -37,6 +39,7 @@ fn row_to_fact(r: &rusqlite::Row<'_>) -> Result<Fact, rusqlite::Error> {
         confidence: r.get(6)?,
         created_at: r.get(7)?,
         superseded_by: r.get(8)?,
+        class: r.get(9).unwrap_or_else(|_| "owner_private".into()),
     })
 }
 
@@ -247,14 +250,14 @@ pub fn registry_list(
 ) -> Result<Vec<(Fact, String, i64)>, MindError> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.entity, f.content, f.source_msg_id, f.intent_id, f.status, \
-                f.confidence, f.created_at, f.superseded_by, m.content, m.ts \
+                f.confidence, f.created_at, f.superseded_by, f.class, m.content, m.ts \
          FROM facts f JOIN messages m ON m.id = f.source_msg_id \
          WHERE f.status != 'superseded' \
          ORDER BY f.created_at DESC, f.rowid DESC LIMIT ?1",
     )?;
     let rows = stmt
         .query_map(params![limit as i64], |r| {
-            Ok((row_to_fact(r)?, r.get::<_, String>(9)?, r.get::<_, i64>(10)?))
+            Ok((row_to_fact(r)?, r.get::<_, String>(10)?, r.get::<_, i64>(11)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -615,5 +618,67 @@ mod tests {
         let (fact, source, _ts) = &listed[0];
         assert_eq!(fact.content, "the demo is on friday");
         assert!(source.contains("demo is on friday")); // the actual words
+    }
+}
+
+/// Set an object's data class (arch §7).
+///
+/// One-based index into the registry, like every other owner operation on
+/// facts -- the person is looking at a numbered list, not at row ids.
+pub fn classify_by_index(
+    conn: &Connection,
+    index: usize,
+    class: &str,
+) -> Result<Option<String>, MindError> {
+    let listed = registry_list(conn, 100)?;
+    let Some((fact, _, _)) = listed.into_iter().nth(index.saturating_sub(1)) else {
+        return Ok(None);
+    };
+    conn.execute(
+        "UPDATE facts SET class = ?2 WHERE id = ?1",
+        params![fact.id, class],
+    )?;
+    Ok(Some(fact.content))
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+
+    /// Item 3's gate, at the layer that owns the data: a restricted fact is
+    /// still recallable locally -- the robot has not forgotten it -- but it
+    /// carries the class that keeps it out of an external call.
+    #[test]
+    fn a_classified_fact_keeps_its_class_through_recall_and_registry() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::init_cell_schema(&conn).unwrap();
+        let m = crate::record_message(&conn, "in", "chat", "my passport number is X").unwrap();
+        remember(&conn, "my passport number is X", &m, "int_1", None).unwrap();
+
+        // defaults to the protective end
+        let listed = registry_list(&conn, 10).unwrap();
+        assert_eq!(listed[0].0.class, "owner_private");
+
+        assert!(classify_by_index(&conn, 1, "restricted")
+            .unwrap()
+            .is_some());
+
+        // the registry shows it
+        let listed = registry_list(&conn, 10).unwrap();
+        assert_eq!(listed[0].0.class, "restricted");
+        assert!(listed[0].1.contains("passport"), "the source still reads back");
+
+        // and recall still FINDS it -- the robot has not forgotten anything;
+        // the class governs where it may go, not whether it is known
+        let found = recall(&conn, "passport", None, 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].class, "restricted");
+    }
+
+    #[test]
+    fn classifying_a_fact_that_is_not_there_says_so() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::init_cell_schema(&conn).unwrap();
+        assert!(classify_by_index(&conn, 9, "restricted").unwrap().is_none());
     }
 }
