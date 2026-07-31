@@ -133,7 +133,7 @@ pub fn respond(
         &plan,
         deps,
         true,
-        &[parked.step_id.clone()],
+        std::slice::from_ref(&parked.step_id),
     )?;
     Ok(Some(out))
 }
