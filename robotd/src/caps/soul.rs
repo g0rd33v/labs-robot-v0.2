@@ -328,13 +328,17 @@ impl Capability for SetStance {
         Effect::ReversibleWrite
     }
     fn description(&self) -> &'static str {
-        "Set who this robot is to the person: a twin who speaks the way they \
-         do, a friend, a mentor, or any character they describe. Use when \
-         they ask it to be their twin/friend/mentor, to play a role or \
-         character, to talk like someone, or to go back to its own voice \
-         (stance 'none'). Choosing a stance also moves the whole style dial \
-         to match, so this is the setting to reach for before nudging \
-         individual dimensions."
+        "Set who this robot is to the person. Choosing a stance also moves \
+         the whole style dial to match, so reach for this before nudging \
+         individual dimensions.\n\
+         THREE NAMED STANCES, and if the person names one of these you MUST \
+         pass that exact value rather than 'character': 'twin' (speaks the \
+         way they do, terse, no ceremony), 'friend' (warm, easy, offers \
+         things), 'mentor' (explains, takes initiative).\n\
+         'character' is ONLY for a role that is not one of those three -- a \
+         profession, a fictional person, a described manner -- and needs the \
+         character field in their own words.\n\
+         'none' returns the robot to its own voice."
     }
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -343,8 +347,10 @@ impl Capability for SetStance {
                 "stance": {
                     "type": "string",
                     "enum": ["twin", "friend", "mentor", "character", "none"],
-                    "description": "'character' needs the character field; 'none' \
-                                    returns the robot to its own voice."
+                    "description": "Use twin, friend or mentor whenever the person \
+                                    names one of them -- never 'character' with \
+                                    the word 'twin' in it. 'character' is for \
+                                    anything else and needs the character field."
                 },
                 "character": {
                     "type": "string",

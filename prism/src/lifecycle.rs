@@ -803,6 +803,11 @@ pub fn action_records(receipt: &Receipt, outcomes: &[Outcome], plan: &Plan) -> V
     outcomes
         .iter()
         .filter_map(|o| {
+            // a decline is evidence that nothing happened, so it earns no
+            // line in a record of what did
+            if o.evidence.iter().all(|e| e.kind == "declined") && !o.evidence.is_empty() {
+                return None;
+            }
             let st = plan.steps.iter().find(|s| s.step_id == o.step_id)?;
             // reads changed nothing, so there is nothing to vouch for; a
             // failure is worth showing whatever it was going to do
@@ -1036,5 +1041,49 @@ mod receipt_tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "memory.remember");
         assert_eq!(records[0].status, "verified");
+    }
+}
+
+#[cfg(test)]
+mod decline_tests {
+    use super::*;
+
+    /// A refusal must not produce a tick. The action record says what
+    /// happened; a write that was declined did not happen, and showing
+    /// "✓ soul.set" beside "i can't" is the receipts surface contradicting
+    /// itself.
+    #[test]
+    fn a_declined_write_earns_no_action_record() {
+        let declined = Outcome::attested(
+            "s1".into(),
+            vec![Evidence {
+                kind: "declined".into(),
+                provider: "robot".into(),
+                external_id: "soul.set".into(),
+                hash: String::new(),
+                ts: 0,
+            }],
+            "declined: soul.set".into(),
+            Rendering::bare("soul_refused"),
+        );
+        let plan = Plan {
+            plan_id: "p".into(),
+            intent_id: "i".into(),
+            lang: "en".into(),
+            steps: vec![PlanStep {
+                step_id: "s1".into(),
+                capability: "soul.set".into(),
+                args: serde_json::json!({}),
+                // a WRITE that did not write
+                effect: Effect::ReversibleWrite,
+                approval: Approval::Auto,
+                deps: vec![],
+            }],
+        };
+        let receipt = build_receipt("i", std::slice::from_ref(&declined));
+        assert!(
+            action_records(&receipt, std::slice::from_ref(&declined), &plan).is_empty(),
+            "a refusal must not look like a write"
+        );
     }
 }

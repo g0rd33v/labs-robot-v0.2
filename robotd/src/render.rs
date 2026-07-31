@@ -333,6 +333,34 @@ fn action_block(actions: &[ActionRecord]) -> String {
     format!("\n\n― {}", lines.join("  "))
 }
 
+/// Renderings that report the robot's own configuration.
+///
+/// These are **never re-voiced**, whatever stance is set. Two reasons, and
+/// the second is the important one:
+///
+/// 1. `/soul` promises an answer from stored state with no model call.
+///    Shaping it broke that -- measured at 22 seconds for a query that is
+///    three SQL reads.
+/// 2. If the mentor persona could reword the dial readout, you would be
+///    reading the instrument through the thing you are trying to inspect.
+///    A gauge that changes its wording depending on the setting it is
+///    reporting is not a gauge.
+///
+/// They are still TRANSLATED for a person who does not read English --
+/// translating a readout is not the same as re-voicing it.
+fn is_control_surface(id: &str) -> bool {
+    matches!(
+        id,
+        "soul_dial"
+            | "soul_set"
+            | "soul_bounds"
+            | "soul_pinned"
+            | "soul_evolution"
+            | "soul_stance"
+            | "soul_refused"
+    )
+}
+
 /// Does this tag mean English? BCP 47, so `en`, `en-GB`, `EN` all count.
 fn is_english(lang: &str) -> bool {
     let l = lang.trim().to_lowercase();
@@ -356,14 +384,22 @@ impl Renderer for Speak {
         // nothing about the person leaves to produce a sentence.
         let mut disclosed: Vec<String> = vec![];
         // English at the default dial uses templates: free, instant, offline.
-        // A moved dial or a role is what buys the model call.
-        let shape_english = self.voice.is_some();
+        // A moved dial or a stance is what buys the model call -- except for
+        // the control surface, which is an instrument reading and reads the
+        // same however the robot is set.
+        let all_control = needs_saying.iter().all(|r| is_control_surface(&r.id));
+        let voice = if all_control {
+            None
+        } else {
+            self.voice.as_deref()
+        };
+        let shape_english = voice.is_some();
         let said: Vec<String> = if needs_saying.is_empty()
             || (is_english(lang) && !shape_english)
         {
             needs_saying.iter().map(|r| english(r)).collect()
         } else {
-            match self.say_in(lang, &needs_saying) {
+            match self.say_in(lang, &needs_saying, voice) {
                 Some(v) => {
                     // it worked, which means their slots -- facts, reminders,
                     // registry sources -- went to a model as the material
@@ -396,13 +432,18 @@ impl Renderer for Speak {
 
 impl Speak {
     /// One call, all of the turn's system messages at once.
-    fn say_in(&self, lang: &str, parts: &[&Rendering]) -> Option<Vec<String>> {
+    fn say_in(
+        &self,
+        lang: &str,
+        parts: &[&Rendering],
+        voice: Option<&str>,
+    ) -> Option<Vec<String>> {
         let gw = self.gateway.as_ref()?;
         let payload: Vec<serde_json::Value> = parts
             .iter()
             .map(|r| serde_json::json!({ "english": english(r), "data": r.slots }))
             .collect();
-        let voice = self.voice.as_deref().unwrap_or(
+        let voice = voice.unwrap_or(
             "keep the robot's voice: lower-case, warm, brief, no corporate padding.",
         );
         let system = format!(
@@ -677,5 +718,51 @@ mod soul_tests {
             assert!(v.contains("nothing about what is true"), "{st:?}");
             assert!(v.contains("answer honestly"), "{st:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod control_surface_tests {
+    use super::*;
+    use prism::types::Rendering;
+
+    /// `/soul` promises an answer from stored state with no model call.
+    /// Once a stance was set, the shaping rule sent even that through a
+    /// model -- 22 seconds for three SQL reads. A gauge whose wording
+    /// changes with the setting it reports is not a gauge.
+    #[test]
+    fn the_control_surface_is_never_revoiced() {
+        let shaped = Speak {
+            gateway: None,
+            voice: Some("you are their mentor".into()),
+        };
+        // with no gateway the model path falls back to english anyway, so the
+        // observable property is the decision itself
+        for id in [
+            "soul_dial",
+            "soul_set",
+            "soul_bounds",
+            "soul_pinned",
+            "soul_evolution",
+            "soul_stance",
+            "soul_refused",
+        ] {
+            assert!(is_control_surface(id), "{id} must not be re-voiced");
+        }
+        // a reply about the world is not the control surface
+        for id in ["reminder_created", "recall", "registry", "help"] {
+            assert!(!is_control_surface(id), "{id} is ordinary speech");
+        }
+
+        let out = shaped.render(
+            "en",
+            &[ReplyPart::Say(Rendering::new(
+                "soul_stance",
+                serde_json::json!({ "stance": "mentor" }),
+            ))],
+            &[],
+        );
+        assert!(out.text.contains("mentor"));
+        assert!(out.disclosed.is_empty(), "and nothing left the machine");
     }
 }

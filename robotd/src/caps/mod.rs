@@ -235,8 +235,20 @@ pub fn failed(
 }
 
 /// A capability declining. Not a failure of the machine -- an honest no.
+///
+/// Its evidence is marked `declined`, which keeps it out of the action
+/// record. A refusal that showed "✓ soul.set" beside it would be the
+/// receipts surface asserting that a write happened because a write was
+/// attempted -- the exact confusion the record exists to prevent.
 pub fn declined(what: &'static str, say: Rendering) -> Result<Outcome, PrismError> {
-    attested(note_evidence(what), format!("declined: {what}"), say)
+    let evidence = vec![Evidence {
+        kind: "declined".into(),
+        provider: "robot".into(),
+        external_id: what.into(),
+        hash: String::new(),
+        ts: trust::ids::ts_ms(),
+    }];
+    attested(evidence, format!("declined: {what}"), say)
 }
 
 /// Map a mind error into a capability error.
