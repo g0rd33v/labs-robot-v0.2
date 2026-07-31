@@ -42,7 +42,7 @@
 {"lang": "tr", "text": "internetten Porto'daki hava durumunu araştır", "tool": "web.research"}
 {"lang": "ko", "text": "지금 몇 시야", "tool": "time.now"}
 {"lang": "ko", "text": "10분 뒤에 스트레칭하라고 알려줘", "tool": "reminder.create", "verbatim": "스트레칭"}
-{"lang": "ko", "text": "내가 녹차를 마신다는 걸 기억해", "tool": "memory.remember", "verbatim": "내가 녹차를 마신다는 걸"}
+{"lang": "ko", "text": "내가 녹차를 마신다는 걸 기억해", "tool": "memory.remember", "verbatim": "내가 녹차를 마신다"}
 {"lang": "ko", "text": "차에 대해 뭘 기억해?", "tool": "memory.recall"}
 {"lang": "ko", "text": "나에 대해 저장한 걸 다 보여줘", "tool": "registry.list"}
 {"lang": "ko", "text": "포르투 날씨를 인터넷에서 찾아줘", "tool": "web.research"}

@@ -322,16 +322,21 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
 impl CapabilityRouter for Registry {
     fn describe(&self, cell: &Cell) -> Vec<ToolDef> {
         let mut tools = self.catalog();
-        // the answering tool exists only while a question is open, so a
-        // model cannot invent a confirmation for something nobody asked
-        if prism::pending::is_waiting(cell) {
+        // the answering tool exists only around a question -- while one is
+        // open, and briefly after it closes so a late yes can be told it is
+        // late. Outside that window a model cannot invent a confirmation
+        // for something nobody asked.
+        if prism::pending::answerable(cell) {
             tools.push(ToolDef {
                 name: prism::lifecycle::CONFIRM_TOOL,
-                description: "Answer the yes-or-no question the robot has just \
-                              asked about an irreversible action. Use this, and \
-                              only this, when the person's message is an answer \
-                              to that question -- agreement of any kind is \
-                              confirmed: true, refusal or hesitation is false.",
+                description: "Answer the yes-or-no question the robot asked \
+                              about an irreversible action. Use this, and only \
+                              this, when their message is an answer to that \
+                              question -- agreement of any kind is confirmed: \
+                              true, refusal or hesitation is false. Use it even \
+                              if you believe the question was already settled: \
+                              the robot will tell them if their answer arrived \
+                              too late, and that is better than guessing.",
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

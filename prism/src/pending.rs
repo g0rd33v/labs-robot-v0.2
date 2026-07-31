@@ -130,10 +130,22 @@ pub fn recently_resolved(conn: &Connection, within_ms: i64) -> Result<bool, Pris
     Ok(n > 0)
 }
 
-/// Is anything waiting on this cell? Used to decide whether the answering
-/// tool is even offered.
-pub fn is_waiting(cell: &Cell) -> bool {
-    cell.with(open).ok().flatten().is_some()
+/// Should the answering tool be offered on this turn?
+///
+/// While a question is open, obviously. But ALSO for a while after one is
+/// closed, so that a late or repeated "yes" can be recognised as an answer
+/// and told plainly that it arrived too late. Without that window the tool
+/// is absent exactly when the person is most likely to say yes again, the
+/// model answers from conversation history instead, and a deterministic
+/// question about deleting things gets settled by prose.
+pub fn answerable(cell: &Cell) -> bool {
+    cell.with(|c| {
+        if open(c)?.is_some() {
+            return Ok(true);
+        }
+        recently_resolved(c, TTL_MS)
+    })
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
