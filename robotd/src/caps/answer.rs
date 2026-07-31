@@ -52,6 +52,30 @@ impl Capability for ModelAnswer {
     fn effect(&self) -> Effect {
         Effect::Read
     }
+    fn description(&self) -> &'static str {
+        "Answer from knowledge and memory, with no external action. This is \
+         where a turn goes when no tool fits."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "tier":  { "type": "string", "enum": ["fast", "super", "ultra"] }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+    /// NOT offered to the model: it is the escape hatch, and a model given
+    /// the choice between doing the work and declining will sometimes
+    /// decline.
+    fn exposed(&self) -> bool {
+        false
+    }
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let query = args["query"].as_str().unwrap_or("");
         let Some(gw) = &ctx.services.gateway else {

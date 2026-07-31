@@ -33,6 +33,33 @@ pub struct Intent {
     pub status: String,
 }
 
+// ---------------------------------------------------------------- tools
+
+/// One capability, described the way the industry describes a tool: an
+/// English name, an English sentence saying what it is for, and a JSON
+/// Schema for its arguments.
+///
+/// This is the ENTIRE multilingual mechanism. A model maps any phrasing in
+/// any language onto `reminder.create` because the description says what
+/// the tool does -- not because anyone wrote a phrase table. The number of
+/// supported languages appears nowhere in this codebase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: serde_json::Value,
+    pub effect: Effect,
+}
+
+/// A tool call as proposed by a model -- untrusted until validated against
+/// the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub tool: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
 // ---------------------------------------------------------------- plan
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

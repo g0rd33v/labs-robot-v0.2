@@ -13,11 +13,12 @@
 
 pub mod admin;
 pub mod answer;
+pub mod basics;
 pub mod memory;
 pub mod reminders;
 pub mod research;
 
-use prism::types::{Effect, Evidence, Outcome};
+use prism::types::{Effect, Evidence, Outcome, ToolDef};
 use prism::{Cell, CapabilityRouter, PrismError};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -118,13 +119,63 @@ impl Ctx<'_> {
     }
 }
 
-/// One capability: a name, an effect class, and an implementation.
+/// One capability: a name, an effect class, a self-description, and an
+/// implementation.
+///
+/// The four declarative methods together ARE the tool definition handed to
+/// a model. Because they live beside the code that runs, a capability
+/// cannot describe itself as something it is not, and adding a capability
+/// makes it reachable in every language on the same commit.
 pub trait Capability: Send + Sync {
     fn name(&self) -> &'static str;
     /// Declared beside the code that performs it.
     fn effect(&self) -> Effect;
+
+    /// One English sentence: what this is for, and when to reach for it.
+    ///
+    /// This sentence is the whole multilingual mechanism. It is what lets a
+    /// model map any phrasing in any language onto this tool, and it
+    /// replaces every phrase table we used to maintain. Write it as if
+    /// explaining to a capable colleague who cannot see the code.
+    fn description(&self) -> &'static str;
+
+    /// JSON Schema for `args`. Two classes of argument, and the split
+    /// carries law 5: STRUCTURAL fields (times, indices) are typed and
+    /// language-free; CONTENT fields hold the person's own words verbatim
+    /// and must never be translated, or provenance would point at words
+    /// they never wrote.
+    fn schema(&self) -> serde_json::Value;
+
+    /// Reject arguments that do not typecheck, BEFORE anything executes.
+    /// Implemented by deserializing into the same struct `execute` reads,
+    /// so the check cannot drift from the code it guards.
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String>;
+
+    /// Whether this capability appears in the catalog offered to a model.
+    /// The fallback answer path is a capability but not a tool: it is where
+    /// a turn goes when NO tool fits, so offering it would let the model
+    /// choose the escape hatch over doing the work.
+    fn exposed(&self) -> bool {
+        true
+    }
+
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value)
         -> Result<Outcome, PrismError>;
+}
+
+/// The schema for a capability that takes nothing.
+pub fn no_args() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object", "properties": {}, "additionalProperties": false
+    })
+}
+
+/// Deserialize `args` into a capability's own argument struct, turning a
+/// serde error into a sentence a person could act on.
+pub fn typed<T: serde::de::DeserializeOwned>(
+    args: &serde_json::Value,
+) -> Result<T, String> {
+    serde_json::from_value(args.clone()).map_err(|e| e.to_string())
 }
 
 // ---- shared outcome constructors -------------------------------------
@@ -216,6 +267,25 @@ impl Registry {
         self.caps.get(name).map(|c| c.effect())
     }
 
+    /// The tool catalog offered to a model: generated from the registry,
+    /// never authored. Adding a capability makes it reachable in every
+    /// language on the same commit; there is no second list to update.
+    pub fn catalog(&self) -> Vec<ToolDef> {
+        let mut tools: Vec<ToolDef> = self
+            .caps
+            .values()
+            .filter(|c| c.exposed())
+            .map(|c| ToolDef {
+                name: c.name(),
+                description: c.description(),
+                input_schema: c.schema(),
+                effect: c.effect(),
+            })
+            .collect();
+        tools.sort_by_key(|t| t.name);
+        tools
+    }
+
     pub fn names(&self) -> Vec<&'static str> {
         let mut n: Vec<_> = self.caps.keys().copied().collect();
         n.sort();
@@ -225,6 +295,9 @@ impl Registry {
 
 fn all_capabilities() -> Vec<Box<dyn Capability>> {
     vec![
+        Box::new(basics::TimeNow),
+        Box::new(basics::About),
+        Box::new(basics::Help),
         Box::new(reminders::Create),
         Box::new(reminders::List),
         Box::new(reminders::CancelLast),
@@ -241,12 +314,29 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
 }
 
 impl CapabilityRouter for Registry {
+    fn describe(&self) -> Vec<ToolDef> {
+        self.catalog()
+    }
+
+    fn validate(&self, tool: &str, args: &serde_json::Value) -> Result<Effect, String> {
+        let cap = self
+            .caps
+            .get(tool)
+            .ok_or_else(|| format!("no such tool: {tool}"))?;
+        if !cap.exposed() {
+            return Err(format!("{tool} is not callable from outside"));
+        }
+        cap.validate(args)?;
+        Ok(cap.effect())
+    }
+
     fn execute(
         &self,
         cell: &Cell,
         capability: &str,
         args: &serde_json::Value,
         intent_id: &str,
+        lang: &str,
     ) -> Result<Outcome, PrismError> {
         let cap = self
             .caps
@@ -255,9 +345,6 @@ impl CapabilityRouter for Registry {
         // the acting principal comes from the journaled intent, read once
         // here rather than re-derived inside every capability
         let principal = principal_of(cell, intent_id);
-        // the kernel resolved the language at plan time and journaled it in
-        // the args; capabilities read it, they never detect it themselves
-        let lang = args["lang"].as_str().unwrap_or("en");
         let ctx = Ctx {
             cell,
             intent_id,
@@ -328,6 +415,63 @@ mod tests {
         );
         // deletion is real and irreversible -- it must be classified as such
         assert_eq!(reg.effect_of("memory.forget"), Some(Effect::Irreversible));
+    }
+
+    /// The catalog is what a model sees. Every entry must be usable: a
+    /// missing description is a tool nobody can find, and a schema that is
+    /// not an object is a tool nobody can call.
+    #[test]
+    fn every_tool_describes_itself_usefully() {
+        let reg = Registry::offline();
+        let catalog = reg.catalog();
+        assert_eq!(catalog.len(), 14, "expected fourteen tools, got {}", catalog.len());
+
+        for t in &catalog {
+            assert!(
+                t.description.len() > 40,
+                "{} has a description too thin to route on: {:?}",
+                t.name,
+                t.description
+            );
+            let schema = &t.input_schema;
+            assert_eq!(schema["type"], "object", "{}", t.name);
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{} accepts unknown fields; a model's stray key would slip through",
+                t.name
+            );
+            // the declared effect must be the registry's, not a gentler one
+            assert_eq!(reg.effect_of(t.name), Some(t.effect), "{}", t.name);
+        }
+    }
+
+    /// The escape hatch is not on the menu.
+    #[test]
+    fn the_fallback_answer_is_not_offered_as_a_tool() {
+        let reg = Registry::offline();
+        assert!(reg.effect_of("answer.model").is_some());
+        assert!(!reg.catalog().iter().any(|t| t.name == "answer.model"));
+    }
+
+    /// Validation is the safety story for anything a model proposes.
+    #[test]
+    fn a_proposed_call_is_checked_against_the_registry() {
+        let reg = Registry::offline();
+
+        assert!(reg.validate("registry.list", &serde_json::json!({})).is_ok());
+        assert_eq!(
+            reg.validate("memory.forget", &serde_json::json!({"index": 3})),
+            Ok(Effect::Irreversible)
+        );
+
+        // an invented tool, a hidden one, bad types, missing and extra fields
+        assert!(reg.validate("memory.explode", &serde_json::json!({})).is_err());
+        assert!(reg.validate("answer.model", &serde_json::json!({})).is_err());
+        assert!(reg.validate("memory.forget", &serde_json::json!({"index": "3"})).is_err());
+        assert!(reg.validate("memory.remember", &serde_json::json!({})).is_err());
+        assert!(reg
+            .validate("memory.remember", &serde_json::json!({"content": "x", "extra": 1}))
+            .is_err());
     }
 
     #[test]

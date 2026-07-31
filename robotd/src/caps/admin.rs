@@ -18,6 +18,16 @@ impl Capability for Invite {
     fn effect(&self) -> Effect {
         Effect::ReversibleWrite
     }
+    fn description(&self) -> &'static str {
+        "Mint a single-use invite link so another person can join this robot \
+         with their own sealed, private cell. Owner only."
+    }
+    fn schema(&self) -> serde_json::Value {
+        super::no_args()
+    }
+    fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
     fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let core = match ctx.require_owner("mint invites") {
             Ok(c) => c,
@@ -55,6 +65,16 @@ impl Capability for TelegramBindCode {
     }
     fn effect(&self) -> Effect {
         Effect::ReversibleWrite
+    }
+    fn description(&self) -> &'static str {
+        "Issue a short-lived code that binds a Telegram chat to this robot, \
+         so the person can talk to it from Telegram. Owner only."
+    }
+    fn schema(&self) -> serde_json::Value {
+        super::no_args()
+    }
+    fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
+        Ok(())
     }
     fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let core = match ctx.require_owner("bind telegram") {

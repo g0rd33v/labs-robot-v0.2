@@ -929,10 +929,21 @@ mod tests {
                 _capability: &str,
                 _args: &serde_json::Value,
                 _intent_id: &str,
+                _lang: &str,
             ) -> Result<Outcome, PrismError> {
                 self.entered.store(true, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(600));
                 Ok(Outcome::utterance(String::new(), vec![], "slow answer".into()))
+            }
+            fn describe(&self) -> Vec<prism::types::ToolDef> {
+                vec![]
+            }
+            fn validate(
+                &self,
+                _tool: &str,
+                _args: &serde_json::Value,
+            ) -> Result<prism::types::Effect, String> {
+                Err("this router offers no tools".into())
             }
         }
 

@@ -18,6 +18,33 @@ impl Capability for WebResearch {
     fn effect(&self) -> Effect {
         Effect::Read
     }
+    fn description(&self) -> &'static str {
+        "Search the open web, read the best sources, and answer from them with \
+         citations. Use for anything current, local, or outside what you \
+         already know -- news, prices, weather, opening hours, recent events."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to look up. Write it as a good search \
+                                    query; keep proper nouns and place names \
+                                    exactly as the person wrote them."
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String> {
+        let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        if q.trim().is_empty() {
+            return Err("query is empty".into());
+        }
+        Ok(())
+    }
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let query = args["query"].as_str().unwrap_or("");
         let (Some(gw), Some(rs)) = (&ctx.services.gateway, &ctx.services.research) else {

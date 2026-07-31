@@ -26,7 +26,29 @@ pub trait CapabilityRouter: Send + Sync {
         capability: &str,
         args: &serde_json::Value,
         intent_id: &str,
+        lang: &str,
     ) -> Result<Outcome, PrismError>;
+
+    /// The tool catalog, for the routing call.
+    fn describe(&self) -> Vec<ToolDef>;
+
+    /// Does this proposed call name a real tool with arguments that
+    /// typecheck? Returns the registry's own effect class, so a caller
+    /// cannot assert a gentler one than the code actually performs.
+    ///
+    /// This is the whole safety story for model-proposed work: the model is
+    /// an input device, never an authority.
+    fn validate(&self, tool: &str, args: &serde_json::Value) -> Result<Effect, String>;
+}
+
+/// Milliseconds since the epoch as RFC 3339 local time -- the one wire
+/// representation for a moment, whether the floor computed it or a model
+/// proposed it.
+pub fn rfc3339(ms: i64) -> String {
+    match chrono::TimeZone::timestamp_millis_opt(&Local, ms).earliest() {
+        Some(dt) => dt.to_rfc3339(),
+        None => String::new(),
+    }
 }
 
 pub struct TurnDeps<'a> {
@@ -163,7 +185,7 @@ pub(crate) fn finish_planned_intent(
         }
         // the cell is NOT locked here: a capability may spend seconds in a
         // model call, and the person's other requests must not queue on it
-        let outcome = execute_step(cell, deps.router, step, intent_id, pack)?;
+        let outcome = execute_step(cell, deps.router, step, intent_id, pack, &plan.lang)?;
         let outcome_json = serde_json::to_string(&outcome)?;
         let outcome_hash = ids::sha256_hex(outcome.detail.as_bytes());
         cell.with(|c| {
@@ -259,12 +281,15 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
     };
     let steps = match decision {
         Decision::Floor { m, .. } => match m {
-            FloorMatch::TimeNow => vec![step("answer.time", serde_json::json!({}), Effect::Read)],
-            FloorMatch::SelfMeta => vec![step("answer.self", serde_json::json!({}), Effect::Read)],
-            FloorMatch::Help => vec![step("answer.help", serde_json::json!({}), Effect::Read)],
+            FloorMatch::TimeNow => vec![step("time.now", serde_json::json!({}), Effect::Read)],
+            FloorMatch::SelfMeta => vec![step("robot.about", serde_json::json!({}), Effect::Read)],
+            FloorMatch::Help => vec![step("robot.help", serde_json::json!({}), Effect::Read)],
             FloorMatch::Remind { fire_at_ms, about } => vec![step(
                 "reminder.create",
-                serde_json::json!({ "fire_at": fire_at_ms, "about": about }),
+                serde_json::json!({
+                    "fire_at": rfc3339(*fire_at_ms),
+                    "about": about,
+                }),
                 Effect::ReversibleWrite,
             )],
             FloorMatch::ListReminders => {
@@ -353,18 +378,6 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
         Some(p) => p.code.clone(),
         None => "en".to_string(),
     };
-    // the language travels in the step args because that is what crosses
-    // the crate boundary into the capability registry, and because args are
-    // journaled -- a replayed turn speaks the language the live one did
-    let steps = steps
-        .into_iter()
-        .map(|mut st| {
-            if let Some(obj) = st.args.as_object_mut() {
-                obj.insert("lang".into(), serde_json::Value::String(lang.clone()));
-            }
-            st
-        })
-        .collect();
     Plan {
         plan_id: ids::new_id("plan"),
         intent_id: intent_id.into(),
@@ -379,6 +392,7 @@ fn execute_step(
     step: &PlanStep,
     intent_id: &str,
     pack: &Pack,
+    lang: &str,
 ) -> Result<Outcome, PrismError> {
     // floor answers are system-generated constants computed from local state:
     // they attest to exactly what they say
@@ -396,15 +410,6 @@ fn execute_step(
         )
     };
     match step.capability.as_str() {
-        "answer.time" => {
-            let now = Local::now();
-            Ok(deterministic(lexicon::fill(
-                pack.reply("time_now"),
-                &[("time", &pack.datetime("now", &now))],
-            )))
-        }
-        "answer.self" => Ok(deterministic(pack.reply("self_meta").into())),
-        "answer.help" => Ok(deterministic(pack.reply("help").into())),
         "answer.fallback" => Ok(deterministic(pack.reply("fallback").into())),
         // the verdict's own chitchat one-liner (Q16 reply field) -- model
         // text, so it speaks but attests to nothing
@@ -422,7 +427,8 @@ fn execute_step(
             step.args["reply"].as_str().unwrap_or("hi.").to_string(),
         )),
         _ => {
-            let mut outcome = router.execute(cell, &step.capability, &step.args, intent_id)?;
+            let mut outcome =
+                router.execute(cell, &step.capability, &step.args, intent_id, lang)?;
             outcome.step_id = step.step_id.clone();
             Ok(outcome)
         }
