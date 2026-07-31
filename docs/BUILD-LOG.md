@@ -95,6 +95,76 @@ the last remaining failures actually were.
 Progress across four runs on the same corpus: **8 → 50 → 58 → 59 of 60**,
 with zero translated arguments at every single stage.
 
+### Live, in the browser (same day)
+
+The eval proves routing against a corpus. This is the robot itself: real
+cells, real model, real data, driven through the web chat.
+
+The running instance had twelve hours of uptime on the pre-change binary
+and had to be restarted first. The preview runner could not launch it —
+macOS TCC again, blocking it from `~/Documents`, the same wall that killed
+the launchd backup agent. `scripts/run-local.sh` now starts it with both
+keys pulled from the Keychain into environment variables only.
+
+**Russian, a language with nothing left in the codebase:**
+
+```
+напомни через 5 минут выпить воды
+→ готово — напомню в 13:00 в пт, 31 июля: выпить воды
+  ― ✓ reminder.create
+```
+
+Routed correctly, `выпить воды` stored verbatim, and the reply *and its
+date* rendered in Russian. The action record says an effect really
+happened; it carries no language at all.
+
+**The confirmation gate (§6b), live:**
+
+```
+забудь факт 1
+→ это навсегда удалит данные (memory.forget), и я сделал такой вывод сам,
+  а не получил прямого указания — скажи «да», и я это сделаю, или «нет»,
+  и я не буду. пока ничего не произошло.
+нет, не надо
+→ хорошо — ничего не было удалено.
+my facts
+→ all three facts still present
+```
+
+No action record on either turn, because nothing happened. The decline was
+verified against the registry rather than taken on the robot's word.
+
+Asked the looser `удали всё что ты про меня помнишь про демо`, it declined
+to guess at a bulk delete and showed what it holds instead — with the
+Russian frame rendered and the English facts left verbatim inside it.
+`my facts` went straight through the English floor: no model call.
+
+**Turkish — the case that is the whole argument.** Turkish appears nowhere
+in this project and never has: no pack, no table, no configuration line.
+
+```
+yarın sabah 8'de spor salonuna gitmemi hatırlat
+→ tamam -- seni 1 Ağustos Cmt, 08:00'de hatırlatacağım: spor salonuna
+  gitmemi hatırlat
+  ― ✓ reminder.create
+```
+
+A real reminder, a Turkish weekday, no code touched. Nobody added Turkish
+and Turkish works.
+
+Zero warnings in the boot log across the whole session — no timeouts, no
+fallbacks.
+
+**Two imperfections, recorded rather than tidied away:**
+
+- The Turkish subject came back as `spor salonuna gitmemi hatırlat`, which
+  includes the verb "remind". It is verbatim from their words, so law 5
+  holds, but the subject is wider than it should be. A tighter `about`
+  description would fix it — one English sentence, every language.
+- "in 5 minutes" at 12:56 resolved to 13:00 rather than 13:01: the model
+  rounds to the minute. Inside the horizon guard, and harmless for a
+  reminder, but it is arithmetic done by a model and worth knowing.
+
 ### Gate (demonstrated)
 
 - `cargo test --workspace` — **111 passed, 0 failed**
