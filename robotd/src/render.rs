@@ -15,7 +15,7 @@
 //! language, and re-rendering it would be a second chance to get it wrong.
 
 use chrono::{Local, TimeZone};
-use prism::lifecycle::Renderer;
+use prism::lifecycle::{Rendered, Renderer};
 use prism::types::{ActionRecord, Rendering, ReplyPart};
 use std::sync::Arc;
 
@@ -217,6 +217,9 @@ pub fn english(r: &Rendering) -> String {
             s(a, "tool")
         ),
         "confirmation_declined" => "alright -- nothing was deleted.".into(),
+        "confirmation_stale" => "that yes came too late to use -- nothing was \
+             deleted. ask me again if you still want it gone."
+            .into(),
 
         // ---- turn outcomes ----
         "done" => "done.".into(),
@@ -257,7 +260,7 @@ fn is_english(lang: &str) -> bool {
 }
 
 impl Renderer for Speak {
-    fn render(&self, lang: &str, parts: &[ReplyPart], actions: &[ActionRecord]) -> String {
+    fn render(&self, lang: &str, parts: &[ReplyPart], actions: &[ActionRecord]) -> Rendered {
         let mut rendered: Vec<String> = Vec::with_capacity(parts.len());
         // model prose is already in their language; only kernel structure
         // needs saying
@@ -269,11 +272,19 @@ impl Renderer for Speak {
             })
             .collect();
 
+        // English is rendered here, on this machine, from these templates:
+        // nothing about the person leaves to produce a sentence.
+        let mut disclosed: Vec<String> = vec![];
         let said: Vec<String> = if is_english(lang) || needs_saying.is_empty() {
             needs_saying.iter().map(|r| english(r)).collect()
         } else {
             match self.say_in(lang, &needs_saying) {
-                Some(v) => v,
+                Some(v) => {
+                    // it worked, which means their slots -- facts, reminders,
+                    // registry sources -- went to a model as the material
+                    disclosed = needs_saying.iter().map(|r| r.id.clone()).collect();
+                    v
+                }
                 // no model, or the call failed: English is a worse answer
                 // than their own language, and a much better one than silence
                 None => needs_saying.iter().map(|r| english(r)).collect(),
@@ -291,7 +302,10 @@ impl Renderer for Speak {
                 ReplyPart::Prose(text) => rendered.push(text.clone()),
             }
         }
-        format!("{}{}", rendered.join("\n"), action_block(actions))
+        Rendered {
+            text: format!("{}{}", rendered.join("\n"), action_block(actions)),
+            disclosed,
+        }
     }
 }
 
@@ -381,6 +395,7 @@ mod tests {
             ("fallback", serde_json::json!({})),
             ("confirm_irreversible", serde_json::json!({"tool": "memory.forget"})),
             ("confirmation_declined", serde_json::json!({})),
+            ("confirmation_stale", serde_json::json!({})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),
         ] {
@@ -390,13 +405,62 @@ mod tests {
         }
     }
 
+    /// The hand-written list above can drift from what the code actually
+    /// emits. This scans every crate for literal rendering ids at their
+    /// construction sites and demands a template for each, so a new
+    /// capability cannot ship a reply that renders as a bare `[id]`.
+    ///
+    /// (The scan looks for the constructor followed by a string literal.
+    /// This comment deliberately does not spell that pattern out, because
+    /// it would then find itself.)
+    #[test]
+    fn every_id_the_code_emits_has_a_template() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut ids: Vec<String> = vec![];
+        let mut stack = vec![root];
+        while let Some(p) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&p) else { continue };
+            for e in entries.flatten() {
+                let path = e.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() && !matches!(name, "target" | ".git" | "data" | "demo") {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let src = std::fs::read_to_string(&path).unwrap_or_default();
+                    for marker in ["Rendering::new(\"", "Rendering::bare(\""] {
+                        let mut rest = src.as_str();
+                        while let Some(i) = rest.find(marker) {
+                            rest = &rest[i + marker.len()..];
+                            if let Some(end) = rest.find('"') {
+                                ids.push(rest[..end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        assert!(ids.len() > 20, "the scan found almost nothing: {ids:?}");
+        let missing: Vec<&String> = ids
+            .iter()
+            .filter(|id| english(&Rendering::bare(id)).starts_with('['))
+            .collect();
+        assert!(missing.is_empty(), "no english template for: {missing:?}");
+    }
+
     /// With no model, a non-English turn still gets an answer -- in English.
     /// Degraded, never silent.
     #[test]
     fn without_a_model_other_languages_fall_back_to_english() {
         let sp = Speak::offline();
         let parts = [ReplyPart::Say(Rendering::bare("reminder_list_empty"))];
-        assert_eq!(sp.render("ru", &parts, &[]), "no active reminders.");
+        let out = sp.render("ru", &parts, &[]);
+        assert_eq!(out.text, "no active reminders.");
+        assert!(out.disclosed.is_empty(), "english templates disclose nothing");
     }
 
     /// Model prose is passed through, never re-rendered.
@@ -404,7 +468,7 @@ mod tests {
     fn model_prose_is_not_touched() {
         let sp = Speak::offline();
         let parts = [ReplyPart::Prose("сейчас 10 утра".into())];
-        assert_eq!(sp.render("ru", &parts, &[]), "сейчас 10 утра");
+        assert_eq!(sp.render("ru", &parts, &[]).text, "сейчас 10 утра");
     }
 
     /// The action record is the receipts law made visible, and it is not in
@@ -418,11 +482,11 @@ mod tests {
             status: "verified".into(),
             detail: "created".into(),
         }];
-        let out = sp.render("ja", &parts, &acted);
+        let out = sp.render("ja", &parts, &acted).text;
         assert!(out.contains("✓ reminder.create"), "{out}");
 
         // and the same claim with nothing behind it shows no record at all
-        let bare = sp.render("ja", &parts, &[]);
+        let bare = sp.render("ja", &parts, &[]).text;
         assert!(!bare.contains("reminder.create"), "{bare}");
     }
 }

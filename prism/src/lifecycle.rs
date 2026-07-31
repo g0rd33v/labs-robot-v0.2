@@ -49,6 +49,11 @@ pub const CONFIRM_TOOL: &str = "confirmation.respond";
 /// Kernel-internal steps: asking, and being told no.
 pub const CONFIRM_REQUEST: &str = "confirmation.request";
 pub const CONFIRM_DECLINED: &str = "confirmation.declined";
+/// A yes that arrived too late, or twice, or for a call the registry no
+/// longer accepts. Nothing ran, and saying so is the only honest option --
+/// a "yes" that quietly turns into small talk leaves the person believing
+/// something happened.
+pub const CONFIRM_STALE: &str = "confirmation.stale";
 
 /// Milliseconds since the epoch as RFC 3339 local time -- the one wire
 /// representation for a moment, whether the floor computed it or a model
@@ -63,7 +68,23 @@ pub fn rfc3339(ms: i64) -> String {
 /// Turns structure into sentences. Lives at the surface, never here: the
 /// kernel emits `ReplyPart`s and has no opinion about words.
 pub trait Renderer: Send + Sync {
-    fn render(&self, lang: &str, parts: &[ReplyPart], actions: &[ActionRecord]) -> String;
+    fn render(&self, lang: &str, parts: &[ReplyPart], actions: &[ActionRecord]) -> Rendered;
+}
+
+/// A rendered reply, and an honest account of what it cost in privacy.
+///
+/// English costs nothing: the templates are local, and no part of the
+/// person's cell leaves the machine to produce a sentence. Every other
+/// language is rendered by a model, which means the SLOTS go out -- and
+/// slots are their facts, their reminders, the sources of their registry.
+/// That is a disclosure, and a system that logs every byte crossing the
+/// boundary should not be quiet about the one it causes itself.
+#[derive(Debug, Default)]
+pub struct Rendered {
+    pub text: String,
+    /// Rendering ids whose data was sent to a model to be put into words.
+    /// Empty for English and for anything rendered locally.
+    pub disclosed: Vec<String>,
 }
 
 pub struct TurnDeps<'a> {
@@ -248,7 +269,21 @@ pub(crate) fn finish_planned_intent(
     // kernel: everything above this line is data
     let parts = reply_parts(&outcomes, &receipt);
     let actions = action_records(&receipt, &outcomes, plan);
-    let reply = deps.renderer.render(&plan.lang, &parts, &actions);
+    let rendered = deps.renderer.render(&plan.lang, &parts, &actions);
+    let reply = rendered.text;
+
+    // saying it in their language cost a trip to a model, carrying their
+    // own data as the material. Journal it: the boundary log records the
+    // bytes, this records WHY they went.
+    if !rendered.disclosed.is_empty() {
+        let disclosed = serde_json::json!({
+            "to": "model:render",
+            "lang": plan.lang,
+            "renderings": rendered.disclosed,
+        })
+        .to_string();
+        cell.with(|c| journal::step(c, intent_id, "render.disclosed", &disclosed, None))?;
+    }
 
     // reply through the transactional outbox (Q11): enqueued before it can
     // possibly leave, deduped structurally
@@ -296,7 +331,15 @@ fn validate_proposal(
     if c.tool == CONFIRM_TOOL {
         let said_yes = c.args["confirmed"].as_bool().unwrap_or(false);
         let Some(p) = cell.with(pending::open)? else {
-            return Ok(None); // nothing was waiting; treat it as ordinary talk
+            // Nothing is open. Either a question was just answered and this
+            // is a second, late "yes" -- which must be acknowledged -- or
+            // the model mis-fired and this is ordinary talk.
+            let late = cell.with(|conn| pending::recently_resolved(conn, pending::TTL_MS))?;
+            return Ok(late.then(|| ValidatedCall {
+                tool: CONFIRM_STALE.into(),
+                args: serde_json::json!({ "tool": "" }),
+                effect: Effect::Read,
+            }));
         };
         if !said_yes {
             cell.with(|conn| pending::resolve(conn, &p.id, "declined"))?;
@@ -309,7 +352,14 @@ fn validate_proposal(
         // spend the confirmation BEFORE planning: a replayed turn must not
         // find it still open and delete a second time
         if !cell.with(|conn| pending::resolve(conn, &p.id, "confirmed"))? {
-            return Ok(None);
+            // someone else already spent it -- a double submit, or a
+            // resumed turn. Say so; a "yes" that quietly becomes small talk
+            // leaves the person believing something happened.
+            return Ok(Some(ValidatedCall {
+                tool: CONFIRM_STALE.into(),
+                args: serde_json::json!({ "tool": p.tool }),
+                effect: Effect::Read,
+            }));
         }
         // re-validate: the registry is the authority, not the parked row
         let effect = match deps.router.validate(&p.tool, &p.args) {
@@ -318,7 +368,13 @@ fn validate_proposal(
                 let rejected =
                     serde_json::json!({ "tool": p.tool, "reason": why }).to_string();
                 cell.with(|conn| journal::step(conn, intent_id, "call.rejected", &rejected, None))?;
-                return Ok(None);
+                // the confirmation is spent and the call cannot run. Telling
+                // them is the only honest option.
+                return Ok(Some(ValidatedCall {
+                    tool: CONFIRM_STALE.into(),
+                    args: serde_json::json!({ "tool": p.tool }),
+                    effect: Effect::Read,
+                }));
             }
         };
         let ok = serde_json::json!({ "tool": p.tool, "confirmed_by": "person" }).to_string();
@@ -518,6 +574,13 @@ fn execute_step(
             "the person declined; nothing was done",
             Rendering::new(
                 "confirmation_declined",
+                serde_json::json!({ "tool": step.args["tool"] }),
+            ),
+        )),
+        CONFIRM_STALE => Ok(internal(
+            "a confirmation arrived that could no longer be used; nothing was done",
+            Rendering::new(
+                "confirmation_stale",
                 serde_json::json!({ "tool": step.args["tool"] }),
             ),
         )),

@@ -118,6 +118,13 @@ pub struct GatewayConfig {
     pub answer_timeout_ms: u64,
     /// hedge deadline for the verdict class (Q19)
     pub hedge_after_ms: u64,
+    /// hedge deadline for the ROUTING class, which is a different animal:
+    /// the doorman's 2.5s was sized for a one-line classification, and a
+    /// routing call carrying the whole catalog normally takes longer than
+    /// that. Left at the doorman's figure it fired on essentially every
+    /// non-English turn -- doubling the cost of the most expensive call in
+    /// the turn to protect against a tail that is far further out.
+    pub route_hedge_after_ms: u64,
 }
 
 impl Default for GatewayConfig {
@@ -129,6 +136,7 @@ impl Default for GatewayConfig {
             route_timeout_ms: 30_000,
             answer_timeout_ms: 45_000,
             hedge_after_ms: 2500,
+            route_hedge_after_ms: 8000,
         }
     }
 }
@@ -467,6 +475,10 @@ impl ModelGateway {
         body: &serde_json::Value,
         timeout_ms: u64,
     ) -> Result<ChatOut, HubError> {
+        let hedge_after = match role {
+            Role::Route => self.cfg.route_hedge_after_ms,
+            _ => self.cfg.hedge_after_ms,
+        };
         let (tx, rx) = mpsc::channel::<Result<ChatOut, HubError>>();
         let fire = |tx: mpsc::Sender<Result<ChatOut, HubError>>| -> Result<(), HubError> {
             let api = self.api.clone();
@@ -529,7 +541,7 @@ impl ModelGateway {
         let mut hedged = false;
         let mut heard = 0usize;
         let mut last_err: Option<HubError> = None;
-        let mut wait = Duration::from_millis(self.cfg.hedge_after_ms);
+        let mut wait = Duration::from_millis(hedge_after);
 
         loop {
             match rx.recv_timeout(wait) {
@@ -602,6 +614,7 @@ mod tests {
             Cast::default(),
             GatewayConfig {
                 hedge_after_ms: 50,
+                route_hedge_after_ms: 50,
                 ..Default::default()
             },
             None,

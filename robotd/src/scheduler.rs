@@ -52,7 +52,8 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
                 serde_json::json!({ "about": rem.about }),
             ))],
             &[],
-        );
+        )
+        .text;
         {
             let intent_id = trust::ids::new_id("int");
             let open_json = serde_json::json!({

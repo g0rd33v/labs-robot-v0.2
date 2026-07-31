@@ -113,6 +113,23 @@ pub fn resolve(conn: &Connection, id: &str, state: &str) -> Result<bool, PrismEr
     Ok(n == 1)
 }
 
+/// Was a question closed recently enough that an answer arriving now is
+/// plainly a late answer to it, rather than a model mis-firing?
+///
+/// Without this, a second "yes" is indistinguishable from a "yes" out of
+/// nowhere, and the person who says it twice gets small talk back while
+/// believing they confirmed something.
+pub fn recently_resolved(conn: &Connection, within_ms: i64) -> Result<bool, PrismError> {
+    let cutoff = ids::ts_ms() - within_ms;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pending_calls \
+         WHERE state IN ('confirmed','declined') AND created_at >= ?1",
+        params![cutoff],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Is anything waiting on this cell? Used to decide whether the answering
 /// tool is even offered.
 pub fn is_waiting(cell: &Cell) -> bool {

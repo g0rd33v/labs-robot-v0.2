@@ -860,6 +860,89 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Saying it in their language costs a trip to a model carrying their
+    /// own data, and the journal has to admit that. English costs nothing.
+    #[test]
+    fn rendering_in_another_language_is_recorded_as_a_disclosure() {
+        use prism::lifecycle::Renderer;
+        use prism::types::{Rendering, ReplyPart};
+
+        // english: local templates, nothing leaves
+        let en = SPEAK.render(
+            "en",
+            &[ReplyPart::Say(Rendering::bare("registry_empty"))],
+            &[],
+        );
+        assert!(en.disclosed.is_empty());
+
+        // another language with no model: falls back to english, and a
+        // fallback is not a disclosure either
+        let ru = SPEAK.render(
+            "ru",
+            &[ReplyPart::Say(Rendering::bare("registry_empty"))],
+            &[],
+        );
+        assert!(
+            ru.disclosed.is_empty(),
+            "an english fallback sent nothing anywhere"
+        );
+    }
+
+    /// A yes that cannot be spent must SAY so.
+    ///
+    /// The confirmation is deliberately spent before the call is planned:
+    /// between a double-submitted yes and a double deletion, the double
+    /// deletion is far worse. The cost is a window in which the yes is gone
+    /// and the work has not happened -- a crash between the two, or a
+    /// second yes arriving. Both leave the data untouched, which is the
+    /// right direction, but the person must be told, or they walk away
+    /// believing a thing was deleted that is still there.
+    #[test]
+    fn a_yes_that_cannot_be_spent_is_not_silently_swallowed() {
+        let (cell, path) = file_cell("confirm_stale");
+        let router = Registry::offline();
+        let yes = Proposes(call(
+            prism::lifecycle::CONFIRM_TOOL,
+            serde_json::json!({"confirmed": true}),
+        ));
+        let run = |verdicts: &Proposes, text: &str| {
+            let deps = TurnDeps {
+                router: &router,
+                verdicts,
+                renderer: &SPEAK,
+                crash: None,
+            };
+            prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
+        };
+
+        run(&Proposes(None), "remember that the demo is on friday");
+        run(
+            &Proposes(call("memory.forget", serde_json::json!({"index": 1}))),
+            "забудь про демо",
+        );
+
+        // the first yes spends it and really deletes
+        let first = run(&yes, "да");
+        assert!(first.reply.contains("✓ memory.forget"), "{}", first.reply);
+        assert_eq!(
+            cell.with(|c| Ok(mind::facts::count_active(c)))
+                .unwrap()
+                .unwrap(),
+            0
+        );
+
+        // the second finds nothing to spend and says so, rather than
+        // quietly becoming small talk
+        let second = run(&yes, "да");
+        assert!(!second.reply.contains("✓"), "{}", second.reply);
+        assert!(
+            second.reply.contains("too late") || second.reply.contains("nothing was deleted"),
+            "a spent yes must be acknowledged: {}",
+            second.reply
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The answering tool is offered only while a question is open, so a
     /// model cannot conjure a confirmation for something nobody asked.
     #[test]
