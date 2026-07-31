@@ -5,6 +5,114 @@ dependencies introduced. Newest first.
 
 ---
 
+## Two-way sync between instances (2026-07-31)
+
+Plan, decisions and the one deviation: `docs/PLAN-two-way-sync.md`.
+The Robot Package (§8) carries a robot somewhere. This keeps two copies in
+agreement afterwards — a change of scope, taken by the owner, not an
+implementation detail of the existing mechanism.
+
+### Knowledge syncs; history does not
+
+Messages, facts, reminders and media travel both ways. The journal,
+receipts, outbox, pending confirmations and above all the **Boundary Log**
+stay where they happened. That last one settles the argument: it is a hash
+chain, and two chains have no merge that is still a chain. Each instance
+keeps its own and each remains independently verifiable — a stronger claim
+than a stitched-together history that neither machine could support.
+
+### Three rules, each picked so the worse failure cannot happen
+
+**A deletion beats everything.** Tombstones carry an id and a moment, never
+content. They are applied *before* any insert in the same pass, and a
+tombstoned id is never re-inserted. They are collected once both sides have
+applied them — which is precisely why the pass is two-way in one call: a
+one-way push could never know the peer had applied anything, so it could
+never safely forget that it had deleted something.
+
+**Conflicting edits both survive.** The registry already models correction
+as supersession rather than overwrite, so two machines correcting the same
+fact produce two chains over one ancestor. Keeping both loses nothing and
+stays inspectable. Last-writer-wins would discard an edit and stake it on
+two machines agreeing about the time.
+
+**A terminal reminder state wins.** `cancelled` or `fired` beats `active`,
+whatever the timestamps say. Nagging about something called off is worse
+than doing nothing.
+
+### The laws, at a new boundary
+
+- **Law 5** travels with the fact: a fact whose source message did not
+  arrive is refused, so provenance can never point at words that are not
+  there. Tested.
+- **Law 2**: only cells both sides hold the key for. A cell present on one
+  side only is reported as skipped, never invented.
+- **Law 3**: both directions are boundary-logged — **counts only**. A sync
+  log naming contents would be a second copy of the memory, in the log.
+- **No new plaintext exists.** The peer's cells are already SQLCipher under
+  the same KEK, so this merges in place. The planned sealed-delta file
+  would have invented a format and left a decrypted-in-transit artifact on
+  the very stick most likely to be lost.
+
+### A real bug the first live run caught
+
+**Restore carried the `instance_id`**, so a restored copy believed it was
+the original — and refused to sync with it ("that is this same instance").
+Restore now clears it and the copy mints its own on first boot. A peer
+restored *before* instance ids existed gets one minted for it on contact:
+without that its id differed on every sync, so the watermark never
+advanced and every sweep re-scanned from the beginning.
+
+### Gate (demonstrated)
+
+- `cargo test --workspace` — **127 passed** (was 114)
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- `robotd eval` — PASS
+
+Unit tests on the merge rules, and five integration tests that boot two
+real instances, use them apart, and sync: convergence, no resurrection, a
+cancelled reminder staying cancelled, a different robot being refused, and
+a repeat sync being a genuine no-op — which is what makes a lane that runs
+every few minutes safe.
+
+Those integration tests **serialise deliberately**. Booting registers the
+sqlite-vec auto-extension, a process-global SQLite mutation; it is
+`Once`-guarded, but one thread registering while another opens a
+connection is still a race, and it surfaced as "file is not a database"
+from an unrelated open. Production never meets it — `bootstrap` runs once
+per process, before any cell opens — so the tests serialise rather than the
+code pretending to be re-entrant.
+
+### Live, between the real main folder and the real stick
+
+Each side was taught something the other had never heard. The lane, running
+on its own schedule, converged them without being asked:
+
+```
+synced with inst_61a8360…: pulled 3 rows, pushed 3 rows, 2 cells
+```
+
+Both registries then held both facts. A fact deleted on the main machine
+was gone from the stick at the next sweep (`pulled 8 rows (1 deletions)`)
+and **stayed gone** across three further syncs in both directions.
+
+### Automatic, and quiet about absence
+
+The owner chose automatic-whenever-present. A peer that is not plugged in
+is skipped **silently** — absence is the normal state of a removable disk,
+and a robot that complains every ten minutes about a drawer is one people
+stop reading. A peer that is present but *unusable* is reported in chat,
+as is any sync that actually moved something: the owner's memory crossing
+between machines is not a thing to do quietly.
+
+**Config.** `[sync] peers = [...]`, `every_minutes = 10`. `robotd sync
+--with <path>` always works regardless.
+
+**No new dependencies.** `serde` was added to `mind`, already in the
+workspace.
+
+---
+
 ## Deep review + the two-location test (2026-07-31)
 
 ### Review: four defects, found by reading and by running
