@@ -506,6 +506,9 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
                 serde_json::json!({}),
                 Effect::ReversibleWrite,
             )],
+            FloorMatch::SoulShow => {
+                vec![step("soul.show", serde_json::json!({}), Effect::Read)]
+            }
             FloorMatch::WebSearch { query } => vec![step(
                 "web.research",
                 serde_json::json!({ "query": query }),

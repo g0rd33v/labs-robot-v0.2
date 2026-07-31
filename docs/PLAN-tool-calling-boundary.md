@@ -67,7 +67,7 @@ per capability is what lets a model map `напомни`, `hatırlat`,
 `recuérdame` and `思い出させて` onto the same tool. It is the highest-leverage
 prose in the system and deserves care.
 
-### The fourteen tools
+### The tools (fourteen at the time of writing; Soul's four landed later)
 
 | tool | args | effect |
 |---|---|---|

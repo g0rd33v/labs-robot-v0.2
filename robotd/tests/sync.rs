@@ -210,3 +210,55 @@ fn a_second_sync_with_nothing_new_is_quiet() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// S1's gate, the half a unit test cannot reach: the dial is state, so it
+/// must survive a restart and travel between instances. A robot on a stick
+/// that spoke to you differently from the one on your machine would be a
+/// different robot wearing the same name.
+#[test]
+fn the_persona_dial_survives_a_restart_and_reaches_the_other_instance() {
+    let _serial = serial();
+    let (dir, main, stick) = two_instances();
+
+    say(&main, "be much blunter and much more formal");
+    // set it deterministically rather than depending on a model to route
+    {
+        let boot = robotd::boot::bootstrap(&main).unwrap();
+        let owner = boot.robot.owner_principal;
+        let cell = boot.robot.cell(owner).unwrap();
+        cell.cell
+            .with(|c| {
+                soul::dial::set_value(c, soul::dial::Dimension::Directness, 95).unwrap();
+                soul::dial::set_value(c, soul::dial::Dimension::Formality, 90).unwrap();
+                soul::dial::pin(c, soul::dial::Dimension::Formality).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    // a fresh boot reads it back -- the dial is rows, not memory
+    let shown = say(&main, "/soul");
+    assert!(shown.contains("directness"), "{shown}");
+    assert!(shown.contains("95"), "{shown}");
+    assert!(shown.contains("pinned"), "{shown}");
+
+    // and it reaches the stick
+    sync(&main, &dir.join("stick"));
+    let there = say(&stick, "/soul");
+    assert!(there.contains("95"), "the dial did not travel: {there}");
+    assert!(there.contains("pinned"), "the pin did not travel: {there}");
+
+    // the pin holds on the far side too -- bounds travel with the value
+    {
+        let boot = robotd::boot::bootstrap(&stick).unwrap();
+        let owner = boot.robot.owner_principal;
+        let cell = boot.robot.cell(owner).unwrap();
+        let refused = cell
+            .cell
+            .with(|c| Ok(soul::dial::set_value(c, soul::dial::Dimension::Formality, 10)))
+            .unwrap();
+        assert!(refused.is_err(), "a pin must survive the crossing");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -281,6 +281,7 @@ pub fn sync_with(robot: &RobotCore, path: &Path) -> anyhow::Result<SyncReport> {
         )?;
         prism::init_cell_schema(&peer_db)?;
         mind::init_cell_schema(&peer_db)?;
+        soul::init_cell_schema(&peer_db)?;
 
         // pull: theirs -> ours
         let incoming = merge::export(&peer_db, since)?;

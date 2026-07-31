@@ -41,6 +41,12 @@ pub struct CellDelta {
     pub media: Vec<Row>,
     #[serde(default)]
     pub tombstones: Vec<Row>,
+    /// Soul's relationship state. Knowledge, so it travels -- the robot on
+    /// the stick should speak to you the way the one on the machine does.
+    #[serde(default)]
+    pub soul_persona: Vec<Row>,
+    #[serde(default)]
+    pub soul_revisions: Vec<Row>,
     /// `cell_meta` keys worth carrying. Preferences, not knowledge.
     #[serde(default)]
     pub meta: Vec<(String, String, i64)>,
@@ -109,7 +115,7 @@ fn rows(conn: &Connection, sql: &str, since: i64) -> Result<Vec<Row>, MindError>
 /// Everything in this cell newer than `since`.
 pub fn export(conn: &Connection, since: i64) -> Result<CellDelta, MindError> {
     let meta: Vec<(String, String, i64)> = conn
-        .prepare("SELECT key, value FROM cell_meta WHERE key = 'lang'")?
+        .prepare("SELECT key, value FROM cell_meta WHERE key IN ('lang', 'soul:evolution')")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, 0i64)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CellDelta {
@@ -141,6 +147,20 @@ pub fn export(conn: &Connection, since: i64) -> Result<CellDelta, MindError> {
             "SELECT id, kind, deleted_at, origin FROM tombstones WHERE deleted_at > ?1",
             since,
         )?,
+        soul_persona: rows(
+            conn,
+            "SELECT dimension, value, floor, ceiling, updated_at \
+             FROM soul_persona WHERE updated_at > ?1",
+            since,
+        )
+        .unwrap_or_default(),
+        soul_revisions: rows(
+            conn,
+            "SELECT id, created_at, reason, diff_json, rolls_back_to, applied, \
+             evaluator_verdict FROM soul_revisions WHERE created_at > ?1",
+            since,
+        )
+        .unwrap_or_default(),
         meta,
     })
 }
@@ -300,6 +320,48 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
                 s(m, "source").unwrap_or_default()
             ],
         )?;
+    }
+
+    // the dial: newest write per dimension wins. Two people cannot both be
+    // adjusting one person's dial, so this is a straight recency merge --
+    // and the bounds travel with the value, so a pin set on the machine is
+    // a pin on the stick.
+    for r in &d.soul_persona {
+        let Some(dim) = s(r, "dimension") else { continue };
+        tx.execute(
+            "INSERT INTO soul_persona(dimension, value, floor, ceiling, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(dimension) DO UPDATE SET \
+               value = excluded.value, floor = excluded.floor, \
+               ceiling = excluded.ceiling, updated_at = excluded.updated_at \
+             WHERE excluded.updated_at > soul_persona.updated_at",
+            params![
+                dim,
+                i(r, "value"),
+                i(r, "floor"),
+                i(r, "ceiling"),
+                i(r, "updated_at")
+            ],
+        )
+        .ok();
+    }
+    // revisions are append-only history: union, never overwrite
+    for r in &d.soul_revisions {
+        let Some(id) = s(r, "id") else { continue };
+        tx.execute(
+            "INSERT OR IGNORE INTO soul_revisions(id, created_at, reason, diff_json, \
+             rolls_back_to, applied, evaluator_verdict) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                id,
+                i(r, "created_at"),
+                s(r, "reason").unwrap_or_default(),
+                s(r, "diff_json").unwrap_or_else(|| "{}".into()),
+                s(r, "rolls_back_to"),
+                i(r, "applied"),
+                s(r, "evaluator_verdict")
+            ],
+        )
+        .ok();
     }
 
     for (k, v, _) in &d.meta {

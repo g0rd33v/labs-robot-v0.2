@@ -221,6 +221,68 @@ pub fn english(r: &Rendering) -> String {
              deleted. ask me again if you still want it gone."
             .into(),
 
+        // ---- soul (sec 5 / Q27) ----
+        "soul_dial" => {
+            let on = a.get("evolution").and_then(|v| v.as_bool()).unwrap_or(true);
+            let lines: Vec<String> = items(a)
+                .iter()
+                .map(|it| {
+                    let v = n(it, "value");
+                    let pin = if it.get("pinned").and_then(|x| x.as_bool()) == Some(true) {
+                        "  (pinned)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{:<11} {:>3}   {}..{}{}\n              0 = {} · 100 = {}",
+                        s(it, "dimension"),
+                        v,
+                        n(it, "floor"),
+                        n(it, "ceiling"),
+                        pin,
+                        s(it, "low"),
+                        s(it, "high")
+                    )
+                })
+                .collect();
+            format!(
+                "how i'm set to speak:\n{}\n\nself-adjustment: {}\n(say \"be blunter\", \
+                 \"be warmer\", \"shorter\" to move one; \"pin brevity\" to freeze it; \
+                 \"stop adjusting yourself\" to switch adaptation off)",
+                lines.join("\n"),
+                if on { "on" } else { "off" }
+            )
+        }
+        "soul_set" => format!(
+            "{} is now {}. that changes how i word things, not what i tell you.",
+            s(a, "dimension"),
+            n(a, "value")
+        ),
+        "soul_bounds" => format!(
+            "{} may now move between {} and {} (it's at {}).",
+            s(a, "dimension"),
+            n(a, "floor"),
+            n(a, "ceiling"),
+            n(a, "value")
+        ),
+        "soul_pinned" => format!(
+            "{} is pinned at {} -- i won't move it, and neither will anything else.",
+            s(a, "dimension"),
+            n(a, "value")
+        ),
+        "soul_evolution" => {
+            if a.get("on").and_then(|v| v.as_bool()) == Some(true) {
+                "self-adjustment is on. i'll adapt how i speak within the bounds \
+                 you've set, and every change is recorded and reversible."
+                    .into()
+            } else {
+                "self-adjustment is off. the dial stays exactly where it is until \
+                 you move it."
+                    .into()
+            }
+        }
+        "soul_refused" => format!("i can't: {}", s(a, "why")),
+
         // ---- turn outcomes ----
         "done" => "done.".into(),
         "partial_note" => "(some of that failed -- the receipt has the honest detail.)".into(),
@@ -401,6 +463,12 @@ mod tests {
             ("confirmation_declined", serde_json::json!({})),
             ("confirmation_stale", serde_json::json!({})),
             ("unsupported_note", serde_json::json!({})),
+            ("soul_dial", serde_json::json!({"items": [], "evolution": true})),
+            ("soul_set", serde_json::json!({"dimension": "warmth", "value": 60})),
+            ("soul_bounds", serde_json::json!({"dimension": "warmth", "floor": 0, "ceiling": 100, "value": 55})),
+            ("soul_pinned", serde_json::json!({"dimension": "warmth", "value": 55})),
+            ("soul_evolution", serde_json::json!({"on": true})),
+            ("soul_refused", serde_json::json!({"why": "x"})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),
         ] {

@@ -34,6 +34,7 @@ pub enum FloorMatch {
     CorrectFact { index: usize, content: String },
     Invite,
     TelegramCode,
+    SoulShow,
     WebSearch { query: String },
 }
 
@@ -41,7 +42,7 @@ pub enum FloorMatch {
 // Whole-utterance commands. Matched EXACTLY, never as substrings: an
 // utterance that merely contains one of these is not that command.
 // ---------------------------------------------------------------------
-const EXACT: [(&str, &str); 35] = [
+const EXACT: [(&str, &str); 38] = [
     ("time", "time_now"),
     ("what time is it", "time_now"),
     ("what time is it now", "time_now"),
@@ -77,6 +78,9 @@ const EXACT: [(&str, &str); 35] = [
     ("show facts", "registry_list"),
     ("telegram code", "telegram_code"),
     ("telegram", "telegram_code"),
+    ("/soul", "soul_show"),
+    ("soul", "soul_show"),
+    ("how are you set to speak", "soul_show"),
 ];
 
 /// Heads that introduce an argument, longest first within each command so
@@ -195,6 +199,7 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         "registry_list" => Some(FloorMatch::RegistryList),
         "invite" => Some(FloorMatch::Invite),
         "telegram_code" => Some(FloorMatch::TelegramCode),
+        "soul_show" => Some(FloorMatch::SoulShow),
         _ => None,
     }
 }

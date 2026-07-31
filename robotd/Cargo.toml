@@ -18,6 +18,7 @@ trust = { workspace = true }
 prism = { workspace = true }
 mind = { workspace = true }
 hub = { workspace = true }
+soul = { workspace = true }
 surfaces = { workspace = true }
 
 [dev-dependencies]

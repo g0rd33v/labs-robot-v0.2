@@ -17,6 +17,7 @@ pub mod basics;
 pub mod memory;
 pub mod reminders;
 pub mod research;
+pub mod soul;
 
 use prism::types::{Effect, Evidence, Outcome, Rendering, ToolDef};
 use prism::{Cell, CapabilityRouter, PrismError};
@@ -321,6 +322,10 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(admin::TelegramBindCode),
         Box::new(answer::ModelAnswer),
         Box::new(research::WebResearch),
+        Box::new(soul::Show),
+        Box::new(soul::Set),
+        Box::new(soul::Bounds),
+        Box::new(soul::Evolution),
     ]
 }
 
@@ -472,7 +477,24 @@ mod tests {
     fn every_tool_describes_itself_usefully() {
         let reg = Registry::offline();
         let catalog = reg.catalog();
-        assert_eq!(catalog.len(), 14, "expected fourteen tools, got {}", catalog.len());
+        // the invariant is a relationship, not a magic number: the catalog
+        // is exactly the exposed capabilities. A hard-coded count fails
+        // every time a capability is added, which trains people to bump it
+        // without reading what changed.
+        let exposed: Vec<&str> = reg
+            .caps
+            .values()
+            .filter(|c| c.exposed())
+            .map(|c| c.name())
+            .collect();
+        assert_eq!(catalog.len(), exposed.len());
+        for name in &exposed {
+            assert!(
+                catalog.iter().any(|t| &t.name == name),
+                "{name} is exposed but missing from the catalog"
+            );
+        }
+        assert!(catalog.len() > 10, "the catalog looks empty: {catalog:?}");
 
         for t in &catalog {
             assert!(

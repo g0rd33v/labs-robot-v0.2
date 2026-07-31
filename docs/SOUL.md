@@ -13,16 +13,46 @@ have not invented a meaning — see §12.
 
 ---
 
-## 1. Soul is the renderer's policy
+## 1. What Soul is, and where its output lands
 
-The single most useful thing to say about Soul, now that the rest of the
-robot exists:
+**Soul is the robot's emotional intelligence.** It is one of the three
+things the robot is made of, and they divide cleanly:
+
+| | | |
+| --- | --- | --- |
+| **prism** | intent | what the robot *does* — decision, plan, grant, execute, verify, receipt |
+| **mind** | IQ | what the robot *knows* — facts, retrieval, the registry, provenance |
+| **soul** | EQ | how the robot *relates* — perception, relationship, expression, reflection |
+
+`hub` is the door every byte passes through, `trust` is the floor all three
+stand on, `surfaces` is the window.
+
+**The seam between mind and soul matters more than the one between either
+and prism.** They are both "things learned about a person", and they must
+not bleed:
+
+- A **fact** is what is true about them. It lives in `mind`, carries a
+  source pointer, is quotable back, and is theirs to correct or erase.
+- A **perception** is a guess about their state right now. It lives in
+  `soul`, expires with the turn, and is never quotable.
+- A **lesson** is how they like to be spoken to. It lives in `soul`, and
+  carries evidence — but it is about *manner*, not about *them*.
+
+"You seemed annoyed on Tuesday" must never become something the robot can
+recite in March. That is not a rule the code is asked to remember; it is
+why perceptions have no table.
+
+### Where Soul's output lands
+
+Now that the rest of the robot exists, there is a precise answer to where
+the expression half of Soul plugs in — and it is what makes §5's boundary
+structural rather than aspirational:
 
 > The kernel emits `Rendering { id, slots }` — structure, compiled from
 > evidence. The surface turns that into words. **Soul is the policy that
 > decides how.**
 
-That is not an analogy. It is where the code goes. And it makes the §5
+That is not an analogy — it is where the code goes. And it makes §5's
 boundary — *"Soul shapes interpretation and expression; it never overrides
 facts, permissions, policy, or verified outcomes"* — true **by
 construction** rather than by discipline:

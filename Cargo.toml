@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "soul",
     "robotd",
     "prism",
     "mind",
@@ -59,6 +60,10 @@ anyhow = "1"
 
 # internal crates
 trust = { path = "trust" }
+# Q40's soul crate, deferred through the MVP and un-deferred for S1: the
+# relationship model and the persona dial, kept out of robotd so the
+# composition crate does not become the place everything lives.
+soul = { path = "soul" }
 prism = { path = "prism" }
 mind = { path = "mind" }
 hub = { path = "hub" }

@@ -130,6 +130,7 @@ impl RobotCore {
         )?;
         prism::init_cell_schema(&conn)?;
         mind::init_cell_schema(&conn)?;
+        soul::init_cell_schema(&conn)?;
         Ok(prism::Cell::new(conn))
     }
 
@@ -182,6 +183,7 @@ impl RobotCore {
         )?;
         prism::init_cell_schema(&conn)?;
         mind::init_cell_schema(&conn)?;
+        soul::init_cell_schema(&conn)?;
         let vault = mind::vault::MediaVault::new(
             self.data_dir.join("media").join(&cell_id),
             trust::keys::derive_key(&dek, b"media"),
@@ -683,6 +685,7 @@ mod tests {
         let conn = trust::cells::open_encrypted(&path, &key).unwrap();
         prism::init_cell_schema(&conn).unwrap();
         mind::init_cell_schema(&conn).unwrap();
+        soul::init_cell_schema(&conn).unwrap();
         (Cell::new(conn), path)
     }
 

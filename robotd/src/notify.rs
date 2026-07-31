@@ -41,6 +41,7 @@ pub fn notify_owner(cfg: &RobotConfig, text: &str) -> anyhow::Result<()> {
     .context("opening the owner cell")?;
     prism::init_cell_schema(&conn)?;
     mind::init_cell_schema(&conn)?;
+    soul::init_cell_schema(&conn)?;
     let cell = prism::Cell::new(conn);
 
     // a journaled, receipted system intent -- not a bare row insert

@@ -225,6 +225,7 @@ fn temp_cell(name: &str) -> anyhow::Result<(prism::Cell, std::path::PathBuf)> {
     let conn = trust::cells::open_encrypted(&path, &key)?;
     prism::init_cell_schema(&conn)?;
     mind::init_cell_schema(&conn)?;
+    soul::init_cell_schema(&conn)?;
     Ok((prism::Cell::new(conn), path))
 }
 
