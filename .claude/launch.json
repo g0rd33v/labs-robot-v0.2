@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bender",
+      "runtimeExecutable": "./scripts/run-local.sh",
+      "runtimeArgs": [],
+      "port": 7777
+    }
+  ]
+}
