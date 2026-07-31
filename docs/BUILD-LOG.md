@@ -157,10 +157,29 @@ fallbacks.
 
 **Two imperfections, recorded rather than tidied away:**
 
-- The Turkish subject came back as `spor salonuna gitmemi hatırlat`, which
-  includes the verb "remind". It is verbatim from their words, so law 5
-  holds, but the subject is wider than it should be. A tighter `about`
-  description would fix it — one English sentence, every language.
+- ~~The Turkish subject came back as `spor salonuna gitmemi hatırlat`,
+  which includes the verb "remind".~~ **Fixed the same day.** Both `about`
+  and `content` now say what to leave out — the words asking for the
+  reminder, the words giving the time, the words asking you to remember —
+  with a worked English example. Live afterwards: `spor salonuna gitmemi`,
+  `позвонить маме`, `ストレッチする`. One English sentence per tool, every
+  language at once, which is the maintenance model working exactly as
+  claimed.
+
+  The eval gained the check that would have caught it. A content argument
+  must now be a **contiguous span of what they actually typed** — anything
+  translated, rephrased or tidied fails, in any language, with no expected
+  value written down. The old check only asked whether the argument
+  *contained* the subject, which an over-inclusive answer passes. A second,
+  non-gating report flags arguments wider than the subject.
+
+  Re-run after the fix: **60 cases, 0 misroutes, 0 arguments that were not
+  their words.** The 15 "wide" reports were my own corpus expectations
+  naming a noun where the subject is a clause — "remember that I drink
+  green tea" stores *I drink green tea*, not *green tea* — and those
+  expectations were corrected. One of the fifteen was real: Turkish
+  `memory.remember` had swept in *unutma* ("don't forget"), the same bug in
+  the other description.
 - "in 5 minutes" at 12:56 resolved to 13:00 rather than 13:01: the model
   rounds to the minute. Inside the horizon guard, and harmless for a
   reminder, but it is arithmetic done by a model and worth knowing.

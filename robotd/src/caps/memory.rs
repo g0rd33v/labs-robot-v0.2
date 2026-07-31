@@ -10,9 +10,13 @@ use serde::Deserialize;
 /// The sentence every content argument in this file carries. Stored
 /// knowledge must be what the person actually said: a translated fact makes
 /// provenance point at words they never wrote (law #5).
-const VERBATIM: &str = "Copied VERBATIM from the person's message, in their own \
-language. Never translate, correct, or paraphrase it -- this text is stored and \
-shown back to them as their own words.";
+const VERBATIM: &str = "The fact ITSELF, and nothing else. Take the run of words \
+from their message that states the thing to be remembered, and leave out the words \
+asking you to remember it: \"remember that I drink green tea\" gives \"I drink green \
+tea\", not \"remember that I drink green tea\" and not \"green tea\". Whatever you \
+take must be their OWN words, in their own language, unchanged: never translated, \
+never corrected, never tidied up. It is stored and shown back to them later as \
+their own words, with the message it came from beside it.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

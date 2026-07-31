@@ -99,6 +99,7 @@ fn eval_multilingual(
     let mut cases = 0;
     let mut misroutes: Vec<String> = vec![];
     let mut mangled: Vec<String> = vec![];
+    let mut wide: Vec<String> = vec![];
 
     for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
         let case: serde_json::Value = serde_json::from_str(line)?;
@@ -113,17 +114,46 @@ fn eval_multilingual(
             misroutes.push(format!("  MISROUTE [{lang}] {text:?} -> {got} (wanted {want})"));
             continue;
         }
-        // law 5 at the boundary: a content argument must be THEIR words
+        let args = routed.call.as_ref().map(|c| c.args.clone()).unwrap_or_default();
+
+        // Law 5 at the boundary, checked the strong way: a content argument
+        // must be a CONTIGUOUS SPAN of what they actually typed. Anything
+        // translated, rephrased or tidied up fails this, and no expected
+        // value has to be written down for it to work in any language.
+        //
+        // `query` is exempt: web.research asks for a good search query, not
+        // a quotation, so it is allowed to be reworded.
+        for key in ["about", "content"] {
+            if let Some(got) = args.get(key).and_then(|x| x.as_str()) {
+                if !text.contains(got.trim()) {
+                    mangled.push(format!(
+                        "  NOT THEIR WORDS [{lang}] {key}={got:?} is not a span of {text:?}"
+                    ));
+                }
+            }
+        }
+
+        // and where the corpus names the subject, the argument must carry it
         if let Some(v) = case["verbatim"].as_str() {
-            let args = routed.call.as_ref().map(|c| c.args.clone()).unwrap_or_default();
             let carried = ["about", "content", "query"]
                 .iter()
                 .filter_map(|k| args.get(*k).and_then(|x| x.as_str()))
                 .any(|got| got.contains(v));
             if !carried {
                 mangled.push(format!(
-                    "  TRANSLATED [{lang}] {text:?} lost {v:?} -- args were {args}"
+                    "  LOST [{lang}] {text:?} lost {v:?} -- args were {args}"
                 ));
+            } else if let Some(got) = ["about", "content"]
+                .iter()
+                .filter_map(|k| args.get(*k).and_then(|x| x.as_str()))
+                .next()
+            {
+                // over-inclusion: still their words, still law 5, but it
+                // swept in the request framing. Reported, not gated -- it is
+                // a quality signal, and the fix is one English sentence.
+                if got.trim() != v {
+                    wide.push(format!("  WIDE [{lang}] {got:?} for subject {v:?}"));
+                }
             }
         }
     }
@@ -141,11 +171,13 @@ fn eval_multilingual(
     let allowed = cases / 20; // 5%
     println!(
         "\n[multilingual] {cases} cases across 10 languages, {} misroutes \
-         (bar: <= {allowed}), {} translated arguments (bar: 0)",
+         (bar: <= {allowed}), {} arguments not their words (bar: 0), \
+         {} wider than the subject (reported)",
         misroutes.len(),
-        mangled.len()
+        mangled.len(),
+        wide.len()
     );
-    for m in misroutes.iter().chain(mangled.iter()) {
+    for m in misroutes.iter().chain(mangled.iter()).chain(wide.iter()) {
         println!("{m}");
     }
     Ok(if misroutes.len() <= allowed && mangled.is_empty() {

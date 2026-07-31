@@ -66,9 +66,19 @@ impl Capability for Create {
                 },
                 "about": {
                     "type": "string",
-                    "description": "What the reminder is about, copied VERBATIM from \
-                                    the person's message, in their own language. \
-                                    Never translate or paraphrase this."
+                    "description": "What to be reminded ABOUT -- the thing itself, \
+                                    and nothing else. Take the run of words from \
+                                    their message that names what they want to do \
+                                    or know. Leave out the words asking for a \
+                                    reminder and the words giving the time: \
+                                    \"remind me tomorrow at 8 to go to the gym\" \
+                                    gives \"go to the gym\" -- not \"remind me to go \
+                                    to the gym\", not \"tomorrow at 8 go to the \
+                                    gym\". Whatever you take must be their OWN \
+                                    words, in their own language, unchanged: never \
+                                    translated, never rephrased, never tidied up. \
+                                    They read this back later and it should sound \
+                                    like them."
                 }
             },
             "required": ["fire_at", "about"],
