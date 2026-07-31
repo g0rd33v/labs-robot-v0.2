@@ -5,7 +5,7 @@
 //! retry is the chain's business, then fall back).
 
 use crate::gateway::{ModelGateway, Msg, Role};
-use prism::types::Verdict;
+use prism::types::{Routing, ToolDef, Verdict};
 use prism::verdict::{FallbackVerdict, VerdictProvider};
 use std::sync::Arc;
 
@@ -124,6 +124,110 @@ impl VerdictProvider for GatewayVerdicts {
                 FallbackVerdict.verdict(text)
             }
         }
+    }
+
+    fn route(&self, text: &str, tools: &[ToolDef], now: &str) -> Routing {
+        match self.route_call(text, tools, now) {
+            Some(r) => r,
+            None => {
+                tracing::warn!("routing unparseable, deterministic fallback");
+                Routing {
+                    verdict: FallbackVerdict.verdict(text),
+                    call: None,
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- routing
+
+/// The routing prompt. Everything language-specific about this robot now
+/// lives in ONE English sentence per tool, written beside the code that
+/// runs -- and this prompt, which never names a language.
+fn routing_system(tools: &[ToolDef], now: &str) -> String {
+    let mut s = String::from(
+        "you are the router of a personal robot. you do two things at once.\n\n\
+         1. CLASSIFY the message into a verdict object.\n\
+         2. If one of the tools below does what the person is asking for, \
+         propose a call to it. If none fits, omit `call` entirely -- do not \
+         force a tool.\n\n\
+         rules that matter:\n\
+         - the person may write in ANY language. never translate their words \
+         when copying them into a tool argument. arguments described as \
+         verbatim must contain their own text, in their own language, \
+         unchanged.\n\
+         - `lang` in the verdict is the BCP 47 tag of the language they wrote \
+         in (e.g. en, ru, tr, ja, pt-BR).\n\
+         - resolve every relative time into an absolute RFC 3339 timestamp \
+         using the current time given below.\n\
+         - propose at most one call.\n\
+         - if you are unsure which tool is meant, omit `call` and let the \
+         robot ask. a wrong action is worse than a question.\n\
+         - output ONLY the JSON object.\n\n",
+    );
+    s.push_str(&format!("current local time: {now}\n\ntools:\n"));
+    for t in tools {
+        s.push_str(&format!(
+            "\n- {} ({:?})\n  {}\n  args: {}\n",
+            t.name,
+            t.effect,
+            t.description,
+            t.input_schema
+        ));
+    }
+    s
+}
+
+fn routing_schema(tools: &[ToolDef]) -> serde_json::Value {
+    let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": q16_schema(),
+            "call": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "enum": names},
+                    "args": {"type": "object"}
+                },
+                "required": ["tool", "args"]
+            }
+        },
+        "required": ["verdict"]
+    })
+}
+
+impl GatewayVerdicts {
+    /// One model call, returning the frozen verdict and an optional proposal.
+    ///
+    /// Any failure degrades to a verdict with no call: the robot loses the
+    /// action, never invents one.
+    fn route_call(&self, text: &str, tools: &[ToolDef], now: &str) -> Option<Routing> {
+        let messages = [
+            Msg {
+                role: "system",
+                content: routing_system(tools, now),
+            },
+            Msg {
+                role: "user",
+                content: text.into(),
+            },
+        ];
+        let out = self
+            .gateway
+            .chat(Role::Verdict, &messages, Some(routing_schema(tools)), 600)
+            .map_err(|e| tracing::warn!("routing call failed: {e}"))
+            .ok()?;
+        let v = salvage_json(&out.content)?;
+        // the verdict must parse; a proposal that does not is simply dropped,
+        // since a half-understood call is worse than none
+        let verdict: Verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
+        let call = v
+            .get("call")
+            .filter(|c| !c.is_null())
+            .and_then(|c| serde_json::from_value(c.clone()).ok());
+        Some(Routing { verdict, call })
     }
 }
 

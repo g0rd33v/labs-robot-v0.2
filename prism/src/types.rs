@@ -60,6 +60,26 @@ pub struct ToolCall {
     pub args: serde_json::Value,
 }
 
+/// A tool call that has been through the registry: the tool exists, the
+/// arguments typecheck, and `effect` is the registry's own classification
+/// rather than anything the proposer claimed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatedCall {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub effect: Effect,
+}
+
+/// What one routing call returns: the frozen Q16 verdict, plus an optional
+/// proposed tool call beside it. Q16 itself is untouched -- the envelope
+/// around it gained a sibling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Routing {
+    pub verdict: Verdict,
+    #[serde(default)]
+    pub call: Option<ToolCall>,
+}
+
 // ---------------------------------------------------------------- plan
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

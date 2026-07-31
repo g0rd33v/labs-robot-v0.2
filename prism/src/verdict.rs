@@ -6,10 +6,26 @@
 //! gateway call (gemma-4-26b-a4b) behind the same trait -- the lifecycle
 //! does not change.
 
-use crate::types::{Door, Mood, Tier, Verdict, VerdictAction, VerdictDomain};
+use crate::types::{
+    Door, Mood, Routing, Tier, ToolDef, Verdict, VerdictAction, VerdictDomain,
+};
 
 pub trait VerdictProvider: Send + Sync {
     fn verdict(&self, text: &str) -> Verdict;
+
+    /// Route a turn: classify it, and -- if one of the offered tools fits --
+    /// propose a call.
+    ///
+    /// The default proposes nothing, which is what an offline provider
+    /// honestly can do: no model, no routing beyond the English floor. A
+    /// provider that cannot reach a model must degrade to fewer
+    /// capabilities, never to guessed ones.
+    fn route(&self, text: &str, _tools: &[ToolDef], _now: &str) -> Routing {
+        Routing {
+            verdict: self.verdict(text),
+            call: None,
+        }
+    }
 }
 
 /// Deterministic fallback: no model, no network. Everything is a low-

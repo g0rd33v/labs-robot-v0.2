@@ -706,6 +706,130 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// A stand-in for the routing model: returns whatever proposal the test
+    /// wants, so the validation gate can be exercised without a network.
+    struct Proposes(Option<prism::types::ToolCall>);
+
+    impl VerdictProvider for Proposes {
+        fn verdict(&self, text: &str) -> prism::types::Verdict {
+            FallbackVerdict.verdict(text)
+        }
+        fn route(
+            &self,
+            text: &str,
+            _tools: &[prism::types::ToolDef],
+            _now: &str,
+        ) -> prism::types::Routing {
+            let mut v = FallbackVerdict.verdict(text);
+            v.lang = "ru".into();
+            prism::types::Routing {
+                verdict: v,
+                call: self.0.clone(),
+            }
+        }
+    }
+
+    fn call(tool: &str, args: serde_json::Value) -> Option<prism::types::ToolCall> {
+        Some(prism::types::ToolCall {
+            tool: tool.into(),
+            args,
+        })
+    }
+
+    /// The capability a language could not reach before: a Russian sentence
+    /// the English floor does not match now creates a real reminder, through
+    /// the same governed path, with the person's own words stored verbatim.
+    #[test]
+    fn a_validated_proposal_reaches_a_real_capability() {
+        let (cell, path) = file_cell("proposal_ok");
+        let router = Registry::offline();
+        let fire_at = (chrono::Local::now() + chrono::Duration::minutes(10)).to_rfc3339();
+        let verdicts = Proposes(call(
+            "reminder.create",
+            serde_json::json!({ "fire_at": fire_at, "about": "размяться" }),
+        ));
+        let deps = TurnDeps {
+            router: &router,
+            verdicts: &verdicts,
+            crash: None,
+        };
+        let out = prism::run_turn(
+            &cell,
+            &envelope(&cell, "мне бы размяться через десять минут"),
+            &deps,
+        )
+        .unwrap();
+
+        assert_eq!(out.receipt.status, prism::types::ReceiptStatus::Verified);
+        // the reminder is really there, and it is their words, not a translation
+        let all = cell
+            .with(|c| Ok(mind::reminders::list_active(c).unwrap()))
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].about, "размяться");
+
+        let kinds = cell
+            .with(|c| prism::journal::kinds_for_intent(c, &out.intent_id))
+            .unwrap();
+        assert!(kinds.iter().any(|k| k == "call.accepted"), "{kinds:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Everything a model can get wrong, and none of it reaches a capability.
+    /// Each case must still produce a terminal receipt -- refusing is a
+    /// normal turn, not an error.
+    #[test]
+    fn bad_proposals_are_refused_and_journaled() {
+        let (cell, path) = file_cell("proposal_bad");
+        let router = Registry::offline();
+        let past = (chrono::Local::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        for (why, proposed) in [
+            ("invented tool", call("memory.obliterate", serde_json::json!({}))),
+            ("hidden tool", call("answer.model", serde_json::json!({"query": "x"}))),
+            ("missing argument", call("memory.remember", serde_json::json!({}))),
+            ("wrong type", call("memory.forget", serde_json::json!({"index": "two"}))),
+            (
+                "stray field",
+                call("memory.remember", serde_json::json!({"content": "x", "note": 1})),
+            ),
+            (
+                "time in the past",
+                call("reminder.create", serde_json::json!({"fire_at": past, "about": "x"})),
+            ),
+            // sec 6b: an inference may not delete
+            ("irreversible on inference", call("memory.forget", serde_json::json!({"index": 1}))),
+        ] {
+            let verdicts = Proposes(proposed);
+            let deps = TurnDeps {
+                router: &router,
+                verdicts: &verdicts,
+                crash: None,
+            };
+            let out =
+                prism::run_turn(&cell, &envelope(&cell, "что-нибудь сделай"), &deps).unwrap();
+            assert!(out.receipt.status.is_terminal(), "{why}");
+            let kinds = cell
+                .with(|c| prism::journal::kinds_for_intent(c, &out.intent_id))
+                .unwrap();
+            assert!(
+                kinds.iter().any(|k| k == "call.rejected"),
+                "{why}: should have been refused, journal was {kinds:?}"
+            );
+            assert!(
+                !kinds.iter().any(|k| k == "call.accepted"),
+                "{why}: was accepted"
+            );
+        }
+
+        // nothing was created or destroyed by any of that
+        let all = cell
+            .with(|c| Ok(mind::reminders::list_active(c).unwrap()))
+            .unwrap();
+        assert!(all.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The whole point of the language architecture, end to end: the same
     /// governed turn, in two languages, answered in the language it was
     /// asked in -- with no model call anywhere (the router is offline).

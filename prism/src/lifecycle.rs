@@ -91,7 +91,14 @@ pub enum Decision {
         #[serde(default = "crate::types::default_lang")]
         lang: String,
     },
-    Verdict { v: Verdict },
+    Verdict {
+        v: Verdict,
+        /// Present when a model proposed a tool AND the registry accepted
+        /// it. A rejected proposal never reaches here -- it is journaled as
+        /// `call.rejected` and the turn continues without it.
+        #[serde(default)]
+        call: Option<ValidatedCall>,
+    },
 }
 
 fn crash_check(deps: &TurnDeps, point: &str) -> Result<(), PrismError> {
@@ -128,9 +135,19 @@ pub fn run_turn(
             m: hit.matched,
             lang: hit.lang,
         },
-        None => Decision::Verdict {
-            v: deps.verdicts.verdict(&env.content),
-        },
+        None => {
+            // one call: it classifies the turn AND, if a tool fits, proposes
+            // it. The catalog comes from the registry, so it cannot name a
+            // tool that does not exist.
+            let tools = deps.router.describe();
+            let now = Local::now().to_rfc3339();
+            let routed = deps.verdicts.route(&env.content, &tools, &now);
+            let call = validate_proposal(cell, &intent_id, deps, routed.call)?;
+            Decision::Verdict {
+                v: routed.verdict,
+                call,
+            }
+        }
     };
     let decision_json = serde_json::to_string(&decision)?;
     cell.with(|c| journal::step(c, &intent_id, "decision", &decision_json, None))?;
@@ -270,6 +287,49 @@ pub(crate) fn finish_planned_intent(
     })
 }
 
+/// Put a model's proposal through the registry before it can become a plan.
+///
+/// Every outcome is journaled, including refusal: an audit of this turn
+/// shows what was proposed and why it was or was not allowed. The model is
+/// an input device, never an authority.
+fn validate_proposal(
+    cell: &Cell,
+    intent_id: &str,
+    deps: &TurnDeps,
+    proposed: Option<ToolCall>,
+) -> Result<Option<ValidatedCall>, PrismError> {
+    let Some(c) = proposed else { return Ok(None) };
+    match deps.router.validate(&c.tool, &c.args) {
+        Ok(effect) => {
+            // sec 6b: an explicit instruction may delete; an inference may
+            // not. Until the confirmation flow lands, a model-proposed
+            // irreversible action is refused rather than performed.
+            if effect == Effect::Irreversible {
+                let why = serde_json::json!({
+                    "tool": c.tool,
+                    "reason": "irreversible effects are not performed on a model's \
+                               proposal; they need an explicit instruction",
+                })
+                .to_string();
+                cell.with(|conn| journal::step(conn, intent_id, "call.rejected", &why, None))?;
+                return Ok(None);
+            }
+            let ok = serde_json::json!({ "tool": c.tool, "effect": effect }).to_string();
+            cell.with(|conn| journal::step(conn, intent_id, "call.accepted", &ok, None))?;
+            Ok(Some(ValidatedCall {
+                tool: c.tool,
+                args: c.args,
+                effect,
+            }))
+        }
+        Err(why) => {
+            let rejected = serde_json::json!({ "tool": c.tool, "reason": why }).to_string();
+            cell.with(|conn| journal::step(conn, intent_id, "call.rejected", &rejected, None))?;
+            Ok(None)
+        }
+    }
+}
+
 pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: &str) -> Plan {
     let step = |capability: &str, args: serde_json::Value, effect: Effect| PlanStep {
         step_id: ids::new_id("pstep"),
@@ -340,7 +400,10 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
                 Effect::Read,
             )],
         },
-        Decision::Verdict { v } => {
+        Decision::Verdict {
+            call: Some(c), ..
+        } => vec![step(&c.tool, c.args.clone(), c.effect)],
+        Decision::Verdict { v, call: None } => {
             // the verdict routes; capabilities execute. chitchat with a
             // ready one-liner answers directly (Q16's reply field); search
             // or a web door goes through research; everything else is a
@@ -372,7 +435,7 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
     // the model still answers in the person's own language.
     let lang = match decision {
         Decision::Floor { lang, .. } => lang.clone(),
-        Decision::Verdict { v } => v.lang.clone(),
+        Decision::Verdict { v, .. } => v.lang.clone(),
     };
     let lang = match lexicon::pack(&lang) {
         Some(p) => p.code.clone(),
