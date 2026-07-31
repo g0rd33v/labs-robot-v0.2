@@ -340,9 +340,10 @@ impl Outcome {
 
 // ---------------------------------------------------------------- verdict (Q16, frozen)
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VerdictAction {
+    #[default]
     Answer,
     Task,
     Search,
@@ -351,37 +352,40 @@ pub enum VerdictAction {
     Chitchat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VerdictDomain {
+    #[default]
+    None,
     Reminder,
     Note,
     Fact,
     Calendar,
     Email,
     File,
-    None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Door {
     Exact,
     Vector,
     Web,
     Blended,
+    #[default]
     Followup,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
+    #[default]
     Fast,
     Super,
     Ultra,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Mood {
     /// -1..1
     pub valence: f32,
@@ -390,14 +394,27 @@ pub struct Mood {
 }
 
 /// The one verdict call's schema (decisions Q16, frozen for M3/M4).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Serialization is exactly the frozen shape. DEserialization is tolerant,
+/// which is arch sec 6a's instruction in the small: a response that arrives
+/// truncated -- a model padding its output and hitting the ceiling -- used
+/// to fail the whole parse and discard a perfectly good tool call along
+/// with it. A missing `tier` should cost us the tier, not the turn.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Verdict {
+    #[serde(default)]
     pub action: VerdictAction,
+    #[serde(default)]
     pub domain: VerdictDomain,
+    #[serde(default)]
     pub door: Door,
+    #[serde(default)]
     pub tier: Tier,
+    #[serde(default = "default_lang")]
     pub lang: String,
+    #[serde(default)]
     pub mood: Mood,
+    #[serde(default)]
     pub confidence: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,

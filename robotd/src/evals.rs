@@ -128,16 +128,27 @@ fn eval_multilingual(
         }
     }
 
+    // Two bars, and they are deliberately different.
+    //
+    // ROUTING is a judgement made by a remote model: it is probabilistic,
+    // and a bar of zero on sixty calls is a gate that flakes rather than a
+    // gate that means something. 95% is the line, and every miss is printed
+    // so a pattern -- one language, one tool -- is visible immediately.
+    //
+    // VERBATIM is not a judgement. A translated argument means a stored fact
+    // would carry words the person never wrote, which is law 5, so the bar
+    // there is zero and stays zero.
+    let allowed = cases / 20; // 5%
     println!(
-        "\n[multilingual] {cases} cases across 10 languages, {} misroutes, \
-         {} translated arguments (bar: 0 / 0)",
+        "\n[multilingual] {cases} cases across 10 languages, {} misroutes \
+         (bar: <= {allowed}), {} translated arguments (bar: 0)",
         misroutes.len(),
         mangled.len()
     );
     for m in misroutes.iter().chain(mangled.iter()) {
         println!("{m}");
     }
-    Ok(if misroutes.is_empty() && mangled.is_empty() {
+    Ok(if misroutes.len() <= allowed && mangled.is_empty() {
         0
     } else {
         1

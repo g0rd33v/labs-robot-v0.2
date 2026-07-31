@@ -40,7 +40,22 @@ fn q16_schema() -> serde_json::Value {
     })
 }
 
-/// Strip code fences and salvage the largest balanced JSON object.
+/// Strip code fences and recover a JSON object from a model's output.
+///
+/// Three things go wrong in practice, and this handles all three:
+///
+/// 1. **Fences and prose** around the object.
+/// 2. **Truncation.** A model that hits its token ceiling stops mid-object,
+///    sometimes after padding the tail with whitespace. The object is
+///    complete enough to use -- it just never closed.
+/// 3. **The subtle one.** Picking the largest *balanced* object out of a
+///    truncated response returns an inner fragment: an unterminated
+///    `{"call": {...}, "verdict": {...` yields the `call` object alone,
+///    which parses fine and is missing everything else. That looked exactly
+///    like a model refusing to route, and cost a whole live eval run before
+///    the raw output was actually read.
+///
+/// So: always take the OUTERMOST object, and repair it if it did not close.
 pub fn salvage_json(text: &str) -> Option<serde_json::Value> {
     let cleaned = text
         .trim()
@@ -48,45 +63,100 @@ pub fn salvage_json(text: &str) -> Option<serde_json::Value> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    if let Ok(v) = serde_json::from_str(cleaned) {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(cleaned) {
         return Some(v);
     }
-    // largest balanced {...}
-    let bytes = cleaned.as_bytes();
-    let mut best: Option<&str> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            let mut depth = 0usize;
-            let mut in_str = false;
-            let mut esc = false;
-            for (j, &b) in bytes.iter().enumerate().skip(i) {
-                if esc {
-                    esc = false;
-                    continue;
-                }
-                match b {
-                    b'\\' if in_str => esc = true,
-                    b'"' => in_str = !in_str,
-                    b'{' if !in_str => depth += 1,
-                    b'}' if !in_str => {
-                        depth -= 1;
-                        if depth == 0 {
-                            let cand = &cleaned[i..=j];
-                            if best.map(|b| cand.len() > b.len()).unwrap_or(true) {
-                                best = Some(cand);
-                            }
-                            i = j;
-                            break;
-                        }
+    let start = cleaned.find('{')?;
+    repair_object(&cleaned[start..])
+}
+
+/// Close an object that was cut off, discarding whatever partial value was
+/// being written when the output stopped.
+///
+/// It has to know whether the last string it saw was a KEY or a VALUE: a
+/// truncated `..., "lang"` must lose that key, while a truncated
+/// `..., "lang": "ru"` must keep the pair. Guessing from punctuation alone
+/// gets this backwards, so the position is tracked as it goes.
+fn repair_object(src: &str) -> Option<serde_json::Value> {
+    #[derive(PartialEq)]
+    enum In {
+        Object,
+        Array,
+    }
+    let bytes = src.as_bytes();
+    let mut stack: Vec<In> = vec![];
+    let mut want_key = false;
+    let mut in_str = false;
+    let mut esc = false;
+    // the last index at which the document was structurally sound: a
+    // completed value, with nothing half-written after it
+    let mut safe: Option<usize> = None;
+    let mut last_solid: Option<usize> = None;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        if in_str {
+            match b {
+                b'\\' => esc = true,
+                b'"' => {
+                    in_str = false;
+                    // a key is not a place we can stop; a value is
+                    if !want_key {
+                        safe = Some(i);
                     }
-                    _ => {}
+                    last_solid = Some(i);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => {
+                stack.push(In::Object);
+                want_key = true;
+            }
+            b'[' => {
+                stack.push(In::Array);
+                want_key = false;
+            }
+            b'}' | b']' => {
+                stack.pop()?;
+                safe = Some(i);
+                last_solid = Some(i);
+                want_key = stack.last().map(|c| *c == In::Object).unwrap_or(false);
+                if stack.is_empty() {
+                    // a complete outermost object: use exactly that
+                    return serde_json::from_str(&src[..=i]).ok();
                 }
             }
+            b':' => want_key = false,
+            b',' => {
+                // whatever preceded the comma was a finished value, even a
+                // bare number or literal that set no other marker
+                safe = last_solid.or(safe);
+                want_key = stack.last().map(|c| *c == In::Object).unwrap_or(false);
+            }
+            b' ' | b'\n' | b'\r' | b'\t' => {}
+            _ => last_solid = Some(i),
         }
-        i += 1;
     }
-    best.and_then(|s| serde_json::from_str(s).ok())
+
+    // truncated: cut back to the last sound point, drop a dangling
+    // separator, and close every container still open
+    let end = safe?;
+    let mut out = src[..=end].trim_end().to_string();
+    while out.ends_with(',') || out.ends_with(':') {
+        out.pop();
+        out = out.trim_end().to_string();
+    }
+    for c in stack.iter().rev() {
+        out.push(if *c == In::Object { '}' } else { ']' });
+    }
+    serde_json::from_str(&out).ok()
 }
 
 /// As `salvage_json`, for a JSON array -- the rendering call returns a list
@@ -161,60 +231,105 @@ impl VerdictProvider for GatewayVerdicts {
 
 // ---------------------------------------------------------------- routing
 
-/// The routing prompt. Everything language-specific about this robot now
-/// lives in ONE English sentence per tool, written beside the code that
-/// runs -- and this prompt, which never names a language.
-fn routing_system(tools: &[ToolDef], now: &str) -> String {
-    let mut s = String::from(
-        "you are the router of a personal robot. you do two things at once.\n\n\
-         1. CLASSIFY the message into a verdict object.\n\
-         2. If one of the tools below does what the person is asking for, \
-         propose a call to it. If none fits, omit `call` entirely -- do not \
-         force a tool.\n\n\
-         rules that matter:\n\
-         - the person may write in ANY language. never translate their words \
-         when copying them into a tool argument. arguments described as \
-         verbatim must contain their own text, in their own language, \
-         unchanged.\n\
-         - `lang` in the verdict is the BCP 47 tag of the language they wrote \
-         in (e.g. en, ru, tr, ja, pt-BR).\n\
-         - resolve every relative time into an absolute RFC 3339 timestamp \
-         using the current time given below.\n\
-         - propose at most one call.\n\
-         - if you are unsure which tool is meant, omit `call` and let the \
-         robot ask. a wrong action is worse than a question.\n\
-         - output ONLY the JSON object.\n\n",
-    );
-    s.push_str(&format!("current local time: {now}\n\ntools:\n"));
-    for t in tools {
-        s.push_str(&format!(
-            "\n- {} ({:?})\n  {}\n  args: {}\n",
-            t.name,
-            t.effect,
-            t.description,
-            t.input_schema
-        ));
+/// One tool, rendered compactly for the prompt.
+///
+/// The full JSON Schema goes in the response format, not in the prompt --
+/// pasting fourteen schemas made the prompt an order of magnitude larger
+/// than the answer, which is how the first live run timed out on every
+/// case. Name, purpose, and what each argument is: that is what routing
+/// needs.
+fn tool_line(t: &ToolDef) -> String {
+    let mut args = vec![];
+    if let Some(props) = t.input_schema.get("properties").and_then(|p| p.as_object()) {
+        for (name, spec) in props {
+            let ty = spec.get("type").and_then(|x| x.as_str()).unwrap_or("string");
+            let doc = spec
+                .get("description")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            args.push(format!("{name} ({ty}) -- {doc}"));
+        }
     }
-    s
+    let args = if args.is_empty() {
+        "none".to_string()
+    } else {
+        format!("\n    {}", args.join("\n    "))
+    };
+    format!("- {}\n  {}\n  args: {}", t.name, t.description, args)
 }
 
-fn routing_schema(tools: &[ToolDef]) -> serde_json::Value {
-    let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": q16_schema(),
-            "call": {
-                "type": "object",
-                "properties": {
-                    "tool": {"type": "string", "enum": names},
-                    "args": {"type": "object"}
-                },
-                "required": ["tool", "args"]
-            }
-        },
-        "required": ["verdict"]
-    })
+/// The routing prompt.
+///
+/// Everything language-specific about this robot now lives in ONE English
+/// sentence per tool, written beside the code that runs -- and in this
+/// prompt, which never names a language.
+fn routing_system(tools: &[ToolDef], now: &str) -> String {
+    let catalog: Vec<String> = tools.iter().map(tool_line).collect();
+    format!(
+        "you are the router of a personal robot. do BOTH of these, always.\n\n\
+         1. CLASSIFY the message into `verdict`.\n\
+         2. CHOOSE the one tool that does what the person is asking for and \
+         fill `call`. if genuinely nothing in the list does it -- small talk, \
+         a general knowledge question, anything the robot has no tool for -- \
+         answer with tool \"none\". `call` is never omitted: \"none\" is a \
+         decision and you must make it.\n\n\
+         rules that matter:\n\
+         - the person may write in ANY language. that changes nothing about \
+         which tool fits. route on MEANING.\n\
+         - never translate their words into a tool argument. arguments \
+         described as verbatim must carry their own text, in their own \
+         language, unchanged.\n\
+         - `lang` is the BCP 47 tag of the language they wrote in (en, ru, \
+         tr, ja, zh, pt-BR...).\n\
+         - resolve every relative time into an absolute RFC 3339 timestamp \
+         from the current time below.\n\
+         - one call at most.\n\n\
+         {}\n\n\
+         current local time: {now}\n\n\
+         tools:\n\n{}",
+        output_shape(tools),
+        catalog.join("\n\n")
+    )
+}
+
+/// The sentinel meaning "no tool fits". A plain string rather than null:
+/// "decide explicitly" was the property we wanted, and a nullable union is
+/// the shape most likely to confuse a decoder.
+pub const NO_TOOL: &str = "none";
+
+/// The exact output shape, stated in the prompt rather than enforced as a
+/// response schema.
+///
+/// A tool call's `args` is a different shape per tool, so it can only be a
+/// free-form object -- and a constrained decoder asked to satisfy that pads
+/// its output with whitespace until the token ceiling. That arrives as a
+/// truncated response, or as a timeout, and looks exactly like a model
+/// that will not route. It cost two full eval runs to see, because the
+/// symptom is indistinguishable from refusal until you read the raw bytes.
+///
+/// So routing asks in words and verifies afterwards. Nothing is lost: the
+/// response goes through salvage, repair, and registry validation before it
+/// can do anything, and those were always the layers that mattered.
+fn output_shape(tools: &[ToolDef]) -> String {
+    let names: Vec<String> = tools
+        .iter()
+        .map(|t| format!("\"{}\"", t.name))
+        .chain(std::iter::once(format!("\"{NO_TOOL}\"")))
+        .collect();
+    format!(
+        "output EXACTLY this shape, and nothing else -- no prose, no fences, \
+         no trailing padding:\n\
+         {{\"verdict\": {{\"action\": \"answer|task|search|meta|clarify|chitchat\", \
+         \"domain\": \"reminder|note|fact|calendar|email|file|none\", \
+         \"door\": \"exact|vector|web|blended|followup\", \
+         \"tier\": \"fast|super|ultra\", \"lang\": \"<BCP 47>\", \
+         \"mood\": {{\"valence\": 0.0, \"urgency\": 0.0}}, \"confidence\": 0.0}}, \
+         \"call\": {{\"tool\": <one of {}>, \"args\": {{...}}}}}}",
+        names.join(" | ")
+    )
 }
 
 impl GatewayVerdicts {
@@ -235,17 +350,33 @@ impl GatewayVerdicts {
         ];
         let out = self
             .gateway
-            .chat(Role::Verdict, &messages, Some(routing_schema(tools)), 600)
+            .chat(Role::Route, &messages, None, 400)
             .map_err(|e| tracing::warn!("routing call failed: {e}"))
             .ok()?;
+        if std::env::var("BENDER_ROUTE_DEBUG").is_ok() {
+            eprintln!("--- routing raw ---\n{}\n---", out.content);
+        }
         let v = salvage_json(&out.content)?;
         // the verdict must parse; a proposal that does not is simply dropped,
         // since a half-understood call is worse than none
-        let verdict: Verdict = serde_json::from_value(v.get("verdict")?.clone()).ok()?;
-        let call = v
+        let verdict: Verdict = match v.get("verdict") {
+            Some(raw) => match serde_json::from_value(raw.clone()) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!("routing verdict unparseable: {e}");
+                    return None;
+                }
+            },
+            None => {
+                tracing::warn!("routing response had no verdict object");
+                return None;
+            }
+        };
+        let call: Option<prism::types::ToolCall> = v
             .get("call")
             .filter(|c| !c.is_null())
-            .and_then(|c| serde_json::from_value(c.clone()).ok());
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .filter(|c: &prism::types::ToolCall| c.tool != NO_TOOL);
         Some(Routing { verdict, call })
     }
 }
@@ -253,6 +384,27 @@ impl GatewayVerdicts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug that cost a live eval run: a truncated response must not
+    /// silently degrade into one of its own sub-objects.
+    #[test]
+    fn a_truncated_response_is_repaired_not_misread() {
+        // exactly the shape the router produced: complete call, verdict cut
+        // off by the token ceiling, then whitespace padding
+        let truncated = "{\n \"call\": {\"tool\": \"reminder.create\", \
+                         \"args\": {\"about\": \"stretch\"}},\n \
+                         \"verdict\": {\"action\": \"task\", \"lang\": \"ru\"\n\n\n   ";
+        let v = salvage_json(truncated).expect("should be repaired");
+        assert_eq!(v["call"]["tool"], "reminder.create", "the call survived");
+        assert_eq!(v["verdict"]["lang"], "ru", "and so did the verdict");
+
+        // a dangling key with no value is dropped, not invented
+        let dangling = "{\"a\": 1, \"b\": {\"c\": 2}, \"d\"";
+        let v = salvage_json(dangling).expect("should be repaired");
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"]["c"], 2);
+        assert!(v.get("d").is_none());
+    }
 
     #[test]
     fn salvage_handles_fences_and_prose() {

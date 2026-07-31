@@ -17,6 +17,11 @@ pub type BoundarySink = Arc<Mutex<Connection>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Verdict,
+    /// Routing: classify AND choose a tool. A different class of call from
+    /// the bare verdict -- a prompt carrying the whole catalog, and an
+    /// answer that has to pick correctly -- so it gets its own seat and its
+    /// own budget rather than borrowing the doorman's three seconds.
+    Route,
     Answer,
     Extract,
     Super,
@@ -29,6 +34,7 @@ impl Role {
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::Verdict => "verdict",
+            Role::Route => "route",
             Role::Answer => "answer",
             Role::Extract => "extract",
             Role::Super => "super",
@@ -44,6 +50,7 @@ impl Role {
 #[serde(default)]
 pub struct Cast {
     pub verdict: String,
+    pub route: String,
     pub answer: String,
     pub extract: String,
     #[serde(rename = "super")]
@@ -57,6 +64,7 @@ impl Default for Cast {
     fn default() -> Self {
         Self {
             verdict: "google/gemma-4-26b-a4b-it".into(),
+            route: "google/gemma-4-31b-it".into(),
             answer: "google/gemma-4-31b-it".into(),
             extract: "google/gemma-4-31b-it".into(),
             super_: "nvidia/nemotron-3-super-120b-a12b".into(),
@@ -71,6 +79,7 @@ impl Cast {
     pub fn model_for(&self, role: Role) -> &str {
         match role {
             Role::Verdict => &self.verdict,
+            Role::Route => &self.route,
             Role::Answer => &self.answer,
             Role::Extract => &self.extract,
             Role::Super => &self.super_,
@@ -84,6 +93,7 @@ impl Cast {
     fn chain(&self, role: Role) -> Vec<String> {
         match role {
             Role::Verdict => vec![self.verdict.clone(), self.answer.clone()],
+            Role::Route => vec![self.route.clone(), self.answer.clone()],
             Role::Answer => vec![self.answer.clone(), self.super_.clone()],
             Role::Extract => vec![self.extract.clone(), self.answer.clone()],
             Role::Super => vec![self.super_.clone(), self.answer.clone()],
@@ -100,6 +110,11 @@ pub struct GatewayConfig {
     /// verdict class: first attempt ceiling, then one retry ceiling (sec 6a)
     pub verdict_timeout_ms: u64,
     pub verdict_retry_timeout_ms: u64,
+    /// routing class: the catalog makes the prompt an order of magnitude
+    /// bigger than a bare verdict, and a three-second ceiling sized for the
+    /// latter simply times the former out -- which looks exactly like a
+    /// model that cannot route
+    pub route_timeout_ms: u64,
     pub answer_timeout_ms: u64,
     /// hedge deadline for the verdict class (Q19)
     pub hedge_after_ms: u64,
@@ -111,6 +126,7 @@ impl Default for GatewayConfig {
             base_url: "https://openrouter.ai/api/v1".into(),
             verdict_timeout_ms: 3000,
             verdict_retry_timeout_ms: 5000,
+            route_timeout_ms: 30_000,
             answer_timeout_ms: 45_000,
             hedge_after_ms: 2500,
         }
@@ -354,9 +370,18 @@ impl ModelGateway {
             "temperature": temperature,
         });
         if let Some(s) = schema {
+            // Strict constrained decoding cannot express a tool call's `args`,
+            // which is a different shape per tool and so has to stay a
+            // free-form object. Asked to satisfy it strictly, providers pad
+            // the output with whitespace until the token ceiling -- which
+            // arrives as a truncated response, or as a timeout, and looks
+            // exactly like a model that cannot route. Routing therefore sends
+            // the schema as guidance and relies on the layers that were going
+            // to check it anyway: salvage, repair, and registry validation.
+            let strict = role != Role::Route;
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
-                "json_schema": { "name": "verdict", "strict": true, "schema": s }
+                "json_schema": { "name": "verdict", "strict": strict, "schema": s }
             });
         }
 
@@ -366,9 +391,10 @@ impl ModelGateway {
             let timeout = match (role, i) {
                 (Role::Verdict, 0) => self.cfg.verdict_timeout_ms,
                 (Role::Verdict, _) => self.cfg.verdict_retry_timeout_ms,
+                (Role::Route, _) => self.cfg.route_timeout_ms,
                 _ => self.cfg.answer_timeout_ms,
             };
-            let result = if role == Role::Verdict && i == 0 {
+            let result = if matches!(role, Role::Verdict | Role::Route) && i == 0 {
                 self.hedged_attempt(model, role, &body, timeout)
             } else {
                 self.attempt(model, role, &body, timeout)

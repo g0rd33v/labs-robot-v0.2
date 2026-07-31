@@ -5,6 +5,137 @@ dependencies introduced. Newest first.
 
 ---
 
+## The tool-calling language boundary (2026-07-31)
+
+Replaces the language packs shipped this morning. Plan and rationale:
+`docs/PLAN-tool-calling-boundary.md`. Owner approved all three assumptions.
+
+### What changed
+
+**The kernel speaks data, not prose.** Everything entering it is a
+validated structure — an action from a fixed list plus typed arguments.
+Everything leaving it is a structure too: an event, its data, a receipt.
+Sentences, in any language including English, are produced at the surface,
+at the last moment before delivery.
+
+**The capability registry is the tool catalog.** `Capability` gained
+`description()`, `schema()`, `validate()` and `exposed()`; fourteen tools
+are generated from them. One English sentence per capability is what lets a
+model map any phrasing in any language onto the right tool. **The count of
+supported languages appears nowhere in the code.** Adding a capability makes
+it reachable in every language on the same commit; there is no second list.
+
+**Two argument classes, and the split carries law 5.** Structural
+(`fire_at`, `index`) are typed and language-free. Content (`about`,
+`content`, `query`) hold the person's own words, verbatim — a translated
+fact would make provenance point at words they never wrote. What was a
+convention is now a schema description and a live test.
+
+**The English floor stays**, unchanged, winning unconditionally (Q17). It
+is not a language feature; it is the fast path for the kernel's own
+language and the only path that works with no network. 1.5 ms, free.
+
+### The receipts law without a phrase list
+
+The old defence scanned replies for wordings like "i saved it", per
+language — so an unlisted language was an unchecked one. Now the **action
+record** is compiled from the receipt and shown beside the reply: reads
+vouch for nothing, effects name the tool that ran. A model can say
+anything; if nothing happened, no record appears, in every language at
+once. `effect_claims` is deleted.
+
+### Two safety rules
+
+**§6a — untrusted content never meets a tool catalog.** Tool calling turns
+prompt injection from "the model says something wrong" into "the model
+*does* something wrong". The routing call sees the person's message and
+nothing else; research and answer see everything and are offered nothing.
+Guarded by a source scan, plus three live cases that try to induce a call.
+
+**§6b — an inference asks before it destroys.** "forget fact 2" on the
+English floor is an instruction and still runs immediately. A model reading
+a sentence and concluding deletion was meant is an inference, and inference
+is not consent. Irreversible proposals are parked in a durable row; the
+answering tool exists in the catalog only while a question is open; the
+confirmation is spent before the call is planned, so a replay cannot delete
+twice; the parked call is re-validated on release; questions go stale after
+ten minutes.
+
+### The live gate, and what it cost to get there
+
+The first live run reported 52 of 60 multilingual cases as misroutes, every
+one of them `-> none`. **The model had been routing correctly the whole
+time.** Reading the raw bytes showed `reminder.create` with
+`about: "размяться"` — the person's own word, unchanged — and a correct RFC
+3339 timestamp. Three bugs of mine were throwing it away:
+
+1. **`salvage_json` took the largest *balanced* object.** On a truncated
+   response that is an inner fragment: `{"call": {...}, "verdict": {...`
+   yields the `call` object alone, which parses cleanly and is missing
+   everything else. It now takes the outermost object and repairs it if it
+   never closed, tracking key-vs-value position so a dangling `"lang"` is
+   dropped while `"lang": "ru"` is kept.
+2. **Strict constrained decoding cannot express a tool call's `args`** —
+   a different shape per tool, so necessarily a free-form object. Asked to
+   satisfy that strictly, the provider padded its output with whitespace to
+   the token ceiling, arriving as truncation or as a timeout. Routing now
+   states its output shape in words and verifies afterwards; salvage,
+   repair and registry validation were always the layers that mattered.
+3. **A strict `Verdict` parse discarded a good call** because truncation
+   ate `tier`. Deserialization is tolerant now — §6a's instruction in the
+   small. Serialization is still exactly the frozen Q16 shape.
+
+Plus two sizing errors: routing was borrowing the doorman's 3-second
+ceiling, sized for a one-line classification rather than a prompt carrying
+the catalog; and its retry seat was a slower 120B model, so a timeout
+retried into a second timeout. Routing now has its own seat (`Role::Route`),
+its own budget, a same-capability fallback, and Q19 hedging — which is what
+the last remaining failures actually were.
+
+Progress across four runs on the same corpus: **8 → 50 → 58 → 59 of 60**,
+with zero translated arguments at every single stage.
+
+### Gate (demonstrated)
+
+- `cargo test --workspace` — **111 passed, 0 failed**
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- `robotd eval --live` — **RESULT: PASS**
+  - routing (English floor): 66 cases, 0 misroutes
+  - **multilingual: 60 cases across 10 languages, 1 misroute, 0 translated
+    arguments, 0 timeouts**
+  - receipts kill-suite: 12/12
+  - injection: 23 cases × 3 trials = 69 calls, 0 leaks (including three
+    tool-induction cases)
+  - floor latency: p50 1.5 ms, p95 1.7 ms
+
+**Two bars, deliberately different.** Routing is a remote model's
+judgement: probabilistic, so the bar is ≤5% with every miss printed, since
+a bar of zero over sixty model calls is a gate that flakes rather than one
+that means something. Verbatim is not a judgement — a translated argument
+is law 5 — so that bar is zero and stays zero.
+
+**Assumptions** (owner-approved, §9 of the plan):
+- The Q16 envelope gained a sibling `call` field. The verdict object itself
+  is untouched and still validates against the frozen schema.
+- Non-English has no offline path. With no network, English works fully and
+  other languages do not work at all.
+- Model-proposed irreversible actions ask first; the English floor still
+  deletes immediately on an explicit instruction.
+
+**Deviations from the plan**, both deliberate: phases 3 and 5 shipped
+together (writing pack-shaped code for one commit and deleting it the next
+would have been churn), and the renderer lives in `robotd/src/render.rs`
+rather than `surfaces/` (robotd is the composition crate and already holds
+the gateway the non-English path needs).
+
+**Deleted:** both `.toml` packs, `lexicon.rs`, the table-driven floor, the
+effect-claim lists, the escalation phrase lists, `format_fire_at`, and the
+pack-maintenance tests. About a thousand lines out, a few hundred in.
+
+**No new dependencies.**
+
+---
+
 ## Language packs — one universal solution (2026-07-31)
 
 The owner's requirement: **everything is operated in English inside; other

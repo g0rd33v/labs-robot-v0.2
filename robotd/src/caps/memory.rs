@@ -65,8 +65,12 @@ impl Capability for Remember {
     fn description(&self) -> &'static str {
         "Store a durable fact the person has told you about themselves, their \
          preferences, their people, or their circumstances -- something worth \
-         recalling weeks from now. Use when they say to remember something, or \
-         state a lasting fact about themselves. Do not use for passing chatter."
+         recalling weeks from now. Use when they ask you to remember or not \
+         forget something, and ALSO whenever they simply state a standing fact \
+         about themselves: habits, tastes, diet, allergies, family, work, where \
+         they live. \"I drink green tea\", \"I don't eat meat\", \"my sister is \
+         called Ana\" are all exactly this. Do not use for passing chatter or \
+         for anything about the present moment."
     }
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({
