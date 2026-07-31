@@ -7,6 +7,8 @@ USB stick unchanged. These rules are binding for every change.
 
 - `docs/labs-robot-v0_2-bender-architecture.md` (rev-Y — source of truth)
 - `docs/labs-robot-v0_2-bender-decisions.md` (Q1–Q43 — decided; do not reopen)
+- `docs/SOUL.md` (Soul's design and build plan — proposed, not yet accepted;
+  replaces a "SOUL-MASTER" document §5 named and nobody ever wrote)
 
 Where the docs conflict with convenience, the docs win. Do not redesign;
 implement. If a task genuinely requires deviating, stop and raise it with

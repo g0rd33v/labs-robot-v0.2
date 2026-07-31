@@ -74,7 +74,7 @@ One call, structured output, salvage fallback (arch §6a).
 
 ## Soul
 
-**Q25 🟡 Soul storage.** In each member cell: `soul_persona` (dial + bounds), `soul_lessons` (source-linked), `soul_revisions` (diff + reason + rollback ref), `soul_journal` (first-person entries). Instance-level defaults in core. This *is* the SOUL-MASTER interface: that doc defines semantics; these four tables are its runtime home.
+**Q25 🟡 Soul storage.** In each member cell: `soul_persona` (dial + bounds), `soul_lessons` (source-linked), `soul_revisions` (diff + reason + rollback ref), `soul_journal` (first-person entries). Instance-level defaults in core. This *is* the Soul design's interface: `docs/SOUL.md` defines semantics; these four tables are its runtime home. *(Amended 2026-07-31: previously named SOUL-MASTER, a document that was never written.)*
 
 **Q26 🟡 Evaluator seat.** `gemma-4-26b-a4b` (≠ the 31b generator) for sampled expression-verify (10% of routine turns) and **always** on actioned/risky turns; deterministic claim-vs-receipt check runs on **every** turn (it's string/set logic, ~0 ms). Latency: verify runs post-stream for routine turns (audit), pre-send only for actioned turns.
 
