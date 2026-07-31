@@ -96,6 +96,58 @@ Both registries then held both facts. A fact deleted on the main machine
 was gone from the stick at the next sweep (`pulled 8 rows (1 deletions)`)
 and **stayed gone** across three further syncs in both directions.
 
+### Live, in the browser: both features at once
+
+Two tabs — the machine on 7777, the stick on 7788 — and nothing typed at a
+terminal between them.
+
+Taught the **machine**, in Turkish:
+
+```
+kahveyi sütsüz içtiğimi unutma
+→ hatırlatıldı: kahveyi sütsüz içtiğimi
+  ― ✓ memory.remember
+```
+
+It kept `kahveyi sütsüz içtiğimi` and dropped *unutma* ("don't forget"),
+which is this morning's description fix holding up under a sentence nobody
+wrote a test for.
+
+Then nothing was touched. A minute later the **stick's** lane fired on its
+own — `pulled 3 rows … 2 cells` — and asked about coffee in Turkish, it
+knew. Its registry came back in Turkish, listing Turkish, English and
+Russian facts, each still in the words it arrived in.
+
+The reverse, from the stick. `kahve notunu sil` ("delete the coffee note")
+returned the **registry** rather than a deletion: without a number it will
+not guess which fact was meant, exactly as `memory.forget`'s description
+instructs. With one, `1 numaralı kaydı sil`, the §6b gate fired **in
+Turkish** — an inference that would destroy something, asking first. On
+`evet, sil` it deleted with a receipt, and a minute later, unprompted, the
+fact was gone from the machine too.
+
+Taught on one, appeared on the other. Deleted on the other, gone from the
+first. Both directions, no command typed.
+
+### The defect only a browser could show
+
+The chat filled with `pulled 1 rows`, again and again, while nothing was
+happening. **The sync notice is itself a chat message — so it synced, so
+the next sweep had a row to move, so it announced itself again.** A trickle
+that sustains itself forever and makes an idle robot look busy.
+
+No test caught it, and the reason is worth keeping: every test asserts on
+**state**, and this was a property of the **conversation**. Each assertion
+passed while the thing as a whole misbehaved. It took sitting and watching
+a chat window.
+
+The lane now announces when **knowledge** moves — facts, reminders, media,
+deletions — and lets the transcript catch up quietly. After the fix: four
+sweeps with nothing new produced **zero** notices; one real fact produced
+exactly one, on both sides.
+
+The sweep ran at one minute for the demo and is back to ten.
+
 ### Automatic, and quiet about absence
 
 The owner chose automatic-whenever-present. A peer that is not plugged in
