@@ -62,7 +62,11 @@ pub fn notify_owner(cfg: &RobotConfig, text: &str) -> anyhow::Result<()> {
             hash: trust::ids::sha256_hex(text.as_bytes()),
             ts: trust::ids::ts_ms(),
         }],
-        format!("delivered an operational notice to the owner ({} chars)", text.chars().count()),
+        format!(
+            "delivered an operational notice to the owner ({} chars)",
+            text.chars().count()
+        ),
+        prism::types::Rendering::bare("ops_notice"),
     );
     let outcome_json = serde_json::to_string(&outcome)?;
     cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;

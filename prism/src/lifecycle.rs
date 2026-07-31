@@ -4,7 +4,6 @@
 //! claiming an effect may only be produced from a verified state transition.
 
 use crate::floor::{self, FloorMatch};
-use crate::lexicon::{self, Pack};
 use crate::types::*;
 use crate::verdict::VerdictProvider;
 use crate::{journal, outbox, receipts, Cell, Envelope, PrismError};
@@ -51,9 +50,16 @@ pub fn rfc3339(ms: i64) -> String {
     }
 }
 
+/// Turns structure into sentences. Lives at the surface, never here: the
+/// kernel emits `ReplyPart`s and has no opinion about words.
+pub trait Renderer: Send + Sync {
+    fn render(&self, lang: &str, parts: &[ReplyPart], actions: &[ActionRecord]) -> String;
+}
+
 pub struct TurnDeps<'a> {
     pub router: &'a dyn CapabilityRouter,
     pub verdicts: &'a dyn VerdictProvider,
+    pub renderer: &'a dyn Renderer,
     /// Test hook: called at every journal boundary with the point name;
     /// returning true simulates the process dying right there.
     pub crash: Option<&'a dyn Fn(&str) -> bool>,
@@ -130,15 +136,17 @@ pub fn run_turn(
     crash_check(deps, "after_open")?;
 
     // decision: the deterministic floor runs first and wins unconditionally (Q17)
-    let decision = match floor::scan_lang(&env.content, Local::now()) {
-        Some(hit) => Decision::Floor {
-            m: hit.matched,
-            lang: hit.lang,
+    let decision = match floor::scan(&env.content, Local::now()) {
+        // the floor is English, so a floor match is an English turn
+        Some(m) => Decision::Floor {
+            m,
+            lang: "en".into(),
         },
         None => {
             // one call: it classifies the turn AND, if a tool fits, proposes
             // it. The catalog comes from the registry, so it cannot name a
             // tool that does not exist.
+            //
             let tools = deps.router.describe();
             let now = Local::now().to_rfc3339();
             let routed = deps.verdicts.route(&env.content, &tools, &now);
@@ -170,9 +178,6 @@ pub(crate) fn finish_planned_intent(
     deps: &TurnDeps,
     live: bool,
 ) -> Result<TurnOutput, PrismError> {
-    // the language was decided at plan time and journaled with it, so a
-    // replayed intent renders exactly as the live one did
-    let pack = lexicon::pack(&plan.lang).unwrap_or_else(lexicon::english);
     // execute steps, reusing journaled outcomes on replay (never re-run a
     // completed effect)
     let prior: Vec<Outcome> = cell
@@ -202,7 +207,7 @@ pub(crate) fn finish_planned_intent(
         }
         // the cell is NOT locked here: a capability may spend seconds in a
         // model call, and the person's other requests must not queue on it
-        let outcome = execute_step(cell, deps.router, step, intent_id, pack, &plan.lang)?;
+        let outcome = execute_step(cell, deps.router, step, intent_id, &plan.lang)?;
         let outcome_json = serde_json::to_string(&outcome)?;
         let outcome_hash = ids::sha256_hex(outcome.detail.as_bytes());
         cell.with(|c| {
@@ -218,32 +223,8 @@ pub(crate) fn finish_planned_intent(
     cell.with(|c| journal::step(c, intent_id, "verify", &verify_json, None))?;
 
     // receipt: compiled from evidence, never narrated by a model
-    let mut receipt = build_receipt(intent_id, &outcomes);
+    let receipt = build_receipt(intent_id, &outcomes);
 
-    // the deterministic expression check (sec 5 / Q26) runs before the
-    // receipt is stored, so an unsupported effect claim is recorded as
-    // uncertain rather than verified
-    let draft_reply = compose_reply(&outcomes, &receipt, pack);
-    let unsupported = unsupported_effect_claim(&draft_reply, &outcomes);
-    if unsupported {
-        receipt.status = ReceiptStatus::Uncertain;
-        receipt.claims.push(Claim {
-            claim: "an utterance in this turn asserted an effect that no step \
-                    performed; the assertion is unsupported and was flagged to \
-                    the person"
-                .into(),
-            evidence: vec![Evidence {
-                kind: "deterministic".into(),
-                provider: "expression-check".into(),
-                external_id: "unsupported-effect-claim".into(),
-                hash: ids::sha256_hex(draft_reply.as_bytes()),
-                ts: ids::ts_ms(),
-            }],
-        });
-        let flag_json =
-            serde_json::json!({ "reason": "unsupported effect claim" }).to_string();
-        cell.with(|c| journal::step(c, intent_id, "expression.flagged", &flag_json, None))?;
-    }
     let receipt = cell.with(|c| receipts::store(c, &receipt))?;
     let receipt_json = serde_json::json!({
         "receipt_id": receipt.receipt_id,
@@ -253,13 +234,14 @@ pub(crate) fn finish_planned_intent(
     cell.with(|c| journal::step(c, intent_id, "receipt", &receipt_json, None))?;
     crash_check(deps, "after_receipt")?;
 
+    // the ONE place structure becomes words, at the very edge, outside the
+    // kernel: everything above this line is data
+    let parts = reply_parts(&outcomes, &receipt);
+    let actions = action_records(&receipt, &outcomes, plan);
+    let reply = deps.renderer.render(&plan.lang, &parts, &actions);
+
     // reply through the transactional outbox (Q11): enqueued before it can
     // possibly leave, deduped structurally
-    let mut reply = compose_reply(&outcomes, &receipt, pack);
-    if unsupported {
-        reply.push_str("\n\n");
-        reply.push_str(pack.reply("unsupported_note"));
-    }
     let (reply_effect_id, _fresh) =
         cell.with(|c| outbox::enqueue(c, intent_id, "surface:chat", &reply))?;
     if !live {
@@ -437,9 +419,10 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
         Decision::Floor { lang, .. } => lang.clone(),
         Decision::Verdict { v, .. } => v.lang.clone(),
     };
-    let lang = match lexicon::pack(&lang) {
-        Some(p) => p.code.clone(),
-        None => "en".to_string(),
+    let lang = if lang.trim().is_empty() {
+        "en".to_string()
+    } else {
+        lang
     };
     Plan {
         plan_id: ids::new_id("plan"),
@@ -454,26 +437,23 @@ fn execute_step(
     router: &dyn CapabilityRouter,
     step: &PlanStep,
     intent_id: &str,
-    pack: &Pack,
     lang: &str,
 ) -> Result<Outcome, PrismError> {
     // floor answers are system-generated constants computed from local state:
     // they attest to exactly what they say
-    let deterministic = |detail: String| {
-        Outcome::attested(
+    match step.capability.as_str() {
+        "answer.fallback" => Ok(Outcome::attested(
             step.step_id.clone(),
             vec![Evidence {
                 kind: "deterministic".into(),
                 provider: "floor".into(),
                 external_id: step.capability.clone(),
-                hash: ids::sha256_hex(detail.as_bytes()),
+                hash: String::new(),
                 ts: ids::ts_ms(),
             }],
-            detail,
-        )
-    };
-    match step.capability.as_str() {
-        "answer.fallback" => Ok(deterministic(pack.reply("fallback").into())),
+            "declined: nothing in this robot does what was asked".into(),
+            Rendering::bare("fallback"),
+        )),
         // the verdict's own chitchat one-liner (Q16 reply field) -- model
         // text, so it speaks but attests to nothing
         "answer.direct" => Ok(Outcome::utterance(
@@ -545,65 +525,57 @@ pub fn build_receipt(intent_id: &str, outcomes: &[Outcome]) -> Receipt {
     }
 }
 
-/// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set
-/// logic, ~0 ms", run on every turn, never on the model that generated).
-///
-/// If an utterance asserts the Robot performed an effect, but the turn
-/// executed no effect-producing step, the assertion is unsupported. Rather
-/// than let it stand, we say so -- and the receipt goes `uncertain`, because
-/// what was said cannot be backed by evidence.
-pub fn unsupported_effect_claim(reply: &str, outcomes: &[Outcome]) -> bool {
-    if outcomes.iter().any(|o| o.is_effect()) {
-        return false; // something really happened; the claim may be true
+/// The reply as STRUCTURE: what each step contributed, in order. No words
+/// are chosen here -- that is the renderer's job, at the surface.
+pub(crate) fn reply_parts(outcomes: &[Outcome], receipt: &Receipt) -> Vec<ReplyPart> {
+    let mut parts: Vec<ReplyPart> = outcomes
+        .iter()
+        .filter(|o| o.ok || o.rendering.is_some())
+        .filter(|o| !o.detail.is_empty() || o.rendering.is_some())
+        .map(|o| o.reply_part())
+        .collect();
+    if parts.is_empty() {
+        parts.push(ReplyPart::Say(Rendering::bare("done")));
     }
-    // checked against EVERY pack, not just this turn's: the check is a
-    // safety property, and a reply that drifts into another language must
-    // not slip past it
-    lexicon::asserts_an_effect(reply)
+    match receipt.status {
+        ReceiptStatus::Partial => parts.push(ReplyPart::Say(Rendering::bare("partial_note"))),
+        ReceiptStatus::Failed | ReceiptStatus::Uncertain => {
+            parts.push(ReplyPart::Say(Rendering::new(
+                "failed_note",
+                serde_json::json!({ "status": receipt.status.as_str() }),
+            )))
+        }
+        _ => {}
+    }
+    parts
 }
 
-/// The reply is rendered from the receipt's claims -- system evidence, not
-/// model narration. English for now; Soul's user-language rendering is a
-/// later milestone.
-pub(crate) fn compose_reply(outcomes: &[Outcome], receipt: &Receipt, pack: &Pack) -> String {
-    match receipt.status {
-        ReceiptStatus::Verified | ReceiptStatus::Partial => {
-            let mut parts: Vec<&str> = outcomes
-                .iter()
-                .filter(|o| o.ok && !o.detail.is_empty())
-                .map(|o| o.detail.as_str())
-                .collect();
-            if parts.is_empty() {
-                parts.push(pack.reply("done"));
-            }
-            let mut reply = parts.join("\n");
-            if receipt.status == ReceiptStatus::Partial {
-                reply.push('\n');
-                reply.push_str(pack.reply("partial_note"));
-            }
-            reply
-        }
-        _ => {
-            // honest failure: say what actually went wrong, not a generic line
-            let details: Vec<&str> = outcomes
-                .iter()
-                .filter(|o| !o.ok && !o.detail.is_empty())
-                .map(|o| o.detail.as_str())
-                .collect();
-            if details.is_empty() {
-                pack.reply("failed_generic").to_string()
-            } else {
-                format!(
-                    "{}\n{}",
-                    details.join("\n"),
-                    lexicon::fill(
-                        pack.reply("failed_note"),
-                        &[("status", receipt.status.as_str())]
-                    )
-                )
-            }
-        }
-    }
+/// The action record: what actually happened, compiled from the receipt's
+/// evidence rather than from anyone's sentence (arch sec 5 / Q26).
+///
+/// This is what makes the receipts law hold when a MODEL writes the reply.
+/// The old defence was a list of phrases like "i saved it", per language --
+/// which meant an unlisted language was an unchecked language. Now the
+/// truth is simply displayed beside the claim, in every language at once,
+/// because it is not language at all.
+pub fn action_records(receipt: &Receipt, outcomes: &[Outcome], plan: &Plan) -> Vec<ActionRecord> {
+    outcomes
+        .iter()
+        .filter_map(|o| {
+            let st = plan.steps.iter().find(|s| s.step_id == o.step_id)?;
+            // reads changed nothing, so there is nothing to vouch for; a
+            // failure is worth showing whatever it was going to do
+            (st.effect != Effect::Read || !o.ok).then(|| ActionRecord {
+                tool: st.capability.clone(),
+                status: if o.ok {
+                    receipt.status.as_str().into()
+                } else {
+                    "failed".into()
+                },
+                detail: o.claim.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 /// An honest failed receipt with a single deterministic claim. Used by
@@ -639,11 +611,6 @@ pub(crate) fn interrupted_receipt(intent_id: &str) -> Receipt {
     )
 }
 
-/// Format a fire-time for human display (local time).
-pub fn format_fire_at(pack: &Pack, fire_at_ms: i64) -> String {
-    pack.datetime_ms("fire_at", fire_at_ms)
-}
-
 #[cfg(test)]
 mod receipt_tests {
     use super::*;
@@ -677,60 +644,103 @@ mod receipt_tests {
         assert!(receipt.claims[0].claim.contains("asserts no external effect"));
     }
 
-    /// A capability that really acted DOES attest, and its text is the claim.
+    /// A capability that really acted DOES attest, and the receipt asserts
+    /// its ENGLISH audit sentence -- not the words the person will read,
+    /// which are rendered separately and may be in any language.
     #[test]
     fn attested_effects_are_claimed_verbatim() {
         let outcome = Outcome::attested(
             "s1".into(),
             ev("row"),
-            "done -- i'll remind you at 09:00: call mark".to_string(),
+            "scheduled a reminder for 1234 ms".to_string(),
+            Rendering::new(
+                "reminder_created",
+                serde_json::json!({ "when_ms": 1234, "about": "позвонить марку" }),
+            ),
         );
         let receipt = build_receipt("int_2", &[outcome]);
         assert_eq!(receipt.status, ReceiptStatus::Verified);
-        assert!(receipt.claims[0].claim.contains("call mark"));
+        assert!(receipt.claims[0].claim.contains("scheduled a reminder"));
+        // the audit trail is english whatever the person speaks
+        assert!(receipt.claims[0].claim.is_ascii());
     }
 
-    /// A failed provider call must not produce a Verified receipt.
+    /// A failed provider call must not produce a Verified receipt, and the
+    /// reply says what went wrong -- as structure, for the surface to say.
     #[test]
     fn failures_are_not_verified() {
         let outcome = Outcome::failed(
             "s1".into(),
             ev("deterministic"),
-            "i'm having trouble thinking right now".to_string(),
+            "the model call failed".to_string(),
+            Rendering::bare("provider_failure"),
         );
         let receipt = build_receipt("int_3", std::slice::from_ref(&outcome));
         assert_eq!(receipt.status, ReceiptStatus::Failed);
-        // and the reply says what went wrong, not a generic line
-        let reply = compose_reply(&[outcome], &receipt, lexicon::english());
-        assert!(reply.contains("trouble thinking"), "{reply}");
-        assert!(reply.contains("nothing was changed"), "{reply}");
+
+        let parts = reply_parts(std::slice::from_ref(&outcome), &receipt);
+        assert!(matches!(&parts[0], ReplyPart::Say(r) if r.id == "provider_failure"));
+        assert!(matches!(&parts[1], ReplyPart::Say(r) if r.id == "failed_note"));
     }
 
-    /// The deterministic claim-vs-receipt check (sec 5 / Q26): an utterance
-    /// asserting an effect on a turn that executed none is flagged.
+    /// The receipts law without a phrase list (sec 5 / Q26).
+    ///
+    /// The old check scanned the reply for wordings like "i saved it", in
+    /// every language we had thought of -- so an unlisted language was an
+    /// unchecked one. Now the truth is compiled from the receipt and shown
+    /// beside the claim. A model can say whatever it likes; if nothing
+    /// happened, no record appears, in any language at once.
     #[test]
-    fn unsupported_effect_claims_are_detected() {
+    fn effect_claims_are_answered_by_records_not_by_phrase_matching() {
+        // a model asserting an effect on a turn that executed none
         let spoke = Outcome::utterance(
             "s1".into(),
             ev("provider_response"),
             "Sure! I've saved that to your memory.".into(),
         );
-        assert!(unsupported_effect_claim(
-            "Sure! I've saved that to your memory.",
-            std::slice::from_ref(&spoke)
-        ));
+        let receipt = build_receipt("int_4", std::slice::from_ref(&spoke));
+        let read_only = Plan {
+            plan_id: "p".into(),
+            intent_id: "int_4".into(),
+            lang: "en".into(),
+            steps: vec![PlanStep {
+                step_id: "s1".into(),
+                capability: "answer.model".into(),
+                args: serde_json::json!({}),
+                effect: Effect::Read,
+                approval: Approval::Auto,
+                deps: vec![],
+            }],
+        };
+        assert!(
+            action_records(&receipt, std::slice::from_ref(&spoke), &read_only).is_empty(),
+            "an utterance is not an action"
+        );
 
-        // ...but not when a capability actually did the work
-        let did = Outcome::attested("s2".into(), ev("row"), "remembered: x".into());
-        assert!(!unsupported_effect_claim(
-            "I've saved that to your memory.",
-            &[did]
-        ));
-
-        // ordinary answers are not flagged
-        assert!(!unsupported_effect_claim(
-            "Rust 1.97.1 is the latest stable release.",
-            &[spoke]
-        ));
+        // ...and the same sentence when a capability really did the work
+        let did = Outcome::attested(
+            "s2".into(),
+            ev("row"),
+            "stored a fact with its source".into(),
+            Rendering::bare("remembered"),
+        );
+        let receipt = build_receipt("int_5", std::slice::from_ref(&did));
+        let plan = Plan {
+            plan_id: "p".into(),
+            intent_id: "int_5".into(),
+            lang: "en".into(),
+            steps: vec![PlanStep {
+                step_id: "s2".into(),
+                capability: "memory.remember".into(),
+                args: serde_json::json!({}),
+                effect: Effect::ReversibleWrite,
+                approval: Approval::Auto,
+                deps: vec![],
+            }],
+        };
+        let records = action_records(&receipt, std::slice::from_ref(&did), &plan);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "memory.remember");
+        assert_eq!(records[0].status, "verified");
     }
 }

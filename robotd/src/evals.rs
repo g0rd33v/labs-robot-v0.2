@@ -86,9 +86,8 @@ fn eval_routing() -> anyhow::Result<i32> {
         let text = case["text"].as_str().unwrap_or_default();
         let expect = case["expect"].as_str().unwrap_or_default();
         total += 1;
-        let hit = prism::floor::scan_lang(text, chrono::Local::now());
-        let got = match &hit {
-            Some(h) => serde_json::to_value(&h.matched)?["match"]
+        let got = match prism::floor::scan(text, chrono::Local::now()) {
+            Some(m) => serde_json::to_value(&m)?["match"]
                 .as_str()
                 .unwrap_or("?")
                 .to_string(),
@@ -96,17 +95,6 @@ fn eval_routing() -> anyhow::Result<i32> {
         };
         if got != expect {
             misroutes.push(format!("  MISROUTE: {text:?} -> {got} (expected {expect})"));
-        }
-        // a case may also pin the language the floor matched in: routing to
-        // the right command through the wrong pack would answer correctly
-        // in the wrong language
-        if let Some(want) = case["lang"].as_str() {
-            let got_lang = hit.as_ref().map(|h| h.lang.as_str()).unwrap_or("none");
-            if got_lang != want {
-                misroutes.push(format!(
-                    "  WRONG LANGUAGE: {text:?} -> {got_lang} (expected {want})"
-                ));
-            }
         }
     }
     println!("\n[routing] {total} cases, {} misroutes (bar: 0)", misroutes.len());
@@ -155,9 +143,11 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
                 let (cell, path) = temp_cell(point)?;
                 let router = Registry::offline();
                 let crash = |p: &str| p == point;
+                let speak = crate::render::Speak::offline();
                 let deps = TurnDeps {
                     router: &router,
                     verdicts: &FallbackVerdict,
+                    renderer: &speak,
                     crash: Some(&crash),
                 };
                 let env = envelope(&cell, text)?;
@@ -165,8 +155,8 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
                     prism::run_turn(&cell, &env, &deps),
                     Err(PrismError::SimulatedCrash(_))
                 );
-                let s1 = prism::replay::resume_incomplete(&cell, &router)?;
-                let s2 = prism::replay::resume_incomplete(&cell, &router)?;
+                let s1 = prism::replay::resume_incomplete(&cell, &router, &speak)?;
+                let s2 = prism::replay::resume_incomplete(&cell, &router, &speak)?;
                 let count = cell.with(|c| {
                     Ok(if kind == "reminder" {
                         mind::reminders::count_active(c)
@@ -198,9 +188,11 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
 fn eval_latency() -> anyhow::Result<i32> {
     let (cell, path) = temp_cell("latency")?;
     let router = Registry::offline();
+    let speak = crate::render::Speak::offline();
     let deps = TurnDeps {
         router: &router,
         verdicts: &FallbackVerdict,
+                    renderer: &speak,
         crash: None,
     };
     let mut times = vec![];

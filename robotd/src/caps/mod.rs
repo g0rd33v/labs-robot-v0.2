@@ -18,7 +18,7 @@ pub mod memory;
 pub mod reminders;
 pub mod research;
 
-use prism::types::{Effect, Evidence, Outcome, ToolDef};
+use prism::types::{Effect, Evidence, Outcome, Rendering, ToolDef};
 use prism::{Cell, CapabilityRouter, PrismError};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -72,24 +72,13 @@ pub struct Ctx<'a> {
     pub services: &'a Services,
     pub policy: &'a Policy,
     pub instance: &'a Instance,
-    /// The turn's language, decided once by the kernel and journaled in the
-    /// step args. Capabilities never choose a language; they render through
-    /// `say`, which is the single place a phrase becomes words.
+    /// The turn's language (BCP 47), carried for capabilities that must
+    /// pass it outward -- to a model, say. Capabilities never render with
+    /// it: they emit `Rendering`, and the surface does the words.
     pub lang: &'a str,
 }
 
 impl Ctx<'_> {
-    /// The pack this turn speaks. Unknown codes fall back to English rather
-    /// than failing: a missing translation must degrade, never break.
-    pub fn pack(&self) -> &'static prism::lexicon::Pack {
-        prism::lexicon::pack(self.lang).unwrap_or_else(prism::lexicon::english)
-    }
-
-    /// Render reply `id` in the turn's language, filling `{placeholders}`.
-    pub fn say(&self, id: &str, vars: &[(&str, &str)]) -> String {
-        prism::lexicon::fill(self.pack().reply(id), vars)
-    }
-
     /// Provenance anchor (law #5): the source message id journaled at
     /// intent_open. Capabilities that store knowledge refuse without it.
     pub fn source_msg(&self) -> Result<String, PrismError> {
@@ -108,14 +97,16 @@ impl Ctx<'_> {
     /// Owner-only gate for administrative capabilities. The role check is
     /// the FIRST thing that happens -- it used to sit behind an availability
     /// check that every test tripped first, so the comparison never ran.
-    pub fn require_owner(&self, what: &str) -> Result<Arc<Mutex<Connection>>, String> {
+    pub fn require_owner(&self, what: &str) -> Result<Arc<Mutex<Connection>>, Rendering> {
         if self.principal != self.instance.owner_principal {
-            return Err(self.say("owner_only", &[("what", what)]));
+            return Err(Rendering::new(
+                "owner_only",
+                serde_json::json!({ "what": what }),
+            ));
         }
-        self.instance
-            .core
-            .clone()
-            .ok_or_else(|| self.say("not_available_here", &[("what", what)]))
+        self.instance.core.clone().ok_or_else(|| {
+            Rendering::new("not_available_here", serde_json::json!({ "what": what }))
+        })
     }
 }
 
@@ -215,16 +206,31 @@ pub fn model_evidence(model: &str, content: &str) -> Evidence {
     }
 }
 
-pub fn attested(evidence: Vec<Evidence>, detail: String) -> Result<Outcome, PrismError> {
-    Ok(Outcome::attested(String::new(), evidence, detail))
+/// `claim` is the ENGLISH sentence the receipt asserts -- audit text.
+/// `say` is what the person is told, as structure.
+pub fn attested(
+    evidence: Vec<Evidence>,
+    claim: impl Into<String>,
+    say: Rendering,
+) -> Result<Outcome, PrismError> {
+    Ok(Outcome::attested(String::new(), evidence, claim.into(), say))
 }
 
 pub fn spoke(evidence: Vec<Evidence>, detail: String) -> Result<Outcome, PrismError> {
     Ok(Outcome::utterance(String::new(), evidence, detail))
 }
 
-pub fn failed(evidence: Vec<Evidence>, detail: String) -> Result<Outcome, PrismError> {
-    Ok(Outcome::failed(String::new(), evidence, detail))
+pub fn failed(
+    evidence: Vec<Evidence>,
+    claim: impl Into<String>,
+    say: Rendering,
+) -> Result<Outcome, PrismError> {
+    Ok(Outcome::failed(String::new(), evidence, claim.into(), say))
+}
+
+/// A capability declining. Not a failure of the machine -- an honest no.
+pub fn declined(what: &'static str, say: Rendering) -> Result<Outcome, PrismError> {
+    attested(note_evidence(what), format!("declined: {what}"), say)
 }
 
 /// Map a mind error into a capability error.

@@ -162,7 +162,8 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     let router = robot.router();
     for principal in robot.principals_active()? {
         let handle = robot.cell(principal)?;
-        let replayed = prism::replay::resume_incomplete(&handle.cell, &router)?;
+        let replayed =
+            prism::replay::resume_incomplete(&handle.cell, &router, &crate::render::Speak::offline())?;
         if replayed.resumed + replayed.closed_failed > 0 {
             tracing::info!(
                 "crash replay (principal {principal}): {} resumed, {} closed failed",
@@ -292,7 +293,7 @@ mod tests {
             .handle_message(owner, "invite".into())
             .unwrap();
         assert!(invite_reply.contains("/i/"), "{invite_reply}");
-        let token = invite_reply.split("/i/").nth(1).unwrap().trim().to_string();
+        let token = invite_reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
         let (member, name) = boot.state.robot.accept_invite(&token).unwrap();
         assert!(name.starts_with("member-"));
         assert_ne!(member, owner);
@@ -343,7 +344,7 @@ mod tests {
             .handle_message(owner, "invite".into())
             .unwrap();
         assert!(reply.contains("/i/"), "{reply}");
-        let token = reply.split("/i/").nth(1).unwrap().trim().to_string();
+        let token = reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
         let (member, _) = boot.state.robot.accept_invite(&token).unwrap();
         assert_ne!(member, owner);
 

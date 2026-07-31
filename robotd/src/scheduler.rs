@@ -38,9 +38,21 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
     let due = cell.with(|c| Ok(mind::reminders::due_active(c, now)))??;
     let mut count = 0;
 
-    let pack = crate::robot::cell_pack(cell);
+    let lang = crate::robot::cell_lang(cell);
+    let speak = crate::render::Speak {
+        gateway: robot.gateway.clone(),
+    };
     for rem in due {
-        let text = prism::lexicon::fill(pack.reply("reminder_fired"), &[("about", &rem.about)]);
+        // a reminder firing at 03:00 speaks the language its person uses
+        let text = prism::lifecycle::Renderer::render(
+            &speak,
+            &lang,
+            &[prism::types::ReplyPart::Say(prism::types::Rendering::new(
+                "reminder_fired",
+                serde_json::json!({ "about": rem.about }),
+            ))],
+            &[],
+        );
         {
             let intent_id = trust::ids::new_id("int");
             let open_json = serde_json::json!({
@@ -65,6 +77,10 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
                     ts: now,
                 }],
                 format!("reminder fired: {}", rem.about),
+                prism::types::Rendering::new(
+                    "reminder_fired",
+                    serde_json::json!({ "about": rem.about }),
+                ),
             );
             let outcome_json = serde_json::to_string(&outcome)?;
             cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;

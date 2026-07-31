@@ -3,8 +3,8 @@
 //! matters (it used to sit behind an availability check that every test
 //! tripped first, so the comparison never ran).
 
-use super::{attested, note_evidence, row_evidence, Capability, Ctx};
-use prism::types::{Effect, Outcome};
+use super::{attested, row_evidence, Capability, Ctx};
+use prism::types::{Effect, Outcome, Rendering};
 use prism::PrismError;
 use rusqlite::params;
 use trust::schema;
@@ -31,7 +31,7 @@ impl Capability for Invite {
     fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let core = match ctx.require_owner("mint invites") {
             Ok(c) => c,
-            Err(why) => return attested(note_evidence("member.invite"), why),
+            Err(say) => return super::declined("member.invite", say),
         };
         let token = trust::ids::random_hex(12);
         {
@@ -46,12 +46,12 @@ impl Capability for Invite {
         }
         attested(
             row_evidence("invite", ""),
-            ctx.say(
+            "minted a single-use invite",
+            Rendering::new(
                 "invite_created",
-                &[(
-                    "link",
-                    &format!("{}/i/{token}", ctx.instance.public_base),
-                )],
+                serde_json::json!({
+                    "link": format!("{}/i/{token}", ctx.instance.public_base)
+                }),
             ),
         )
     }
@@ -79,7 +79,7 @@ impl Capability for TelegramBindCode {
     fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let core = match ctx.require_owner("bind telegram") {
             Ok(c) => c,
-            Err(why) => return attested(note_evidence("telegram.bind_code"), why),
+            Err(say) => return super::declined("telegram.bind_code", say),
         };
         let code = format!(
             "{:06}",
@@ -104,7 +104,8 @@ impl Capability for TelegramBindCode {
         }
         attested(
             row_evidence("telegram.bind_code", ""),
-            ctx.say("telegram_bind_code", &[("code", &code)]),
+            "issued a telegram bind code valid for ten minutes",
+            Rendering::new("telegram_bind_code", serde_json::json!({ "code": code })),
         )
     }
 }

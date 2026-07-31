@@ -18,6 +18,7 @@ pub mod maintenance;
 pub mod notify;
 pub mod package;
 pub mod prompts;
+pub mod render;
 pub mod robot;
 pub mod scheduler;
 pub mod telegram;

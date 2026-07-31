@@ -8,6 +8,7 @@
 use crate::caps::{Instance, Policy, Registry, Services};
 use anyhow::{anyhow, bail, Context};
 use prism::verdict::{FallbackVerdict, VerdictProvider};
+use prism::types::Rendering;
 use prism::{Cell, Envelope, Evidence, Outcome, TurnDeps};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -200,6 +201,7 @@ impl RobotCore {
                 ts: trust::ids::ts_ms(),
             }],
             format!("delivered an operational notice ({} chars)", text.chars().count()),
+            prism::types::Rendering::bare("ops_notice"),
         );
         let outcome_json = serde_json::to_string(&outcome)?;
         cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;
@@ -293,9 +295,13 @@ impl RobotCore {
                 Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
                 None => Box::new(FallbackVerdict),
             };
+            let speak = crate::render::Speak {
+                gateway: self.gateway.clone(),
+            };
             let deps = TurnDeps {
                 router: &router,
                 verdicts: verdicts.as_ref(),
+                renderer: &speak,
                 crash: None,
             };
             // the cell is locked only in short bursts inside run_turn; the
@@ -338,20 +344,17 @@ pub fn remember_lang(conn: &Connection, lang: &str) {
     );
 }
 
-/// The pack a cell speaks, for the lanes that talk without being asked.
-pub fn cell_pack(cell: &Cell) -> &'static prism::lexicon::Pack {
-    let code: Option<String> = cell
-        .sql(|c| {
-            c.query_row("SELECT value FROM cell_meta WHERE key = 'lang'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
+/// The language a cell speaks, for the lanes that talk without being asked.
+pub fn cell_lang(cell: &Cell) -> String {
+    cell.sql(|c| {
+        c.query_row("SELECT value FROM cell_meta WHERE key = 'lang'", [], |r| {
+            r.get::<_, String>(0)
         })
-        .ok()
-        .flatten();
-    code.as_deref()
-        .and_then(prism::lexicon::pack)
-        .unwrap_or_else(prism::lexicon::english)
+        .optional()
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "en".into())
 }
 
 const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus", "flac"];
@@ -419,6 +422,10 @@ impl surfaces::Robot for RobotCore {
                     ts: trust::ids::ts_ms(),
                 }],
                 format!("stored in the vault: {filename}"),
+                Rendering::new(
+                    "media_stored",
+                    serde_json::json!({ "filename": filename }),
+                ),
             );
             let outcome_json = serde_json::to_string(&outcome)?;
             cell.with(|c| prism::journal::step(c, &intent_id, "outcome", &outcome_json, None))?;
@@ -665,10 +672,14 @@ mod tests {
         }
     }
 
+    /// The renderer the tests speak through: English templates, no model.
+    static SPEAK: crate::render::Speak = crate::render::Speak { gateway: None };
+
     fn live_deps(router: &Registry) -> TurnDeps<'_> {
         TurnDeps {
             router,
             verdicts: &FallbackVerdict,
+            renderer: &SPEAK,
             crash: None,
         }
     }
@@ -751,6 +762,7 @@ mod tests {
         let deps = TurnDeps {
             router: &router,
             verdicts: &verdicts,
+            renderer: &SPEAK,
             crash: None,
         };
         let out = prism::run_turn(
@@ -804,6 +816,7 @@ mod tests {
             let deps = TurnDeps {
                 router: &router,
                 verdicts: &verdicts,
+                renderer: &SPEAK,
                 crash: None,
             };
             let out =
@@ -830,12 +843,13 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// The whole point of the language architecture, end to end: the same
-    /// governed turn, in two languages, answered in the language it was
-    /// asked in -- with no model call anywhere (the router is offline).
+    /// The English floor is English, and that is the whole of it. A turn it
+    /// matches is answered from templates -- instant, free, offline -- and a
+    /// turn in any other language falls through to the routing call, which
+    /// is where every other language is understood.
     #[test]
-    fn a_turn_is_answered_in_the_language_it_was_asked_in() {
-        let (cell, path) = file_cell("lang_roundtrip");
+    fn the_english_floor_answers_english_and_declines_the_rest() {
+        let (cell, path) = file_cell("floor_english");
         let router = Registry::offline();
         let run = |text: &str| {
             prism::run_turn(&cell, &envelope(&cell, text), &live_deps(&router)).unwrap()
@@ -843,24 +857,20 @@ mod tests {
 
         let en = run("remind me in 10 minutes to stretch");
         assert_eq!(en.lang, "en");
-        assert!(en.reply.starts_with("done -- i'll remind you"), "{}", en.reply);
+        assert!(en.reply.contains("i'll remind you"), "{}", en.reply);
+        // the effect really happened, and the record says so
+        assert!(en.reply.contains("✓ reminder.create"), "{}", en.reply);
 
+        // no model here, so a russian sentence gets an honest degradation
+        // rather than a guess -- and never an error
         let ru = run("напомни через 10 минут размяться");
-        assert_eq!(ru.lang, "ru");
-        assert!(ru.reply.starts_with("готово"), "{}", ru.reply);
-        // and the date inside it is Russian too, not an English month name
-        assert!(
-            !ru.reply.contains("Mon")
-                && !ru.reply.contains("Jan")
-                && !ru.reply.contains(" on "),
-            "a russian reply carried english calendar words: {}",
-            ru.reply
-        );
-
-        let ru_list = run("мои напоминания");
-        assert!(ru_list.reply.starts_with("твои напоминания"), "{}", ru_list.reply);
-        let en_list = run("my reminders");
-        assert!(en_list.reply.starts_with("your reminders"), "{}", en_list.reply);
+        assert!(ru.receipt.status.is_terminal());
+        assert!(!ru.reply.is_empty());
+        // and it created nothing: the floor did not guess at it
+        let all = cell
+            .with(|c| Ok(mind::reminders::list_active(c).unwrap()))
+            .unwrap();
+        assert_eq!(all.len(), 1, "only the english turn created a reminder");
 
         let _ = std::fs::remove_file(path);
     }
@@ -890,9 +900,12 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// Law #4 as a test with teeth: no human-language phrase may live in
-    /// code. Every surface word belongs to a pack, so a source file
-    /// containing non-Latin script means someone hard-coded a phrase again.
+    /// Law #4 with teeth. The kernel and the crates beneath it hold no
+    /// human-language surface vocabulary at all: `prism` emits `Rendering`
+    /// structures, and the only file that contains sentences a person reads
+    /// is `robotd::render`, in English, because English is the kernel's own
+    /// language. Non-Latin script anywhere in non-test code means someone
+    /// started a phrase table again.
     #[test]
     fn no_surface_vocabulary_lives_in_code() {
         fn offending(path: &std::path::Path) -> Vec<char> {
@@ -929,7 +942,8 @@ mod tests {
                         assert!(
                             bad.is_empty(),
                             "surface vocabulary hard-coded in {}: {bad:?} -- \
-                             it belongs in prism/src/lang/*.toml",
+                             the kernel emits Rendering, and other languages \
+                             are the renderer's job",
                             path.display()
                         );
                     }
@@ -1005,14 +1019,15 @@ mod tests {
                 let deps = TurnDeps {
                     router: &router,
                     verdicts: &FallbackVerdict,
+                    renderer: &SPEAK,
                     crash: Some(&crash),
                 };
                 let err = prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap_err();
                 assert!(matches!(err, PrismError::SimulatedCrash(_)), "{text}@{point}");
 
-                let s1 = prism::replay::resume_incomplete(&cell, &router).unwrap();
+                let s1 = prism::replay::resume_incomplete(&cell, &router, &SPEAK).unwrap();
                 assert_eq!(s1.resumed + s1.closed_failed, 1, "{text}@{point}");
-                let s2 = prism::replay::resume_incomplete(&cell, &router).unwrap();
+                let s2 = prism::replay::resume_incomplete(&cell, &router, &SPEAK).unwrap();
                 assert_eq!(s2.resumed + s2.closed_failed, 0, "{text}@{point}");
 
                 let expected = if point == "after_open" { 0 } else { 1 };
@@ -1081,6 +1096,7 @@ mod tests {
             let deps = TurnDeps {
                 router: &router,
                 verdicts: &FallbackVerdict,
+                renderer: &SPEAK,
                 crash: None,
             };
             prism::run_turn(&cell, &env, &deps).unwrap()

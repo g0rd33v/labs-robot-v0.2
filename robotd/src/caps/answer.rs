@@ -7,7 +7,7 @@ use super::{failed, note_evidence, spoke, Capability, Ctx};
 use crate::prompts::persona;
 use chrono::Local;
 use hub::gateway::{Msg, Role};
-use prism::types::{Effect, Outcome, Tier};
+use prism::types::{Effect, Outcome, Rendering, Tier};
 use prism::PrismError;
 use rusqlite::{params, Connection};
 
@@ -79,7 +79,7 @@ impl Capability for ModelAnswer {
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let query = args["query"].as_str().unwrap_or("");
         let Some(gw) = &ctx.services.gateway else {
-            return spoke(note_evidence("brain-offline"), ctx.say("brain_offline", &[]));
+            return super::declined("answer.model", Rendering::bare("brain_offline"));
         };
 
         // escalation: the verdict's tier merged with deterministic rules
@@ -92,7 +92,9 @@ impl Capability for ModelAnswer {
                 .with(|c| Ok(bump_ultra(c, ctx.policy.ultra_daily_cap)))?;
             if !allowed {
                 tier = Tier::Super;
-                quota_note = ctx.say("ultra_quota_note", &[]);
+                quota_note = "\n\n(daily ultra budget exhausted -- answered on \
+                              super; the receipt names it.)"
+                    .to_string();
             }
         }
 
@@ -145,7 +147,11 @@ impl Capability for ModelAnswer {
             ),
             Err(e) => failed(
                 note_evidence("provider-failure"),
-                ctx.say("provider_failure", &[("error", &e.to_string())]),
+                format!("the model call failed: {e}"),
+                Rendering::new(
+                    "provider_failure",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
             ),
         }
     }

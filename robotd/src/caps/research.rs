@@ -6,7 +6,7 @@
 use super::{failed, note_evidence, spoke, Capability, Ctx};
 use crate::prompts::research_system_prompt;
 use hub::gateway::{Msg, Role};
-use prism::types::{Effect, Evidence, Outcome};
+use prism::types::{Effect, Evidence, Outcome, Rendering};
 use prism::PrismError;
 
 pub struct WebResearch;
@@ -48,23 +48,27 @@ impl Capability for WebResearch {
     fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
         let query = args["query"].as_str().unwrap_or("");
         let (Some(gw), Some(rs)) = (&ctx.services.gateway, &ctx.services.research) else {
-            let why = if ctx.services.gateway.is_none() {
-                ctx.say("brain_offline", &[])
+            let say = if ctx.services.gateway.is_none() {
+                Rendering::bare("brain_offline")
             } else {
-                ctx.say("search_offline", &[])
+                Rendering::bare("search_offline")
             };
-            return spoke(note_evidence("search-offline"), why);
+            return super::declined("web.research", say);
         };
 
         let hits = match rs.search(query) {
             Ok(h) if !h.is_empty() => h,
             Ok(_) => {
-                return spoke(note_evidence("no-results"), ctx.say("search_empty", &[]))
+                return super::declined("web.research", Rendering::bare("search_empty"))
             }
             Err(e) => {
                 return failed(
                     note_evidence("search-failure"),
-                    ctx.say("search_failed", &[("error", &e.to_string())]),
+                    format!("web search failed: {e}"),
+                    Rendering::new(
+                        "search_failed",
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
                 )
             }
         };
@@ -111,7 +115,8 @@ impl Capability for WebResearch {
         // it is a security property left to chance
         match gw.chat_at(Role::Answer, &messages, None, 1200, 0.0) {
             Ok(out) => {
-                let mut sources = format!("\n\n{}", ctx.say("sources_header", &[]));
+                // the citations are data, so they are rendered, not written
+                let mut sources = String::from("\n\nsources:");
                 for (i, h) in hits.iter().take(3).enumerate() {
                     sources.push_str(&format!("\n{}. {}", i + 1, h.link));
                 }
@@ -120,7 +125,11 @@ impl Capability for WebResearch {
             }
             Err(e) => failed(
                 note_evidence("provider-failure"),
-                ctx.say("research_failed", &[("error", &e.to_string())]),
+                format!("read sources but the model call failed: {e}"),
+                Rendering::new(
+                    "research_failed",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
             ),
         }
     }

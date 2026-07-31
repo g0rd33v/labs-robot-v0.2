@@ -304,35 +304,36 @@ async fn offline_robot_degrades_honestly_over_http() {
     assert!(reply.contains("stretch"), "{reply}");
 }
 
-/// The language architecture through the real surface, not just the kernel:
-/// the same robot, the same session, two languages, each answered in the
-/// language it was asked in -- and a language with no pack still gets an
-/// ordinary 200 rather than an error.
+/// The language boundary through the real surface.
+///
+/// English is answered from templates -- offline, instant, and carrying an
+/// action record for anything that changed. Every other language reaches
+/// the routing call; with no model configured here, it must still be an
+/// ordinary 200 with an honest answer, never an error.
 #[tokio::test]
-async fn the_surface_answers_each_person_in_their_own_language() {
+async fn the_surface_answers_english_and_degrades_honestly_elsewhere() {
     let t = boot_test_robot();
     let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
 
-    let (status, ru) = post_json(
+    let (status, en) = post_json(
         &t.router,
         "/api/message",
         &cookie,
-        &say("напомни через 10 минут размяться"),
+        &say("remind me in 10 minutes to stretch"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(ru.contains("готово — напомню"), "{ru}");
-    // the date is russian too, not an english month glued onto a russian sentence
-    assert!(!ru.contains("Jul") && !ru.contains(" on "), "{ru}");
+    assert!(en.contains("i'll remind you"), "{en}");
+    // the receipts law, visible: something changed, and the record says what
+    assert!(en.contains("✓ reminder.create"), "{en}");
 
-    let (_, ru_list) = post_json(&t.router, "/api/message", &cookie, &say("мои напоминания")).await;
-    assert!(ru_list.contains("размяться"), "{ru_list}");
+    let (_, list) = post_json(&t.router, "/api/message", &cookie, &say("my reminders")).await;
+    assert!(list.contains("stretch"), "{list}");
+    // a read changed nothing, so it vouches for nothing
+    assert!(!list.contains("✓"), "{list}");
 
-    let (_, en_list) = post_json(&t.router, "/api/message", &cookie, &say("my reminders")).await;
-    assert!(en_list.contains("your reminders"), "{en_list}");
-
-    // no pack for these; the robot must still respond, not fail
-    for text in ["今何時ですか", "¿qué hora es?", "지금 몇 시야"] {
+    // no pack, no table, no model: an honest answer, not a failure
+    for text in ["напомни через 10 минут размяться", "今何時ですか", "¿qué hora es?"] {
         let (status, reply) = post_json(&t.router, "/api/message", &cookie, &say(text)).await;
         assert_eq!(status, StatusCode::OK, "{text} must not error");
         assert!(!reply.is_empty(), "{text}");

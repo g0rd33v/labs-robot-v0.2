@@ -187,6 +187,61 @@ pub struct Receipt {
     pub data_disclosures: Vec<String>,
 }
 
+// ---------------------------------------------------------------- rendering
+
+/// What to say, as DATA. An English identifier plus typed slots -- never a
+/// sentence.
+///
+/// This is the boundary law 4 asks for, made structural: the kernel emits
+/// `{id: "reminder_created", slots: {when: <ts>, about: "..."}}` and has no
+/// opinion about words. The surface turns it into a sentence, in English
+/// from templates or in any other language from a model. Nothing in the
+/// kernel can be in the wrong language, because nothing in the kernel is
+/// in a language.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Rendering {
+    pub id: String,
+    #[serde(default)]
+    pub slots: serde_json::Value,
+}
+
+impl Rendering {
+    pub fn new(id: &str, slots: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            slots,
+        }
+    }
+
+    pub fn bare(id: &str) -> Self {
+        Self::new(id, serde_json::json!({}))
+    }
+}
+
+/// One piece of the reply on its way out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReplyPart {
+    /// Kernel-authored: structure the surface renders.
+    Say(Rendering),
+    /// A model spoke. Already in the person's language, passed through
+    /// untouched -- and never the vehicle for an effect claim, because
+    /// effects are shown as action records built from the receipt.
+    Prose(String),
+}
+
+/// A machine-generated record of something that actually happened, built
+/// from the receipt rather than from anyone's prose.
+///
+/// Shown beside the reply. If a sentence claims an effect and no record
+/// appears next to it, the discrepancy is visible without reading a word --
+/// which is how the receipts law survives a model writing the sentence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRecord {
+    pub tool: String,
+    pub status: String,
+    pub detail: String,
+}
+
 // ---------------------------------------------------------------- outcome
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,18 +263,33 @@ pub struct Outcome {
     /// `Verified` receipt whose only evidence was that a model spoke.
     #[serde(default)]
     pub claim: Option<String>,
+    /// What the person should be told, as structure. `None` means this
+    /// step's `detail` is model prose and goes out as it stands.
+    #[serde(default)]
+    pub rendering: Option<Rendering>,
 }
 
 impl Outcome {
     /// A step that performed a verified state transition: its text is both
     /// what the person reads and what the receipt asserts.
-    pub fn attested(step_id: String, evidence: Vec<Evidence>, detail: String) -> Self {
+    /// A step that performed a verified state transition.
+    ///
+    /// `claim` is the English sentence the RECEIPT asserts -- audit text,
+    /// read by the owner, never shown as the reply. `rendering` is what the
+    /// person is told, and it is data.
+    pub fn attested(
+        step_id: String,
+        evidence: Vec<Evidence>,
+        claim: String,
+        rendering: Rendering,
+    ) -> Self {
         Self {
             step_id,
             ok: true,
             evidence,
-            claim: Some(detail.clone()),
-            detail,
+            claim: Some(claim.clone()),
+            detail: claim,
+            rendering: Some(rendering),
         }
     }
 
@@ -232,18 +302,33 @@ impl Outcome {
             evidence,
             detail,
             claim: None,
+            rendering: None,
         }
     }
 
     /// A step that failed. `ok: false` so the receipt cannot come out
     /// `Verified` -- an external call that failed is not a verified success.
-    pub fn failed(step_id: String, evidence: Vec<Evidence>, detail: String) -> Self {
+    pub fn failed(
+        step_id: String,
+        evidence: Vec<Evidence>,
+        claim: String,
+        rendering: Rendering,
+    ) -> Self {
         Self {
             step_id,
             ok: false,
             evidence,
-            claim: Some(detail.clone()),
-            detail,
+            claim: Some(claim.clone()),
+            detail: claim,
+            rendering: Some(rendering),
+        }
+    }
+
+    /// The part of the reply this step contributes.
+    pub fn reply_part(&self) -> ReplyPart {
+        match &self.rendering {
+            Some(r) => ReplyPart::Say(r.clone()),
+            None => ReplyPart::Prose(self.detail.clone()),
         }
     }
 

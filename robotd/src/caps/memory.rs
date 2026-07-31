@@ -3,7 +3,7 @@
 //! and `Ctx::source_msg` refuses rather than store an unsourced fact.
 
 use super::{attested, mind_err, note_evidence, row_evidence, typed, Capability, Ctx};
-use prism::types::{Effect, Outcome};
+use prism::types::{Effect, Outcome, Rendering};
 use prism::PrismError;
 use serde::Deserialize;
 
@@ -92,11 +92,8 @@ impl Capability for Remember {
         })?;
         attested(
             row_evidence(&fact.id, &trust::ids::sha256_hex(a.content.as_bytes())),
-            format!(
-                "{}\n{}",
-                ctx.say("remembered", &[("content", &a.content)]),
-                ctx.say("remembered_note", &[])
-            ),
+            "stored a fact with its source",
+            Rendering::new("remembered", serde_json::json!({ "content": a.content })),
         )
     }
 }
@@ -142,26 +139,20 @@ impl Capability for Recall {
         let found = ctx
             .cell
             .with(|c| mind::facts::recall(c, &a.query, emb.as_deref(), 5).map_err(mind_err))?;
-        let detail = if found.is_empty() {
-            ctx.say("recall_empty", &[])
+        let say = if found.is_empty() {
+            Rendering::bare("recall_empty")
         } else {
-            let lines: Vec<String> = found
+            let items: Vec<serde_json::Value> = found
                 .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    ctx.say(
-                        "recall_line",
-                        &[
-                            ("n", &(i + 1).to_string()),
-                            ("fact", &f.content),
-                            ("when", &ctx.pack().datetime_ms("learned_at", f.created_at)),
-                        ],
-                    )
-                })
+                .map(|f| serde_json::json!({ "fact": f.content, "when_ms": f.created_at }))
                 .collect();
-            format!("{}\n{}", ctx.say("recall_header", &[]), lines.join("\n"))
+            Rendering::new("recall", serde_json::json!({ "items": items }))
         };
-        attested(note_evidence("memory.recall"), detail)
+        attested(
+            note_evidence("memory.recall"),
+            format!("recalled {} facts", found.len()),
+            say,
+        )
     }
 }
 
@@ -190,33 +181,25 @@ impl Capability for RegistryList {
         let listed = ctx
             .cell
             .with(|c| mind::facts::registry_list(c, 50).map_err(mind_err))?;
-        let detail = if listed.is_empty() {
-            ctx.say("registry_empty", &[])
+        let say = if listed.is_empty() {
+            Rendering::bare("registry_empty")
         } else {
-            let lines: Vec<String> = listed
+            let items: Vec<serde_json::Value> = listed
                 .iter()
-                .enumerate()
-                .map(|(i, (f, src, ts))| {
+                .map(|(f, src, ts)| {
                     let snippet: String = src.chars().take(48).collect();
-                    ctx.say(
-                        "registry_line",
-                        &[
-                            ("n", &(i + 1).to_string()),
-                            ("fact", &f.content),
-                            ("source", &snippet),
-                            ("when", &ctx.pack().datetime_ms("learned_at", *ts)),
-                        ],
-                    )
+                    serde_json::json!({
+                        "fact": f.content, "source": snippet, "when_ms": ts
+                    })
                 })
                 .collect();
-            format!(
-                "{}\n{}\n{}",
-                ctx.say("registry_header", &[]),
-                lines.join("\n"),
-                ctx.say("registry_note", &[])
-            )
+            Rendering::new("registry", serde_json::json!({ "items": items }))
         };
-        attested(note_evidence("registry.list"), detail)
+        attested(
+            note_evidence("registry.list"),
+            format!("listed {} facts with their sources", listed.len()),
+            say,
+        )
     }
 }
 
@@ -263,11 +246,13 @@ impl Capability for Forget {
         {
             Some(content) => attested(
                 note_evidence("memory.forget"),
-                ctx.say("forgotten", &[("content", &content)]),
+                "permanently deleted a fact and its supersession chain",
+                Rendering::new("forgotten", serde_json::json!({ "content": content })),
             ),
             None => attested(
                 note_evidence("memory.forget"),
-                ctx.say("forget_missing", &[("n", &index.to_string())]),
+                format!("no fact #{index} exists; nothing was deleted"),
+                Rendering::new("forget_missing", serde_json::json!({ "n": index })),
             ),
         }
     }
@@ -324,11 +309,16 @@ impl Capability for Correct {
         })? {
             Some((old_content, new)) => attested(
                 row_evidence(&new.id, ""),
-                ctx.say("corrected", &[("old", &old_content), ("new", &new.content)]),
+                "superseded a fact with a corrected version",
+                Rendering::new(
+                    "corrected",
+                    serde_json::json!({ "old": old_content, "new": new.content }),
+                ),
             ),
             None => attested(
                 note_evidence("memory.correct"),
-                ctx.say("correct_missing", &[("n", &index.to_string())]),
+                format!("no fact #{index} exists; nothing was corrected"),
+                Rendering::new("correct_missing", serde_json::json!({ "n": index })),
             ),
         }
     }

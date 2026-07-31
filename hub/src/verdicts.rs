@@ -89,6 +89,25 @@ pub fn salvage_json(text: &str) -> Option<serde_json::Value> {
     best.and_then(|s| serde_json::from_str(s).ok())
 }
 
+/// As `salvage_json`, for a JSON array -- the rendering call returns a list
+/// of strings, and models like to wrap lists in prose just as much.
+pub fn salvage_array(text: &str) -> Option<serde_json::Value> {
+    let cleaned = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if let Ok(v @ serde_json::Value::Array(_)) = serde_json::from_str(cleaned) {
+        return Some(v);
+    }
+    let start = cleaned.find('[')?;
+    let end = cleaned.rfind(']')?;
+    (start < end)
+        .then(|| serde_json::from_str(&cleaned[start..=end]).ok())
+        .flatten()
+}
+
 /// The gateway-backed verdict provider. Any failure anywhere degrades to
 /// the deterministic fallback -- the doorman may be wrong, never absent.
 pub struct GatewayVerdicts {

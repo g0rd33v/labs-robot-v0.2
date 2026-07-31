@@ -1,34 +1,34 @@
 {"text": "what time is it?", "expect": "time_now"}
 {"text": "What's the time", "expect": "time_now"}
-{"text": "который час", "expect": "time_now"}
-{"text": "сколько времени", "expect": "time_now"}
+{"text": "который час", "expect": "none"}
+{"text": "сколько времени", "expect": "none"}
 {"text": "what day is it today?", "expect": "time_now"}
 {"text": "who are you?", "expect": "self_meta"}
-{"text": "кто ты", "expect": "self_meta"}
+{"text": "кто ты", "expect": "none"}
 {"text": "help", "expect": "help"}
-{"text": "помощь", "expect": "help"}
+{"text": "помощь", "expect": "none"}
 {"text": "/start", "expect": "help"}
 {"text": "remind me in 10 minutes to stretch", "expect": "remind"}
 {"text": "remind me in 2 hours to call mark", "expect": "remind"}
 {"text": "remind me at 23:59 to wrap up", "expect": "remind"}
 {"text": "remind me tomorrow at 9 to stretch", "expect": "remind"}
-{"text": "напомни через 5 минут выпить воды", "expect": "remind"}
-{"text": "напомни завтра в 10 проверить почту", "expect": "remind"}
+{"text": "напомни через 5 минут выпить воды", "expect": "none"}
+{"text": "напомни завтра в 10 проверить почту", "expect": "none"}
 {"text": "my reminders", "expect": "list_reminders"}
-{"text": "список напоминаний", "expect": "list_reminders"}
+{"text": "список напоминаний", "expect": "none"}
 {"text": "cancel reminder", "expect": "cancel_reminder"}
-{"text": "отмени напоминание", "expect": "cancel_reminder"}
+{"text": "отмени напоминание", "expect": "none"}
 {"text": "remember that i drink green tea", "expect": "remember"}
-{"text": "запомни что я пью зелёный чай", "expect": "remember"}
+{"text": "запомни что я пью зелёный чай", "expect": "none"}
 {"text": "what do you remember about tea?", "expect": "recall"}
-{"text": "что ты помнишь о чае", "expect": "recall"}
+{"text": "что ты помнишь о чае", "expect": "none"}
 {"text": "what do you remember", "expect": "recall"}
 {"text": "my facts", "expect": "registry_list"}
-{"text": "мои факты", "expect": "registry_list"}
+{"text": "мои факты", "expect": "none"}
 {"text": "forget fact 2", "expect": "forget_fact"}
-{"text": "забудь факт 1", "expect": "forget_fact"}
+{"text": "забудь факт 1", "expect": "none"}
 {"text": "correct fact 1: i live in lisbon", "expect": "correct_fact"}
-{"text": "исправь факт 2: я живу в лиссабоне", "expect": "correct_fact"}
+{"text": "исправь факт 2: я живу в лиссабоне", "expect": "none"}
 {"text": "invite", "expect": "invite"}
 {"text": "telegram code", "expect": "telegram_code"}
 {"text": "tell me a joke", "expect": "none"}
@@ -41,29 +41,26 @@
 {"text": "what's the latest rust version", "expect": "none"}
 {"text": "переведи это на английский", "expect": "none"}
 {"text": "remind me at 18:00 to show reminders", "expect": "remind"}
-{"text": "напомни в 9 посмотреть мои напоминания", "expect": "remind"}
+{"text": "напомни в 9 посмотреть мои напоминания", "expect": "none"}
 {"text": "remember that my facts are private", "expect": "remember"}
 {"text": "remind me at 9 to check what date the demo is", "expect": "remind"}
 {"text": "remember that i always ask what time it is", "expect": "remember"}
 {"text": "remind me in 30 minutes to cancel reminder spam", "expect": "remind"}
-{"text": "запомни что мои факты приватные", "expect": "remember"}
+{"text": "запомни что мои факты приватные", "expect": "none"}
 {"text": "can you show me my reminders please", "expect": "none"}
 {"text": "i wonder what time it is", "expect": "none"}
 {"text": "remind me in 5000 hours to x", "expect": "none"}
 {"text": "search the web for rust 1.97 features", "expect": "web_search"}
 {"text": "look up the weather in porto", "expect": "web_search"}
 {"text": "google rust release notes", "expect": "web_search"}
-{"text": "найди в интернете новости про rust", "expect": "web_search"}
-{"text": "погугли погоду в лиссабоне", "expect": "web_search"}
+{"text": "найди в интернете новости про rust", "expect": "none"}
+{"text": "погугли погоду в лиссабоне", "expect": "none"}
 {"text": "remind me at 9 to google the answer", "expect": "remind"}
 {"text": "google", "expect": "none"}
-{"text": "what time is it?", "expect": "time_now", "lang": "en"}
-{"text": "который час", "expect": "time_now", "lang": "ru"}
-{"text": "напомни через 5 минут выпить воды", "expect": "remind", "lang": "ru"}
-{"text": "remind me in 5 minutes to drink water", "expect": "remind", "lang": "en"}
+{"text": "remind me in 5 minutes to drink water", "expect": "remind"}
 {"text": "今何時ですか", "expect": "none"}
-{"text": "\u0643\u0645 \u0627\u0644\u0633\u0627\u0639\u0629", "expect": "none"}
-{"text": "\u00bfqu\u00e9 hora es?", "expect": "none"}
-{"text": "wie sp\u00e4t ist es", "expect": "none"}
-{"text": "\uc9c0\uae08 \uba87 \uc2dc\uc57c", "expect": "none"}
-{"text": "\u73b0\u5728\u51e0\u70b9", "expect": "none"}
+{"text": "كم الساعة", "expect": "none"}
+{"text": "¿qué hora es?", "expect": "none"}
+{"text": "wie spät ist es", "expect": "none"}
+{"text": "지금 몇 시야", "expect": "none"}
+{"text": "现在几点", "expect": "none"}

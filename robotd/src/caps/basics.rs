@@ -8,7 +8,7 @@
 
 use super::{attested, note_evidence, Capability, Ctx};
 use chrono::Local;
-use prism::types::{Effect, Outcome};
+use prism::types::{Effect, Outcome, Rendering};
 use prism::PrismError;
 
 pub struct TimeNow;
@@ -30,11 +30,12 @@ impl Capability for TimeNow {
     fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
         Ok(())
     }
-    fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
-        let now = Local::now();
+    fn execute(&self, _ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        let at_ms = Local::now().timestamp_millis();
         attested(
             note_evidence("time.now"),
-            ctx.say("time_now", &[("time", &ctx.pack().datetime("now", &now))]),
+            "reported the current local time",
+            Rendering::new("time_now", serde_json::json!({ "at_ms": at_ms })),
         )
     }
 }
@@ -58,8 +59,12 @@ impl Capability for About {
     fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
         Ok(())
     }
-    fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
-        attested(note_evidence("robot.about"), ctx.say("self_meta", &[]))
+    fn execute(&self, _ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        attested(
+            note_evidence("robot.about"),
+            "described this robot",
+            Rendering::bare("self_meta"),
+        )
     }
 }
 
@@ -82,7 +87,11 @@ impl Capability for Help {
     fn validate(&self, _args: &serde_json::Value) -> Result<(), String> {
         Ok(())
     }
-    fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
-        attested(note_evidence("robot.help"), ctx.say("help", &[]))
+    fn execute(&self, _ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        attested(
+            note_evidence("robot.help"),
+            "listed what this robot can do",
+            Rendering::bare("help"),
+        )
     }
 }

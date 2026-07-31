@@ -32,11 +32,13 @@ impl VerdictProvider for NoReDecide {
 pub fn resume_incomplete(
     cell: &Cell,
     router: &dyn CapabilityRouter,
+    renderer: &dyn crate::lifecycle::Renderer,
 ) -> Result<ReplaySummary, PrismError> {
     let mut summary = ReplaySummary::default();
     let deps = TurnDeps {
         router,
         verdicts: &NoReDecide,
+        renderer,
         crash: None,
     };
 

@@ -2,7 +2,7 @@
 
 use super::{attested, mind_err, note_evidence, row_evidence, typed, Capability, Ctx};
 use chrono::{DateTime, Local};
-use prism::types::{Effect, Outcome};
+use prism::types::{Effect, Outcome, Rendering};
 use prism::PrismError;
 use serde::Deserialize;
 
@@ -92,12 +92,10 @@ impl Capability for Create {
         })?;
         attested(
             row_evidence(&rem.id, &trust::ids::sha256_hex(a.about.as_bytes())),
-            ctx.say(
+            format!("scheduled a reminder for {} ms", rem.fire_at),
+            Rendering::new(
                 "reminder_created",
-                &[
-                    ("when", &ctx.pack().datetime_ms("fire_at", rem.fire_at)),
-                    ("about", &rem.about),
-                ],
+                serde_json::json!({ "when_ms": rem.fire_at, "about": rem.about }),
             ),
         )
     }
@@ -127,26 +125,20 @@ impl Capability for List {
         let all = ctx
             .cell
             .with(|c| mind::reminders::list_active(c).map_err(mind_err))?;
-        let detail = if all.is_empty() {
-            ctx.say("reminder_list_empty", &[])
+        let say = if all.is_empty() {
+            Rendering::bare("reminder_list_empty")
         } else {
-            let lines: Vec<String> = all
+            let items: Vec<serde_json::Value> = all
                 .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    ctx.say(
-                        "reminder_line",
-                        &[
-                            ("n", &(i + 1).to_string()),
-                            ("when", &ctx.pack().datetime_ms("fire_at", r.fire_at)),
-                            ("about", &r.about),
-                        ],
-                    )
-                })
+                .map(|r| serde_json::json!({ "when_ms": r.fire_at, "about": r.about }))
                 .collect();
-            format!("{}\n{}", ctx.say("reminder_list_header", &[]), lines.join("\n"))
+            Rendering::new("reminder_list", serde_json::json!({ "items": items }))
         };
-        attested(note_evidence("reminder.list"), detail)
+        attested(
+            note_evidence("reminder.list"),
+            format!("listed {} pending reminders", all.len()),
+            say,
+        )
     }
 }
 
@@ -178,11 +170,16 @@ impl Capability for CancelLast {
         {
             Some(rem) => attested(
                 row_evidence(&rem.id, ""),
-                ctx.say("reminder_cancelled", &[("about", &rem.about)]),
+                "cancelled the most recent pending reminder",
+                Rendering::new(
+                    "reminder_cancelled",
+                    serde_json::json!({ "about": rem.about }),
+                ),
             ),
             None => attested(
                 note_evidence("reminder.cancel_last"),
-                ctx.say("reminder_nothing_to_cancel", &[]),
+                "no pending reminder to cancel",
+                Rendering::bare("reminder_nothing_to_cancel"),
             ),
         }
     }
