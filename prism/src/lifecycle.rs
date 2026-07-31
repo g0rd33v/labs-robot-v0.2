@@ -254,7 +254,29 @@ pub(crate) fn finish_planned_intent(
     cell.with(|c| journal::step(c, intent_id, "verify", &verify_json, None))?;
 
     // receipt: compiled from evidence, never narrated by a model
-    let receipt = build_receipt(intent_id, &outcomes);
+    let mut receipt = build_receipt(intent_id, &outcomes);
+
+    // sec 5 / Q26, before the receipt is stored: a reply that asserts a
+    // change no step performed is recorded as uncertain rather than
+    // verified, and the person is told
+    let unsupported = unsupported_effect_claim(&outcomes, plan);
+    if let Some(why) = &unsupported {
+        receipt.status = ReceiptStatus::Uncertain;
+        receipt.claims.push(Claim {
+            claim: format!(
+                "this turn's reply asserted a change that no step performed: {why}"
+            ),
+            evidence: vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "expression-check".into(),
+                external_id: "unsupported-effect-claim".into(),
+                hash: String::new(),
+                ts: ids::ts_ms(),
+            }],
+        });
+        let flag = serde_json::json!({ "reason": why }).to_string();
+        cell.with(|c| journal::step(c, intent_id, "expression.flagged", &flag, None))?;
+    }
 
     let receipt = cell.with(|c| receipts::store(c, &receipt))?;
     let receipt_json = serde_json::json!({
@@ -267,7 +289,10 @@ pub(crate) fn finish_planned_intent(
 
     // the ONE place structure becomes words, at the very edge, outside the
     // kernel: everything above this line is data
-    let parts = reply_parts(&outcomes, &receipt);
+    let mut parts = reply_parts(&outcomes, &receipt);
+    if unsupported.is_some() {
+        parts.push(ReplyPart::Say(Rendering::bare("unsupported_note")));
+    }
     let actions = action_records(&receipt, &outcomes, plan);
     let rendered = deps.renderer.render(&plan.lang, &parts, &actions);
     let reply = rendered.text;
@@ -692,6 +717,77 @@ pub(crate) fn reply_parts(outcomes: &[Outcome], receipt: &Receipt) -> Vec<ReplyP
     parts
 }
 
+/// Rendering ids that assert a change to the world.
+///
+/// These are kernel vocabulary, not language: `forgotten` is an id, and the
+/// sentence a person reads for it is the surface's business. Listing them
+/// is not the phrase-list problem returning -- a phrase list had to be
+/// written once per language and could be evaded by writing in a language
+/// nobody listed. This list is written once, full stop.
+const EFFECT_CLAIMS: [&str; 8] = [
+    "reminder_created",
+    "reminder_cancelled",
+    "remembered",
+    "forgotten",
+    "corrected",
+    "invite_created",
+    "telegram_bind_code",
+    "media_stored",
+];
+
+/// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set
+/// logic, ~0 ms", every turn, never on the model that generated).
+///
+/// The invariant: **a reply may not assert a change that no step performed.**
+/// A rendering from `EFFECT_CLAIMS` must have come from a step the plan
+/// classified as more than a read, and that step must have succeeded with
+/// evidence behind it.
+///
+/// This replaced a scan for phrases like "i saved it", which had to be
+/// written per language and so was blind in every language nobody had
+/// listed. Checking the STRUCTURE instead is language-free by construction:
+/// there is nothing to translate and nothing to evade.
+///
+/// What it catches is the failure that gets likelier as capabilities are
+/// added -- a read-only step emitting a rendering that announces a change.
+/// What it does not catch is a model writing an effect claim in free prose;
+/// that is what the action record is for, and the two are complementary
+/// rather than alternatives.
+pub fn unsupported_effect_claim(
+    outcomes: &[Outcome],
+    plan: &Plan,
+) -> Option<String> {
+    for o in outcomes {
+        let Some(r) = &o.rendering else { continue };
+        if !EFFECT_CLAIMS.contains(&r.id.as_str()) {
+            continue;
+        }
+        let step = plan.steps.iter().find(|s| s.step_id == o.step_id);
+        match step {
+            Some(s) if s.effect == Effect::Read => {
+                return Some(format!(
+                    "step {} announced '{}' from a read-only capability",
+                    s.capability, r.id
+                ))
+            }
+            Some(_) if !o.ok || o.evidence.is_empty() => {
+                return Some(format!(
+                    "'{}' was announced with no evidence behind it",
+                    r.id
+                ))
+            }
+            None => {
+                return Some(format!(
+                    "'{}' was announced by a step that is not in the plan",
+                    r.id
+                ))
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The action record: what actually happened, compiled from the receipt's
 /// evidence rather than from anyone's sentence (arch sec 5 / Q26).
 ///
@@ -823,6 +919,59 @@ mod receipt_tests {
         let parts = reply_parts(std::slice::from_ref(&outcome), &receipt);
         assert!(matches!(&parts[0], ReplyPart::Say(r) if r.id == "provider_failure"));
         assert!(matches!(&parts[1], ReplyPart::Say(r) if r.id == "failed_note"));
+    }
+
+    /// Q26, restored and made structural.
+    ///
+    /// The old check scanned for phrases like "i saved it" and had to be
+    /// written once per language, so it was blind in every language nobody
+    /// listed. This one asks whether the STRUCTURE supports the claim,
+    /// which has nothing to translate and nothing to evade.
+    #[test]
+    fn a_read_only_step_may_not_announce_a_change() {
+        let step = |effect: Effect| PlanStep {
+            step_id: "s1".into(),
+            capability: "memory.recall".into(),
+            args: serde_json::json!({}),
+            effect,
+            approval: Approval::Auto,
+            deps: vec![],
+        };
+        let plan = |effect: Effect| Plan {
+            plan_id: "p".into(),
+            intent_id: "i".into(),
+            lang: "en".into(),
+            steps: vec![step(effect)],
+        };
+        // a capability that reads, announcing a deletion
+        let bad = Outcome::attested(
+            "s1".into(),
+            ev("deterministic"),
+            "read some facts".into(),
+            Rendering::new("forgotten", serde_json::json!({ "content": "x" })),
+        );
+        assert!(
+            unsupported_effect_claim(std::slice::from_ref(&bad), &plan(Effect::Read))
+                .is_some(),
+            "a read that announces a deletion must be caught"
+        );
+        // the same rendering from a step that really deletes is fine
+        assert!(unsupported_effect_claim(
+            std::slice::from_ref(&bad),
+            &plan(Effect::Irreversible)
+        )
+        .is_none());
+
+        // and an ordinary read announcing an ordinary read is fine
+        let fine = Outcome::attested(
+            "s1".into(),
+            ev("deterministic"),
+            "read some facts".into(),
+            Rendering::bare("recall_empty"),
+        );
+        assert!(
+            unsupported_effect_claim(&[fine], &plan(Effect::Read)).is_none()
+        );
     }
 
     /// The receipts law without a phrase list (sec 5 / Q26).

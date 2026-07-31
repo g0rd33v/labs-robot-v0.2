@@ -229,6 +229,10 @@ pub fn english(r: &Rendering) -> String {
             s(a, "status")
         ),
         "fallback" => "i can't do that one. try \"help\" to see what i can do.".into(),
+        "unsupported_note" => "[note from my own checks: the line above reads like \
+             something changed, but this turn performed no such action. nothing was \
+             created, saved or deleted, and the receipt records that.]"
+            .into(),
         "ops_notice" => "(operational notice)".into(),
         "media_stored" => format!("stored: {}", s(a, "filename")),
 
@@ -396,12 +400,15 @@ mod tests {
             ("confirm_irreversible", serde_json::json!({"tool": "memory.forget"})),
             ("confirmation_declined", serde_json::json!({})),
             ("confirmation_stale", serde_json::json!({})),
+            ("unsupported_note", serde_json::json!({})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),
         ] {
             let text = english(&Rendering::new(id, slots));
             assert!(!text.is_empty(), "{id}");
-            assert!(!text.starts_with('['), "{id} has no template");
+            // exact, not a prefix guess: a real template may legitimately
+            // begin with a bracket, and one of them does
+            assert_ne!(text, format!("[{id}]"), "{id} has no template");
         }
     }
 
@@ -447,7 +454,7 @@ mod tests {
         assert!(ids.len() > 20, "the scan found almost nothing: {ids:?}");
         let missing: Vec<&String> = ids
             .iter()
-            .filter(|id| english(&Rendering::bare(id)).starts_with('['))
+            .filter(|id| english(&Rendering::bare(id)) == format!("[{id}]"))
             .collect();
         assert!(missing.is_empty(), "no english template for: {missing:?}");
     }
