@@ -13,6 +13,8 @@
 //! pinned by hand, nobody should be letting it move on its own.
 
 pub mod dial;
+pub mod express;
+pub mod stance;
 
 use rusqlite::Connection;
 use thiserror::Error;

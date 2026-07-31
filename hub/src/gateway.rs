@@ -17,6 +17,11 @@ pub type BoundarySink = Arc<Mutex<Connection>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Verdict,
+    /// Verification. A LAW, not a preference (arch sec 5): verification
+    /// never runs on the model that generated. Generators grade their own
+    /// work too generously, and a skeptical standalone evaluator is
+    /// tractable where self-criticism is not.
+    Evaluator,
     /// Routing: classify AND choose a tool. A different class of call from
     /// the bare verdict -- a prompt carrying the whole catalog, and an
     /// answer that has to pick correctly -- so it gets its own seat and its
@@ -35,6 +40,7 @@ impl Role {
         match self {
             Role::Verdict => "verdict",
             Role::Route => "route",
+            Role::Evaluator => "evaluator",
             Role::Answer => "answer",
             Role::Extract => "extract",
             Role::Super => "super",
@@ -51,6 +57,7 @@ impl Role {
 pub struct Cast {
     pub verdict: String,
     pub route: String,
+    pub evaluator: String,
     pub answer: String,
     pub extract: String,
     #[serde(rename = "super")]
@@ -65,6 +72,8 @@ impl Default for Cast {
         Self {
             verdict: "google/gemma-4-26b-a4b-it".into(),
             route: "google/gemma-4-31b-it".into(),
+            // Q26: gemma-4-26b-a4b, deliberately NOT the 31b generator
+            evaluator: "google/gemma-4-26b-a4b-it".into(),
             answer: "google/gemma-4-31b-it".into(),
             extract: "google/gemma-4-31b-it".into(),
             super_: "nvidia/nemotron-3-super-120b-a12b".into(),
@@ -80,6 +89,7 @@ impl Cast {
         match role {
             Role::Verdict => &self.verdict,
             Role::Route => &self.route,
+            Role::Evaluator => &self.evaluator,
             Role::Answer => &self.answer,
             Role::Extract => &self.extract,
             Role::Super => &self.super_,
@@ -94,6 +104,9 @@ impl Cast {
         match role {
             Role::Verdict => vec![self.verdict.clone(), self.answer.clone()],
             Role::Route => vec![self.route.clone(), self.answer.clone()],
+            // no fallback to the answer seat: falling back to the generator
+            // would break the very law this role exists to keep
+            Role::Evaluator => vec![self.evaluator.clone()],
             Role::Answer => vec![self.answer.clone(), self.super_.clone()],
             Role::Extract => vec![self.extract.clone(), self.answer.clone()],
             Role::Super => vec![self.super_.clone(), self.answer.clone()],
@@ -115,6 +128,11 @@ pub struct GatewayConfig {
     /// latter simply times the former out -- which looks exactly like a
     /// model that cannot route
     pub route_timeout_ms: u64,
+    /// the evaluator class. It borrowed the doorman's retry budget at first
+    /// and timed out on every call -- a check that never runs is worse than
+    /// no check, because the journal fills with "unverified" and nobody
+    /// reads why.
+    pub evaluator_timeout_ms: u64,
     pub answer_timeout_ms: u64,
     /// hedge deadline for the verdict class (Q19)
     pub hedge_after_ms: u64,
@@ -134,6 +152,7 @@ impl Default for GatewayConfig {
             verdict_timeout_ms: 3000,
             verdict_retry_timeout_ms: 5000,
             route_timeout_ms: 30_000,
+            evaluator_timeout_ms: 20_000,
             answer_timeout_ms: 45_000,
             hedge_after_ms: 2500,
             route_hedge_after_ms: 8000,
@@ -400,6 +419,7 @@ impl ModelGateway {
                 (Role::Verdict, 0) => self.cfg.verdict_timeout_ms,
                 (Role::Verdict, _) => self.cfg.verdict_retry_timeout_ms,
                 (Role::Route, _) => self.cfg.route_timeout_ms,
+                (Role::Evaluator, _) => self.cfg.evaluator_timeout_ms,
                 _ => self.cfg.answer_timeout_ms,
             };
             let result = if matches!(role, Role::Verdict | Role::Route) && i == 0 {
@@ -615,6 +635,7 @@ mod tests {
             GatewayConfig {
                 hedge_after_ms: 50,
                 route_hedge_after_ms: 50,
+                evaluator_timeout_ms: 50,
                 ..Default::default()
             },
             None,

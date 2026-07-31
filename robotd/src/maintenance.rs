@@ -133,6 +133,7 @@ mod tests {
             None,
             None,
             0,
+            10,
             "http://127.0.0.1:0".into(),
             "bender-test".into(),
             "inst_test".into(),

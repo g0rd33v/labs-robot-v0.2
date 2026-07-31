@@ -131,7 +131,6 @@ impl Dial {
 }
 
 const EVOLUTION_KEY: &str = "soul:evolution";
-
 /// Load the dial, filling in defaults for anything never set.
 pub fn load(conn: &Connection) -> Result<Dial, SoulError> {
     let mut settings = vec![];

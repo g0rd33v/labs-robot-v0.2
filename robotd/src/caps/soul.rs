@@ -23,6 +23,17 @@ fn dimension_schema(desc: &str) -> serde_json::Value {
     })
 }
 
+fn dial_slots_with(d: &dial::Dial, stance: Option<&soul::stance::Stance>) -> serde_json::Value {
+    let mut v = dial_slots(d);
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "stance".into(),
+            serde_json::json!(stance.map(|s| s.label()).unwrap_or_else(|| "its own".into())),
+        );
+    }
+    v
+}
+
 fn dial_slots(d: &dial::Dial) -> serde_json::Value {
     let items: Vec<serde_json::Value> = d
         .settings
@@ -66,11 +77,16 @@ impl Capability for Show {
         Ok(())
     }
     fn execute(&self, ctx: &Ctx<'_>, _args: &serde_json::Value) -> Result<Outcome, PrismError> {
-        let d = ctx.cell.with(|c| dial::load(c).map_err(soul_err))?;
+        let (d, st) = ctx.cell.with(|c| {
+            Ok((
+                dial::load(c).map_err(soul_err)?,
+                soul::stance::get(c).map_err(soul_err)?,
+            ))
+        })?;
         attested(
             super::note_evidence("soul.show"),
             "reported the persona dial",
-            Rendering::new("soul_dial", dial_slots(&d)),
+            Rendering::new("soul_dial", dial_slots_with(&d, st.as_ref())),
         )
     }
 }
@@ -290,6 +306,89 @@ impl Capability for Evolution {
             super::note_evidence("soul.evolution"),
             format!("set self-adjustment to {}", if a.on { "on" } else { "off" }),
             Rendering::new("soul_evolution", serde_json::json!({ "on": a.on })),
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StanceArgs {
+    stance: String,
+    #[serde(default)]
+    character: Option<String>,
+}
+
+pub struct SetStance;
+
+impl Capability for SetStance {
+    fn name(&self) -> &'static str {
+        "soul.stance"
+    }
+    fn effect(&self) -> Effect {
+        Effect::ReversibleWrite
+    }
+    fn description(&self) -> &'static str {
+        "Set who this robot is to the person: a twin who speaks the way they \
+         do, a friend, a mentor, or any character they describe. Use when \
+         they ask it to be their twin/friend/mentor, to play a role or \
+         character, to talk like someone, or to go back to its own voice \
+         (stance 'none'). Choosing a stance also moves the whole style dial \
+         to match, so this is the setting to reach for before nudging \
+         individual dimensions."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "stance": {
+                    "type": "string",
+                    "enum": ["twin", "friend", "mentor", "character", "none"],
+                    "description": "'character' needs the character field; 'none' \
+                                    returns the robot to its own voice."
+                },
+                "character": {
+                    "type": "string",
+                    "description": "Who to be, in the PERSON'S OWN WORDS, copied \
+                                    from their message. Only with stance \
+                                    'character'."
+                }
+            },
+            "required": ["stance"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String> {
+        let a: StanceArgs = typed(args)?;
+        match a.stance.as_str() {
+            "twin" | "friend" | "mentor" | "none" => Ok(()),
+            "character" => a
+                .character
+                .as_ref()
+                .filter(|c| !c.trim().is_empty())
+                .map(|_| ())
+                .ok_or_else(|| "a character needs describing".to_string()),
+            other => Err(format!("no stance {other}")),
+        }
+    }
+    fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        let a: StanceArgs = typed(args).map_err(PrismError::Capability)?;
+        let want = match a.stance.as_str() {
+            "none" => None,
+            "character" => Some(soul::stance::Stance::Character(
+                a.character.clone().unwrap_or_default(),
+            )),
+            s => soul::stance::Stance::parse(s),
+        };
+        ctx.cell
+            .with(|c| soul::stance::set(c, want.as_ref()).map_err(soul_err))?;
+        let label = want
+            .as_ref()
+            .map(|s| s.label())
+            .unwrap_or_else(|| "its own".into());
+        attested(
+            super::row_evidence("soul.stance", ""),
+            format!("took the stance: {label}"),
+            Rendering::new("soul_stance", serde_json::json!({ "stance": label })),
         )
     }
 }

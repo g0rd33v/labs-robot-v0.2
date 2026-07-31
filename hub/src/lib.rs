@@ -9,6 +9,7 @@
 //! and the fetch/READ loop.
 
 pub mod escalation;
+pub mod evaluator;
 pub mod gateway;
 pub mod research;
 pub mod telegram;

@@ -68,6 +68,8 @@ pub struct RobotCore {
     pub gateway: Option<Arc<hub::ModelGateway>>,
     pub research: Option<Arc<hub::Research>>,
     pub ultra_daily_cap: u32,
+    /// Q26's sample rate for routine turns; acting turns are always checked.
+    pub verify_percent: u32,
     pub public_base: String,
     pub robot_name: String,
     pub started_at: i64,
@@ -85,6 +87,7 @@ impl RobotCore {
         gateway: Option<Arc<hub::ModelGateway>>,
         research: Option<Arc<hub::Research>>,
         ultra_daily_cap: u32,
+        verify_percent: u32,
         public_base: String,
         robot_name: String,
         instance_id: String,
@@ -101,6 +104,7 @@ impl RobotCore {
             gateway,
             research,
             ultra_daily_cap,
+            verify_percent,
             public_base,
             robot_name,
             started_at: trust::ids::ts_ms(),
@@ -140,6 +144,42 @@ impl RobotCore {
 
     pub fn keychain(&self) -> KeyChain {
         self.keys.clone()
+    }
+
+    /// Check a reply against its own receipt, on a seat that did not write
+    /// it (Q26). Journals the verdict; never blocks delivery, because an
+    /// evaluator that can stop the robot talking is a new way for the robot
+    /// to go silent.
+    fn expression_verify(&self, cell: &Cell, out: &prism::TurnOutput) {
+        let Some(gw) = &self.gateway else { return };
+        let acted = out
+            .receipt
+            .claims
+            .iter()
+            .any(|c| c.evidence.iter().any(|e| e.kind == "row"));
+        if !hub::evaluator::should_verify(&out.intent_id, acted, self.verify_percent) {
+            return;
+        }
+        let claims: Vec<String> = out.receipt.claims.iter().map(|c| c.claim.clone()).collect();
+        let verdict = hub::evaluator::expression_supported(gw, &out.reply, &claims);
+        let payload = match &verdict {
+            Some(v) => serde_json::json!({
+                "supported": v.supported, "why": v.why, "sampled": !acted,
+            }),
+            // unavailable is recorded as UNVERIFIED, never as passed: an
+            // evaluator that silently approves when broken is worse than
+            // none, because it leaves a record saying someone looked
+            None => serde_json::json!({ "supported": null, "why": "evaluator unavailable" }),
+        };
+        let _ = cell.with(|c| {
+            prism::journal::step(c, &out.intent_id, "expression.verified", &payload.to_string(), None)
+        });
+        if verdict.as_ref().is_some_and(|v| !v.supported) {
+            tracing::warn!(
+                "expression-verify: reply for {} claims more than its receipt",
+                out.intent_id
+            );
+        }
     }
 
     pub fn cell(&self, principal: i64) -> anyhow::Result<CellHandle> {
@@ -328,6 +368,7 @@ impl RobotCore {
             };
             let speak = crate::render::Speak {
                 gateway: self.gateway.clone(),
+                voice: cell_voice(cell),
             };
             let deps = TurnDeps {
                 router: &router,
@@ -351,6 +392,12 @@ impl RobotCore {
             // renders from history), so recording it is the confirmation.
             // Telegram confirms on the provider's message_id, which the send
             // path owns -- tracked in BUILD-LOG, not silently conflated.
+            // Q26 / sec 5's evaluator-separation LAW: a turn that acted is
+            // always checked, and a sample of the rest is. On a different
+            // seat than the one that generated -- the whole point is that
+            // generators grade their own work too generously.
+            self.expression_verify(cell, &out);
+
             cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
             cell.with(|c| Ok(mind::record_message(c, "out", surface, &out.reply)))??;
             cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
@@ -373,6 +420,21 @@ pub fn remember_lang(conn: &Connection, lang: &str) {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![lang],
     );
+}
+
+/// Soul's instruction for this cell, or `None` when nothing needs shaping.
+///
+/// One place computes it so every path agrees about the voice, and so the
+/// "default dial means templates" property has a single home.
+pub fn cell_voice(cell: &Cell) -> Option<String> {
+    cell.with(|c| {
+        let d = soul::dial::load(c).map_err(|e| prism::PrismError::Capability(e.to_string()))?;
+        let st =
+            soul::stance::get(c).map_err(|e| prism::PrismError::Capability(e.to_string()))?;
+        Ok(soul::express::shape(&d, st.as_ref()))
+    })
+    .ok()
+    .flatten()
 }
 
 /// The language a cell speaks, for the lanes that talk without being asked.
@@ -705,7 +767,10 @@ mod tests {
     }
 
     /// The renderer the tests speak through: English templates, no model.
-    static SPEAK: crate::render::Speak = crate::render::Speak { gateway: None };
+    static SPEAK: crate::render::Speak = crate::render::Speak {
+        gateway: None,
+        voice: None,
+    };
 
     fn live_deps(router: &Registry) -> TurnDeps<'_> {
         TurnDeps {

@@ -21,11 +21,19 @@ use std::sync::Arc;
 
 pub struct Speak {
     pub gateway: Option<Arc<hub::ModelGateway>>,
+    /// Soul's instruction for this turn, or `None` at the default dial with
+    /// no role -- in which case English uses its templates, which are free,
+    /// instant and work with no network. Asking for a different voice is
+    /// what buys the model call that shaping needs.
+    pub voice: Option<String>,
 }
 
 impl Speak {
     pub fn offline() -> Self {
-        Self { gateway: None }
+        Self {
+            gateway: None,
+            voice: None,
+        }
     }
 }
 
@@ -246,9 +254,10 @@ pub fn english(r: &Rendering) -> String {
                 })
                 .collect();
             format!(
-                "how i'm set to speak:\n{}\n\nself-adjustment: {}\n(say \"be blunter\", \
+                "i'm speaking as: {}\n\nhow i'm set to speak:\n{}\n\nself-adjustment: {}\n(say \"be blunter\", \
                  \"be warmer\", \"shorter\" to move one; \"pin brevity\" to freeze it; \
                  \"stop adjusting yourself\" to switch adaptation off)",
+                s(a, "stance"),
                 lines.join("\n"),
                 if on { "on" } else { "off" }
             )
@@ -281,6 +290,11 @@ pub fn english(r: &Rendering) -> String {
                     .into()
             }
         }
+        "soul_stance" => format!(
+            "alright -- i'm speaking as {} now. that changes how i say things, \
+             not what's true.",
+            s(a, "stance")
+        ),
         "soul_refused" => format!("i can't: {}", s(a, "why")),
 
         // ---- turn outcomes ----
@@ -341,7 +355,12 @@ impl Renderer for Speak {
         // English is rendered here, on this machine, from these templates:
         // nothing about the person leaves to produce a sentence.
         let mut disclosed: Vec<String> = vec![];
-        let said: Vec<String> = if is_english(lang) || needs_saying.is_empty() {
+        // English at the default dial uses templates: free, instant, offline.
+        // A moved dial or a role is what buys the model call.
+        let shape_english = self.voice.is_some();
+        let said: Vec<String> = if needs_saying.is_empty()
+            || (is_english(lang) && !shape_english)
+        {
             needs_saying.iter().map(|r| english(r)).collect()
         } else {
             match self.say_in(lang, &needs_saying) {
@@ -383,16 +402,20 @@ impl Speak {
             .iter()
             .map(|r| serde_json::json!({ "english": english(r), "data": r.slots }))
             .collect();
+        let voice = self.voice.as_deref().unwrap_or(
+            "keep the robot's voice: lower-case, warm, brief, no corporate padding.",
+        );
         let system = format!(
-            "you render a robot's system messages into the language tagged \
-             `{lang}` (BCP 47).\n\
+            "you re-voice a robot's system messages into the language tagged \
+             `{lang}` (BCP 47). if that tag is english, keep them in english and \
+             only re-voice them.\n\
              for each item you get the ENGLISH original and the structured DATA \
-             behind it. write the same message in {lang}, keeping every number, \
-             time, name and quoted fragment exactly as it is in the data -- \
-             especially text the person themselves wrote, which must appear \
-             unchanged.\n\
-             keep the robot's voice: lower-case, warm, brief, no corporate \
-             padding. render dates and times naturally for that language.\n\
+             behind it. write the same message, keeping every number, time, name \
+             and quoted fragment exactly as it is in the data -- especially text \
+             the person themselves wrote, which must appear unchanged. you are \
+             changing HOW it is said and nothing about what it says.\n\
+             render dates and times naturally for that language.\n\
+             {voice}\n\
              return ONLY a JSON array of strings, one per item, in order."
         );
         let messages = [
@@ -463,11 +486,12 @@ mod tests {
             ("confirmation_declined", serde_json::json!({})),
             ("confirmation_stale", serde_json::json!({})),
             ("unsupported_note", serde_json::json!({})),
-            ("soul_dial", serde_json::json!({"items": [], "evolution": true})),
+            ("soul_dial", serde_json::json!({"items": [], "evolution": true, "stance": "its own"})),
             ("soul_set", serde_json::json!({"dimension": "warmth", "value": 60})),
             ("soul_bounds", serde_json::json!({"dimension": "warmth", "floor": 0, "ceiling": 100, "value": 55})),
             ("soul_pinned", serde_json::json!({"dimension": "warmth", "value": 55})),
             ("soul_evolution", serde_json::json!({"on": true})),
+            ("soul_stance", serde_json::json!({"stance": "mentor"})),
             ("soul_refused", serde_json::json!({"why": "x"})),
             ("ops_notice", serde_json::json!({})),
             ("media_stored", serde_json::json!({"filename": "x.png"})),
@@ -563,5 +587,95 @@ mod tests {
         // and the same claim with nothing behind it shows no record at all
         let bare = sp.render("ja", &parts, &[]).text;
         assert!(!bare.contains("reminder.create"), "{bare}");
+    }
+}
+
+#[cfg(test)]
+mod soul_tests {
+    use super::*;
+    use prism::types::Rendering;
+    use soul::dial::{Dial, Dimension, Setting};
+    use soul::stance::Stance;
+
+    fn dial_at(pairs: &[(Dimension, i64)]) -> Dial {
+        Dial {
+            settings: Dimension::ALL
+                .into_iter()
+                .map(|d| Setting {
+                    dimension: d,
+                    value: pairs
+                        .iter()
+                        .find(|(x, _)| *x == d)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(d.default_value()),
+                    floor: 0,
+                    ceiling: 100,
+                })
+                .collect(),
+            evolution: true,
+        }
+    }
+
+    /// S2's gate, the half that can be checked without a network: the dial
+    /// must reach the renderer and change what it asks for, and it must not
+    /// touch the data.
+    ///
+    /// The live half -- that opposite settings produce visibly different
+    /// wording with identical slots -- needs a model and runs in
+    /// `robotd eval --live`.
+    #[test]
+    fn the_dial_changes_the_ask_and_never_the_data() {
+        let neutral = Speak {
+            gateway: None,
+            voice: soul::express::shape(&dial_at(&[]), None),
+        };
+        assert!(
+            neutral.voice.is_none(),
+            "a default dial with no stance must not ask for shaping -- that is \
+             what keeps english free and offline"
+        );
+
+        let blunt = soul::express::shape(
+            &dial_at(&[(Dimension::Directness, 100), (Dimension::Brevity, 100)]),
+            None,
+        )
+        .unwrap();
+        let mentor = soul::express::shape(&dial_at(&[]), Some(&Stance::Mentor)).unwrap();
+        assert_ne!(blunt, mentor);
+
+        // whatever the voice, the SLOTS are untouched: the renderer receives
+        // the same structure and Soul cannot reach into it
+        let r = Rendering::new(
+            "reminder_created",
+            serde_json::json!({ "when_ms": 1_700_000_000_000i64, "about": "call mark" }),
+        );
+        let plain = english(&r);
+        assert!(plain.contains("call mark"));
+        // and with a voice set but no gateway, it falls back to that same
+        // english rather than inventing anything
+        let shaped = Speak {
+            gateway: None,
+            voice: Some(blunt),
+        };
+        let out = shaped.render("en", &[ReplyPart::Say(r)], &[]);
+        assert_eq!(out.text, plain, "no model, no shaping -- and no drift");
+        assert!(out.disclosed.is_empty());
+    }
+
+    /// A stance is a costume, and the fence saying so travels with it every
+    /// time -- the person writing "be a pirate" is not thinking about
+    /// receipts.
+    #[test]
+    fn every_stance_carries_its_fence() {
+        for st in [
+            Stance::Twin,
+            Stance::Friend,
+            Stance::Mentor,
+            Stance::Character("a laconic ship's engineer".into()),
+        ] {
+            let v = soul::express::shape(&dial_at(&[]), Some(&st)).unwrap();
+            assert!(v.contains("nothing about what is true"), "{st:?}");
+            assert!(v.contains("answer honestly"), "{st:?}");
+        }
     }
 }

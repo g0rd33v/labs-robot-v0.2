@@ -31,6 +31,7 @@ model_cache = "./data/models"
 # works and the robot says so honestly.
 base_url = "https://openrouter.ai/api/v1"
 hedge_after_ms = 2500
+verify_percent = 10
 ultra_daily_cap = 20
 # the cast (sec 6a / Q28) is overridable per role:
 # [hub.cast]
@@ -159,6 +160,9 @@ pub struct HubSection {
     pub base_url: String,
     pub hedge_after_ms: u64,
     pub ultra_daily_cap: u32,
+    /// Q26: percent of ROUTINE turns whose expression is verified on the
+    /// evaluator seat. Turns that acted are always verified regardless.
+    pub verify_percent: u32,
     pub cast: hub::Cast,
 }
 
@@ -168,6 +172,7 @@ impl Default for HubSection {
             base_url: "https://openrouter.ai/api/v1".into(),
             hedge_after_ms: 2500,
             ultra_daily_cap: 20,
+            verify_percent: 10,
             cast: hub::Cast::default(),
         }
     }

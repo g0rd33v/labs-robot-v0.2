@@ -15,8 +15,15 @@ have not invented a meaning — see §12.
 
 ## 1. What Soul is, and where its output lands
 
-**Soul is the robot's emotional intelligence.** It is one of the three
-things the robot is made of, and they divide cleanly:
+**Soul is the robot's emotional intelligence — the part that makes the
+rest of it feel like talking to someone.** It learns how a particular
+person behaves and how they like to be met; it speaks in a human register
+rather than a system one; it can take on a role or a character when asked.
+Without it, prism and mind are a competent machine that nobody wants to
+talk to.
+
+It is one of the three things the robot is made of, and they divide
+cleanly:
 
 | | | |
 | --- | --- | --- |
@@ -156,6 +163,45 @@ Humour is deliberately absent: I could not define a signal that
 distinguishes "they liked the joke" from "they were being polite", and a
 dial that adjusts on a misread is worse than no dial.
 
+## 4b. Roles and personas
+
+The dial is *how* this robot speaks. A **role** is *who it is speaking as*
+— a character the owner asks for, on purpose, for as long as they want it.
+
+```
+soul_persona row: dimension = 'role'   (value/floor/ceiling unused)
+role brief:       cell_meta['soul:role'] — free text, the owner's words
+```
+
+- A role is **owner-set and owner-cleared**, never inferred. Nothing
+  adaptive gives the robot a new character.
+- It stacks **on top of** the dial rather than replacing it: a role sets
+  voice and manner, the dial still sets directness, brevity and the rest.
+- It is visible in `/soul` and travels with sync, like everything else.
+- It shapes expression **only**. A role cannot reach facts, permissions or
+  receipts — it is downstream of all three, like the rest of Soul.
+
+**A stance change is spoken in the old voice.** The turn's voice is
+resolved before the turn runs, so "be my mentor" is answered by whoever the
+robot was a moment ago, and the new stance starts with the next message.
+That is deliberate rather than a rounding error: the reply to *become
+someone else* is the last thing the previous self says.
+
+**In-character speech is not a claim about the robot.** A robot playing a
+Victorian butler that says "delighted, sir" is performing a role the owner
+asked for. §5's *"never claims to feel"* is about the sincere question —
+"do you actually care?" — which must get an honest answer whatever
+character is running. The distinction is between a costume and a lie about
+what is underneath it, and both people in the room know which is which.
+
+**Where it stops being a style question.** Playing a character in a private
+chat is one thing. Sending a message *as a named real person* on an
+outbound channel — email, Telegram — is another, because a third party who
+never agreed to the game receives it. The robot already treats outbound
+send as special (Q28: `email.send` defaults to approval-always). Whether a
+role may travel outbound at all is a decision the owner should take before
+those capabilities exist, not after. See §12.
+
 ## 5. Perception — hypotheses that never become facts
 
 Per turn: `{signal, value, confidence}`, e.g. `{urgency, high, 0.72}`.
@@ -228,8 +274,14 @@ Outside `soul_persona` entirely — so there is no field to move, rather than
 a rule saying not to:
 
 the five laws · never claiming an effect without a receipt · never claiming
-to feel · never pretending to be human · honesty about uncertainty · the
-owner's persona directive.
+to feel *when asked sincerely* · honesty about uncertainty · the owner's
+own persona directive.
+
+*(Corrected 2026-07-31: an earlier draft of this list included "never
+pretending to be human". That was the builder's invention, not the spec's —
+the frozen docs say only "it never claims to feel". A robot that may take
+on a role needs the narrower constraint, and the narrower one is the one
+that was actually decided.)*
 
 ## 10. Owner surface
 
@@ -282,3 +334,9 @@ an armchair, and every number in §7 is currently mine rather than yours.
 6. **Journal visibility** — shown in `/soul` by default, or on request?
 7. **Sampling rate for expression-verify** — Q26 says 10%; confirm it is
    still right now that turns cost more than they did.
+8. **May a role travel outbound?** In a private chat, playing a character is
+   between the two of you. An email or a Telegram message sent *as* a named
+   real person reaches someone who never agreed to it. My proposal: roles
+   shape chat freely, and outbound sends always carry the robot's own
+   identity regardless of role. Yours to decide, and worth deciding before
+   `email.send` exists rather than after.

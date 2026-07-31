@@ -41,6 +41,7 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
     let lang = crate::robot::cell_lang(cell);
     let speak = crate::render::Speak {
         gateway: robot.gateway.clone(),
+        voice: crate::robot::cell_voice(cell),
     };
     for rem in due {
         // a reminder firing at 03:00 speaks the language its person uses
@@ -154,6 +155,7 @@ mod tests {
             None,
             None,
             0,
+            10,
             "http://127.0.0.1:0".into(),
             "bender-test".into(),
             "inst_test".into(),

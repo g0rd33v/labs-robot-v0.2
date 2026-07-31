@@ -326,6 +326,7 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(soul::Set),
         Box::new(soul::Bounds),
         Box::new(soul::Evolution),
+        Box::new(soul::SetStance),
     ]
 }
 

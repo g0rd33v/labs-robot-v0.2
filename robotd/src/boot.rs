@@ -186,6 +186,7 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         gateway,
         research,
         cfg.hub.ultra_daily_cap,
+        cfg.hub.verify_percent,
         public_base,
         cfg.robot.name.clone(),
         instance_id,
