@@ -1,0 +1,60 @@
+{"lang": "ru", "text": "который час", "tool": "time.now"}
+{"lang": "ru", "text": "напомни через 10 минут размяться", "tool": "reminder.create", "verbatim": "размяться"}
+{"lang": "ru", "text": "запомни что я пью зелёный чай", "tool": "memory.remember", "verbatim": "зелёный чай"}
+{"lang": "ru", "text": "что ты помнишь про чай", "tool": "memory.recall"}
+{"lang": "ru", "text": "покажи всё что ты про меня сохранил", "tool": "registry.list"}
+{"lang": "ru", "text": "найди в интернете погоду в порту", "tool": "web.research"}
+{"lang": "ja", "text": "今何時ですか", "tool": "time.now"}
+{"lang": "ja", "text": "10分後にストレッチするようリマインドして", "tool": "reminder.create", "verbatim": "ストレッチ"}
+{"lang": "ja", "text": "私が緑茶を飲むことを覚えておいて", "tool": "memory.remember", "verbatim": "緑茶"}
+{"lang": "ja", "text": "お茶について何を覚えていますか", "tool": "memory.recall"}
+{"lang": "ja", "text": "私について保存したものを全部見せて", "tool": "registry.list"}
+{"lang": "ja", "text": "ポルトの天気をウェブで調べて", "tool": "web.research"}
+{"lang": "ar", "text": "كم الساعة الآن", "tool": "time.now"}
+{"lang": "ar", "text": "ذكرني بعد عشر دقائق بأن أتمدد", "tool": "reminder.create", "verbatim": "أتمدد"}
+{"lang": "ar", "text": "تذكر أنني أشرب الشاي الأخضر", "tool": "memory.remember", "verbatim": "الشاي الأخضر"}
+{"lang": "ar", "text": "ماذا تتذكر عن الشاي", "tool": "memory.recall"}
+{"lang": "ar", "text": "أظهر كل ما حفظته عني", "tool": "registry.list"}
+{"lang": "ar", "text": "ابحث في الإنترنت عن الطقس في بورتو", "tool": "web.research"}
+{"lang": "zh", "text": "现在几点", "tool": "time.now"}
+{"lang": "zh", "text": "十分钟后提醒我拉伸", "tool": "reminder.create", "verbatim": "拉伸"}
+{"lang": "zh", "text": "记住我喝绿茶", "tool": "memory.remember", "verbatim": "绿茶"}
+{"lang": "zh", "text": "关于茶你记得什么", "tool": "memory.recall"}
+{"lang": "zh", "text": "把你保存的关于我的一切都显示出来", "tool": "registry.list"}
+{"lang": "zh", "text": "上网查一下波尔图的天气", "tool": "web.research"}
+{"lang": "es", "text": "¿qué hora es?", "tool": "time.now"}
+{"lang": "es", "text": "recuérdame en 10 minutos que haga estiramientos", "tool": "reminder.create", "verbatim": "estiramientos"}
+{"lang": "es", "text": "recuerda que bebo té verde", "tool": "memory.remember", "verbatim": "té verde"}
+{"lang": "es", "text": "¿qué recuerdas sobre el té?", "tool": "memory.recall"}
+{"lang": "es", "text": "muéstrame todo lo que has guardado sobre mí", "tool": "registry.list"}
+{"lang": "es", "text": "busca en internet el tiempo en Oporto", "tool": "web.research"}
+{"lang": "de", "text": "wie spät ist es", "tool": "time.now"}
+{"lang": "de", "text": "erinnere mich in 10 Minuten daran, mich zu dehnen", "tool": "reminder.create", "verbatim": "dehnen"}
+{"lang": "de", "text": "merk dir, dass ich grünen Tee trinke", "tool": "memory.remember", "verbatim": "grünen Tee"}
+{"lang": "de", "text": "was weißt du noch über Tee", "tool": "memory.recall"}
+{"lang": "de", "text": "zeig mir alles, was du über mich gespeichert hast", "tool": "registry.list"}
+{"lang": "de", "text": "such im Internet nach dem Wetter in Porto", "tool": "web.research"}
+{"lang": "tr", "text": "saat kaç", "tool": "time.now"}
+{"lang": "tr", "text": "10 dakika sonra esneme yapmamı hatırlat", "tool": "reminder.create", "verbatim": "esneme"}
+{"lang": "tr", "text": "yeşil çay içtiğimi unutma", "tool": "memory.remember", "verbatim": "yeşil çay"}
+{"lang": "tr", "text": "çay hakkında ne hatırlıyorsun", "tool": "memory.recall"}
+{"lang": "tr", "text": "hakkımda kaydettiğin her şeyi göster", "tool": "registry.list"}
+{"lang": "tr", "text": "internetten Porto'daki hava durumunu araştır", "tool": "web.research"}
+{"lang": "ko", "text": "지금 몇 시야", "tool": "time.now"}
+{"lang": "ko", "text": "10분 뒤에 스트레칭하라고 알려줘", "tool": "reminder.create", "verbatim": "스트레칭"}
+{"lang": "ko", "text": "내가 녹차를 마신다는 걸 기억해", "tool": "memory.remember", "verbatim": "녹차"}
+{"lang": "ko", "text": "차에 대해 뭘 기억해?", "tool": "memory.recall"}
+{"lang": "ko", "text": "나에 대해 저장한 걸 다 보여줘", "tool": "registry.list"}
+{"lang": "ko", "text": "포르투 날씨를 인터넷에서 찾아줘", "tool": "web.research"}
+{"lang": "pt-BR", "text": "que horas são", "tool": "time.now"}
+{"lang": "pt-BR", "text": "me lembre em 10 minutos de alongar", "tool": "reminder.create", "verbatim": "alongar"}
+{"lang": "pt-BR", "text": "lembre que eu bebo chá verde", "tool": "memory.remember", "verbatim": "chá verde"}
+{"lang": "pt-BR", "text": "o que você lembra sobre chá", "tool": "memory.recall"}
+{"lang": "pt-BR", "text": "mostre tudo que você guardou sobre mim", "tool": "registry.list"}
+{"lang": "pt-BR", "text": "pesquise na internet o tempo no Porto", "tool": "web.research"}
+{"lang": "hi", "text": "अभी क्या समय है", "tool": "time.now"}
+{"lang": "hi", "text": "10 मिनट बाद मुझे स्ट्रेच करने की याद दिलाना", "tool": "reminder.create", "verbatim": "स्ट्रेच"}
+{"lang": "hi", "text": "याद रखना कि मैं ग्रीन टी पीता हूँ", "tool": "memory.remember", "verbatim": "ग्रीन टी"}
+{"lang": "hi", "text": "चाय के बारे में तुम्हें क्या याद है", "tool": "memory.recall"}
+{"lang": "hi", "text": "मेरे बारे में सहेजी गई सब बातें दिखाओ", "tool": "registry.list"}
+{"lang": "hi", "text": "इंटरनेट पर पोर्टो का मौसम खोजो", "tool": "web.research"}

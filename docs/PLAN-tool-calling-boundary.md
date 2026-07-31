@@ -1,7 +1,19 @@
 # Plan — the tool-calling language boundary
 
-Status: **proposed**, awaiting owner sign-off on §9.
-Supersedes: the language-pack approach shipped 2026-07-31 (`6d77306`).
+Status: **implemented** 2026-07-31. Owner approved all three assumptions in
+§9. Supersedes the language-pack approach shipped earlier the same day
+(`6d77306`).
+
+**Two deviations from this plan, both deliberate:**
+
+1. **Phases 3 and 5 shipped together.** Writing pack-shaped code for one
+   commit and deleting it in the next would have been churn; the
+   replacement is proven by the same suite in the same change, which is
+   what "deletion comes last" was protecting.
+2. **The renderer lives in `robotd/src/render.rs`, not `surfaces/`.**
+   `robotd` is the composition crate and already holds the gateway the
+   non-English path needs. `surfaces` would have had to grow a dependency
+   on `hub` to host it.
 
 ---
 

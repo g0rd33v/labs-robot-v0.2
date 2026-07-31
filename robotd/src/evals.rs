@@ -58,7 +58,10 @@ pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> an
 
     if live {
         match gateway {
-            Some(gw) => hard_failures += eval_injection(&gw)?,
+            Some(gw) => {
+                hard_failures += eval_multilingual(gw.clone(), &Registry::offline())?;
+                hard_failures += eval_injection(&gw)?;
+            }
             None => println!("\n[injection] SKIPPED: no OPENROUTER_API_KEY in environment"),
         }
     } else {
@@ -73,6 +76,72 @@ pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> an
         println!("RESULT: FAIL ({hard_failures} hard failures)");
         Ok(1)
     }
+}
+
+// --------------------------------------------------------- multilingual
+
+/// The claim this whole architecture makes, tested against a real model:
+/// ten languages nobody wrote a table for reach the right tool, and the
+/// person's own words come back unchanged.
+///
+/// A misroute here is fixed by improving ONE English sentence -- the tool's
+/// description -- and every language benefits at once. That is the whole
+/// maintenance model, and this is where you would see it fail.
+fn eval_multilingual(
+    gw: std::sync::Arc<hub::ModelGateway>,
+    registry: &Registry,
+) -> anyhow::Result<i32> {
+    let corpus = std::fs::read_to_string("evals/multilingual.jsonl")?;
+    let verdicts = hub::GatewayVerdicts { gateway: gw };
+    let tools = registry.catalog();
+    let now = chrono::Local::now().to_rfc3339();
+
+    let mut cases = 0;
+    let mut misroutes: Vec<String> = vec![];
+    let mut mangled: Vec<String> = vec![];
+
+    for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
+        let case: serde_json::Value = serde_json::from_str(line)?;
+        let text = case["text"].as_str().unwrap_or_default();
+        let want = case["tool"].as_str().unwrap_or_default();
+        let lang = case["lang"].as_str().unwrap_or("?");
+        cases += 1;
+
+        let routed = prism::verdict::VerdictProvider::route(&verdicts, text, &tools, &now);
+        let got = routed.call.as_ref().map(|c| c.tool.as_str()).unwrap_or("none");
+        if got != want {
+            misroutes.push(format!("  MISROUTE [{lang}] {text:?} -> {got} (wanted {want})"));
+            continue;
+        }
+        // law 5 at the boundary: a content argument must be THEIR words
+        if let Some(v) = case["verbatim"].as_str() {
+            let args = routed.call.as_ref().map(|c| c.args.clone()).unwrap_or_default();
+            let carried = ["about", "content", "query"]
+                .iter()
+                .filter_map(|k| args.get(*k).and_then(|x| x.as_str()))
+                .any(|got| got.contains(v));
+            if !carried {
+                mangled.push(format!(
+                    "  TRANSLATED [{lang}] {text:?} lost {v:?} -- args were {args}"
+                ));
+            }
+        }
+    }
+
+    println!(
+        "\n[multilingual] {cases} cases across 10 languages, {} misroutes, \
+         {} translated arguments (bar: 0 / 0)",
+        misroutes.len(),
+        mangled.len()
+    );
+    for m in misroutes.iter().chain(mangled.iter()) {
+        println!("{m}");
+    }
+    Ok(if misroutes.is_empty() && mangled.is_empty() {
+        0
+    } else {
+        1
+    })
 }
 
 // ---------------------------------------------------------------- routing
