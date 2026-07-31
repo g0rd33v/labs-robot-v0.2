@@ -5,6 +5,146 @@ dependencies introduced. Newest first.
 
 ---
 
+## Soul S1 + S2 — the dial, the stance, and the evaluator seat (2026-07-31)
+
+Design and plan: `docs/SOUL.md`. Q40's `soul` crate, deferred through the
+MVP, un-deferred.
+
+### What the owner corrected, mid-build
+
+Two corrections landed while this was being written, and both improved it.
+
+**Soul is the EQ third of the robot** — prism is intent, mind is IQ, soul is
+how it relates. I had led SOUL.md with *"Soul is the renderer's policy"*,
+which is true about **where its output lands** and reads, as a headline,
+like Soul is text styling. It isn't. That framing is now where it belongs:
+a section about the boundary, under a correct statement of what Soul is.
+
+**The dial is a stance, not five numbers.** twin ⟷ friend ⟷ mentor ⟷ any
+character. Nobody chooses "directness 60"; they choose "be my mentor". So
+stance became the headline and the five dimensions became how it cashes
+out — choosing one moves all five, and any of them can still be nudged
+afterwards. `Character` is the open end of the same axis rather than a
+separate feature: twin, friend and mentor are simply the three worth
+naming.
+
+I also had to correct **my own overreach**: SOUL.md's immutable core
+listed *"never pretending to be human"*. That was mine, not the spec's —
+the frozen docs say only *"it never claims to feel"*. A robot that may take
+a role needs the narrower constraint, and the narrower one is the one that
+was actually decided.
+
+### S1 — state and control
+
+Four tables (Q25), per cell. `soul_lessons.evidence_msg_id` is a real
+foreign key to `messages` **from the start**, so law 5 applies to a lesson
+about how someone likes to be spoken to exactly as it applies to a fact
+about them. Nothing writes it before S4; the constraint exists now so it
+cannot be forgotten later.
+
+**Values are Soul's; bounds are the owner's.** `floor == ceiling` pins a
+dimension — expressed as a constraint the code cannot route around rather
+than a flag it might forget to check. Every path that sets a value goes
+through one function, so "the dial cannot leave its bounds" is one thing to
+audit rather than a property to hope for.
+
+Out-of-bounds is **refused, not clamped**: silently rounding a deliberate
+instruction down to the ceiling leaves the person believing they set
+something they did not.
+
+Five tools — `show`, `set`, `bounds`, `evolution`, `stance` — every one
+answering **from stored state with no model call**. A robot that had to ask
+a model why it speaks a certain way would be telling a plausible story, not
+the truth.
+
+The dial travels: `soul_persona` and `soul_revisions` merge in two-way
+sync, newest write per dimension, bounds travelling with the value. A robot
+on a stick that spoke differently from the one on the machine would be a
+different robot wearing the same name.
+
+### S2 — the dial actually speaks
+
+**Bands, not adjectives.** `brevity 90` tells a model nothing; *"answer in
+one sentence unless asked for more"* tells it exactly what to do.
+
+**The fence travels with every stance, every time:** *this changes how you
+say things and nothing about what is true; if asked sincerely whether you
+are a person, answer honestly.* A costume, not a claim. The person writing
+"be a pirate" is not thinking about receipts, so the model is told rather
+than trusted.
+
+**English at the default dial still uses templates** — free, instant,
+offline. Moving the dial or taking a stance is what buys the model call.
+That is load-bearing rather than an optimisation, and `Dial::is_default()`
+is where it lives.
+
+A preset cannot cross the owner's bounds: a pin outranks it, and a fenced
+dimension lands inside its fence rather than failing the whole stance.
+A `Character` moves nothing at all — the owner described a voice, and
+overriding their directness because they asked for a pirate would be the
+robot second-guessing them.
+
+### Q26 and §5's evaluator-separation law — built for the first time
+
+*"Verification never runs on the model that generated."* `Role::Evaluator`
+on `gemma-4-26b-a4b`, deliberately **not** the 31b generator, and with **no
+fallback to the answer seat** — falling back to the generator would break
+the very law the role exists to keep.
+
+Unavailable is recorded as **unverified, never as passed**. An evaluator
+that silently approves when it is broken is worse than none, because it
+leaves a record saying someone looked.
+
+Acting turns are always checked; routine ones are sampled by a hash of the
+intent id, so a replayed turn makes the same choice rather than re-rolling
+the dice on a turn it is supposed to be reproducing.
+
+### Two defects found by running it
+
+- **The evaluator timed out on every call.** It borrowed the doorman's
+  five-second retry budget, sized for a one-line classification. It
+  degraded honestly — "unverified" — but a check that never runs is worse
+  than no check, because the journal fills with "unverified" and nobody
+  reads why. It has its own budget now.
+- **A hard-coded catalog count of 14** failed the moment Soul's tools
+  landed. Replaced with the actual invariant: the catalog *is* the exposed
+  capabilities. A magic number fails whenever a capability is added, which
+  trains people to bump it without reading what changed.
+
+### Gate (demonstrated)
+
+- `cargo test --workspace` — **147 passed** (was 130)
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- `robotd eval` — PASS
+- **S1 live**: the dial persists, survives a restart, reaches the stick
+  through sync, and a pin set on the machine still refuses a change on the
+  far side.
+- **S2 live**, the same question at opposite stances:
+
+```
+mentor → "A mutex is for protecting state; a channel is for communicating
+          state." … structure, headings, a closing mantra
+twin   → "mutex = 'stay out of my room while i'm using this.'
+          channel = 'here, i'm done with this, your turn.'"
+```
+
+Same facts, different voice. That is the gate.
+
+**Deliberate, and documented rather than fixed:** a stance change is
+answered in the *old* voice. The turn's voice resolves before the turn
+runs, so "be my mentor" is answered by whoever the robot was a moment ago.
+The reply to *become someone else* is the last thing the previous self
+says.
+
+**Not built, on purpose:** perception (S3), lessons (S4), evolution (S5),
+history and rollback (S6). Adaptation is last because a robot should be
+inspectable and controllable before it is adaptive — and because the right
+drift bounds are not knowable from an armchair.
+
+**No new dependencies.** `soul` is a workspace crate.
+
+---
+
 ## Boundary chain: anchored, not HMAC'd (2026-07-31)
 
 The owner decision that had been parked since the review. The analysis
