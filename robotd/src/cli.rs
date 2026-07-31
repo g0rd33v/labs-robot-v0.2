@@ -19,6 +19,8 @@ usage:
   robotd eval [--live] [--config <file>]        run the eval suite
   robotd notify <text> [--config <file>]        put a notice in the owner's chat
   robotd backup [--config <file>]               write a sealed backup
+  robotd sync --with <path> [--config <file>]   two-way sync with another
+                                                instance of this robot
   robotd backup-restore <sealed> <dir> [--config <file>]
   robotd package [<dest.pkg>] [--config <file>] export the robot package
   robotd restore <pkg> --code <code> --into <dir> [--port <n>] [--force]
@@ -46,6 +48,10 @@ pub enum Cmd {
     },
     Backup {
         config: PathBuf,
+    },
+    Sync {
+        config: PathBuf,
+        peer: PathBuf,
     },
     BackupRestore {
         config: PathBuf,
@@ -139,6 +145,26 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
         Some("backup") => {
             reject_extra(&rest, "backup")?;
             Ok(Cmd::Backup { config })
+        }
+        Some("sync") => {
+            // `--with <path>` reads as a sentence and leaves room for other
+            // flags later; a bare positional would not.
+            let mut peer = None;
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--with" => {
+                        peer = Some(PathBuf::from(
+                            it.next().ok_or("--with needs a path")?,
+                        ))
+                    }
+                    other => return Err(format!("sync: unexpected argument {other}")),
+                }
+            }
+            Ok(Cmd::Sync {
+                config,
+                peer: peer.ok_or("sync needs --with <path>")?,
+            })
         }
         Some("backup-restore") => {
             if rest.len() != 2 {

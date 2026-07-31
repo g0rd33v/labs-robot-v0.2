@@ -135,6 +135,7 @@ mod tests {
             0,
             "http://127.0.0.1:0".into(),
             "bender-test".into(),
+            "inst_test".into(),
         ));
         (robot, dir)
     }

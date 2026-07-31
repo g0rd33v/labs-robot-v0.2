@@ -250,7 +250,10 @@ impl Capability for Forget {
         let index = a.index as usize;
         match ctx
             .cell
-            .with(|c| mind::facts::forget_by_index(c, index, ctx.intent_id).map_err(mind_err))?
+            .with(|c| {
+                mind::facts::forget_by_index(c, index, ctx.intent_id, &ctx.instance.instance_id)
+                    .map_err(mind_err)
+            })?
         {
             Some(content) => attested(
                 note_evidence("memory.forget"),

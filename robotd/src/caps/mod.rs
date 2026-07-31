@@ -51,6 +51,11 @@ pub struct Instance {
     pub core: Option<Arc<Mutex<Connection>>>,
     pub owner_principal: i64,
     pub public_base: String,
+    /// Which INSTALLATION this is. Two instances of the same robot -- the
+    /// machine and the stick -- share a `robot_id` and differ here, which
+    /// is what lets a deletion be attributed and a sync watermark mean
+    /// something.
+    pub instance_id: String,
 }
 
 /// Owner-settable policy.

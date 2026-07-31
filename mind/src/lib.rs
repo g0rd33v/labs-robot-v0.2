@@ -6,6 +6,7 @@
 //! sources, correct (supersession), forget (deletes for real).
 
 pub mod facts;
+pub mod merge;
 pub mod reminders;
 pub mod vault;
 
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS media (
     created_at INTEGER NOT NULL,
     pinned     INTEGER NOT NULL DEFAULT 0,
     source     TEXT
+);
+CREATE TABLE IF NOT EXISTS tombstones (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    origin     TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS cell_meta (
     key   TEXT PRIMARY KEY,

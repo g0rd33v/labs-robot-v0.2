@@ -148,6 +148,7 @@ mod tests {
                 every_hours: 0,
                 script: String::new(),
             },
+            sync: Default::default(),
         }
     }
 

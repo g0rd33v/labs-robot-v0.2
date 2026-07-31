@@ -42,6 +42,14 @@ ultra_daily_cap = 20
 # TCC from reading ~/Documents). 0 disables it. failures are reported in chat.
 every_hours = 24
 script = "./scripts/backup-offsite.sh"
+
+[sync]
+# other instances of THIS robot to stay in agreement with -- a usb stick, a
+# second machine. two-way: knowledge merges both directions, deletions
+# propagate and do not come back. a peer that is not plugged in is skipped
+# silently. 0 disables the lane.
+peers = []
+every_minutes = 10
 "#;
 
 #[derive(Debug, Deserialize, Default)]
@@ -52,6 +60,7 @@ pub struct RobotConfig {
     pub mind: MindSection,
     pub hub: HubSection,
     pub backup: BackupSection,
+    pub sync: SyncSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +110,28 @@ impl Default for MindSection {
         Self {
             embeddings: true,
             model_cache: "./data/models".into(),
+        }
+    }
+}
+
+/// Other instances of THIS robot to stay in agreement with.
+///
+/// A peer that is not present is not an error -- a removable disk is absent
+/// most of the time -- so the lane simply skips it and says nothing.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SyncSection {
+    /// paths to other instances; `~/` is expanded
+    pub peers: Vec<String>,
+    /// minutes between sweeps; 0 disables the lane
+    pub every_minutes: u64,
+}
+
+impl Default for SyncSection {
+    fn default() -> Self {
+        Self {
+            peers: vec![],
+            every_minutes: 10,
         }
     }
 }

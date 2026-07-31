@@ -92,6 +92,14 @@ pub fn restore(
         .context("integrity check: core.db did not open with the travelled keys")?;
     let cells: i64 = core.query_row("SELECT count(*) FROM cell_keys", [], |r| r.get(0))?;
     let robot_id = trust::schema::meta_get(&core, "robot_id")?.unwrap_or_default();
+
+    // The restored copy is the SAME ROBOT and a DIFFERENT INSTANCE. Clearing
+    // the instance id makes it mint its own on first boot, which is what
+    // lets the two of them sync at all: a deletion has to be attributable,
+    // and a watermark against yourself means nothing.
+    core.execute("DELETE FROM meta WHERE key = 'instance_id'", [])?;
+    // and it has never synced with anyone under its new identity
+    core.execute("DELETE FROM sync_peers", []).ok();
     drop(core);
 
     // a ready-to-run config: same robot, this port; embeddings off until
@@ -139,6 +147,7 @@ mod tests {
                 every_hours: 0, // tests never shell out to a real backup
                 script: String::new(),
             },
+            sync: Default::default(),
         }
     }
 

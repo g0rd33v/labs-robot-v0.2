@@ -93,6 +93,7 @@ mod tests {
                 every_hours: 0, // tests never shell out to a real backup
                 script: String::new(),
             },
+            sync: Default::default(),
         };
         // boot a robot with one fact so there's something real to back up
         let boot = crate::boot::bootstrap(&cfg).unwrap();

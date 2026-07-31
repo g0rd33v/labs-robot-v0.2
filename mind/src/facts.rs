@@ -301,6 +301,7 @@ pub fn forget_by_index(
     conn: &Connection,
     index: usize,
     intent_id: &str,
+    origin: &str,
 ) -> Result<Option<String>, MindError> {
     if let Some(marker) = op_marker(conn, intent_id)? {
         return Ok(marker["content"].as_str().map(String::from));
@@ -350,6 +351,15 @@ pub fn forget_by_index(
             params![id],
         )?;
         tx.execute("DELETE FROM facts WHERE id = ?1", params![id])?;
+        // A deletion the other instance must learn about, or sync would
+        // quietly resurrect it. The marker carries the id and the moment --
+        // never the content -- and is collected once every peer has applied
+        // it, so "deleted for real" survives replication.
+        tx.execute(
+            "INSERT OR REPLACE INTO tombstones(id, kind, deleted_at, origin) \
+             VALUES (?1, 'fact', ?2, ?3)",
+            params![id, trust::ids::ts_ms(), origin],
+        )?;
     }
     tx.execute(
         "INSERT INTO cell_meta(key, value) VALUES (?1, ?2) \
@@ -494,7 +504,7 @@ mod tests {
         let m2 = msg(&conn, "remember second fact");
         remember(&conn, "second fact", &m2, "int_2", None).unwrap();
 
-        let gone = forget_by_index(&conn, 2, "int_f").unwrap().unwrap();
+        let gone = forget_by_index(&conn, 2, "int_f", "inst_test").unwrap().unwrap();
         assert_eq!(gone, "secret plans"); // position 2 = older fact
         assert_eq!(count_active(&conn).unwrap(), 1);
         // gone from the fts door too
@@ -504,11 +514,11 @@ mod tests {
             .all(|f| f.content != "secret plans"));
         // crash replay: same intent re-executes -> recorded result, and the
         // OTHER fact is untouched (index re-resolution would have hit it)
-        let again = forget_by_index(&conn, 2, "int_f").unwrap().unwrap();
+        let again = forget_by_index(&conn, 2, "int_f", "inst_test").unwrap().unwrap();
         assert_eq!(again, "secret plans");
         assert_eq!(count_active(&conn).unwrap(), 1);
         // forgetting nothing is honest (fresh intent, empty position)
-        assert!(forget_by_index(&conn, 9, "int_g").unwrap().is_none());
+        assert!(forget_by_index(&conn, 9, "int_g", "inst_test").unwrap().is_none());
     }
 
     #[test]
@@ -577,7 +587,7 @@ mod tests {
             .unwrap();
         assert_eq!(total, 3, "two superseded + one live");
 
-        forget_by_index(&conn, 1, "int_forget").unwrap().unwrap();
+        forget_by_index(&conn, 1, "int_forget", "inst_test").unwrap().unwrap();
 
         // nothing survives -- not the live row, not the superseded originals
         let remaining: i64 = conn

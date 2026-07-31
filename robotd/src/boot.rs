@@ -52,6 +52,20 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
     };
     let slug_hash = trust::ids::sha256_hex(slug.as_bytes());
 
+    // Which INSTALLATION this is. `robot_id` says which robot; this says
+    // which copy of it. Restore deliberately does not carry it, so the
+    // stick mints its own and two instances can attribute a deletion and
+    // hold a sync watermark that means something.
+    let instance_id = match schema::meta_get(&core, "instance_id")? {
+        Some(id) => id,
+        None => {
+            let id = format!("inst_{}", trust::ids::random_hex(8));
+            schema::meta_set(&core, "instance_id", &id)?;
+            tracing::info!("minted instance id {id}");
+            id
+        }
+    };
+
     // the local embedding seat (Q24): weights fetched through the hub
     // gateway on first run, boundary-logged; offline or disabled -> the
     // robot still boots, recall degrades to FTS + recency
@@ -154,6 +168,7 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         cfg.hub.ultra_daily_cap,
         public_base,
         cfg.robot.name.clone(),
+        instance_id,
     ));
 
     // crash replay (arch sec 3): resume every intent the last run left open
@@ -227,6 +242,7 @@ mod tests {
                 every_hours: 0, // tests never shell out to a real backup
                 script: String::new(),
             },
+            sync: Default::default(),
         };
         (cfg, dir)
     }

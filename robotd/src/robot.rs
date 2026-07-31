@@ -55,6 +55,8 @@ pub struct CellHandle {
 
 pub struct RobotCore {
     pub owner_principal: i64,
+    /// This installation. Shared `robot_id`, distinct instance.
+    pub instance_id: String,
     /// shared with the hub gateway as its boundary-log sink
     pub core: Arc<Mutex<Connection>>,
     cells: Mutex<HashMap<i64, CellHandle>>,
@@ -85,9 +87,11 @@ impl RobotCore {
         ultra_daily_cap: u32,
         public_base: String,
         robot_name: String,
+        instance_id: String,
     ) -> Self {
         Self {
             owner_principal,
+            instance_id,
             core,
             cells: Mutex::new(HashMap::new()),
             open_gate: Mutex::new(()),
@@ -113,6 +117,30 @@ impl RobotCore {
     /// `Connection` to the same SQLCipher file behind a separate Mutex,
     /// breaking the one-writer-per-cell invariant and racing the schema
     /// batches against each other.
+    /// Open one cell's database directly, for the sync lane, which works
+    /// across instances rather than through the per-principal handles.
+    pub fn open_cell_db(
+        &self,
+        cell_id: &str,
+        dek: &[u8; 32],
+    ) -> anyhow::Result<prism::Cell> {
+        let conn = trust::cells::open_encrypted(
+            &self.data_dir.join("cells").join(format!("{cell_id}.db")),
+            dek,
+        )?;
+        prism::init_cell_schema(&conn)?;
+        mind::init_cell_schema(&conn)?;
+        Ok(prism::Cell::new(conn))
+    }
+
+    pub fn media_dir(&self, cell_id: &str) -> std::path::PathBuf {
+        self.data_dir.join("media").join(cell_id)
+    }
+
+    pub fn keychain(&self) -> KeyChain {
+        self.keys.clone()
+    }
+
     pub fn cell(&self, principal: i64) -> anyhow::Result<CellHandle> {
         if let Some(h) = self
             .cells
@@ -233,6 +261,7 @@ impl RobotCore {
                 core: Some(self.core.clone()),
                 owner_principal: self.owner_principal,
                 public_base: self.public_base.clone(),
+                instance_id: self.instance_id.clone(),
             },
         )
     }

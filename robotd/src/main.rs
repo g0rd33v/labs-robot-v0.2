@@ -2,7 +2,10 @@
 //! library -- boot the Robot and serve, or run an operational subcommand.
 
 use robotd::cli::{self, Cmd};
-use robotd::{backup, backup_lane, boot, config, evals, maintenance, notify, package, scheduler};
+use robotd::{
+    backup, backup_lane, boot, config, evals, maintenance, notify, package, scheduler,
+    sync_lane,
+};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -47,6 +50,16 @@ async fn main() -> anyhow::Result<()> {
             let cfg = config::load(&config)?;
             let path = backup::run(&cfg)?;
             println!("backup sealed: {}", path.display());
+            Ok(())
+        }
+        Cmd::Sync { config, peer } => {
+            let cfg = config::load(&config)?;
+            let booted = boot::bootstrap(&cfg)?;
+            let rep = robotd::sync::sync_with(&booted.robot, &peer)?;
+            println!("{}", rep.summary());
+            for c in &rep.skipped_cells {
+                println!("  skipped cell {c} (the peer has no matching key)");
+            }
             Ok(())
         }
         Cmd::BackupRestore {
@@ -100,6 +113,13 @@ async fn serve(config_path: &std::path::Path) -> anyhow::Result<()> {
         booted.robot.clone(),
         cfg.backup.every_hours,
         cfg.backup.script.clone(),
+    );
+    // stay in agreement with the other instances of this robot that are
+    // actually present (see sync_lane for why absence is silent)
+    sync_lane::spawn(
+        booted.robot.clone(),
+        cfg.sync.peers.clone(),
+        cfg.sync.every_minutes,
     );
 
     // the telegram surface, behind its flag: token present = on, absent = fine

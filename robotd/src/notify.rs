@@ -120,6 +120,7 @@ mod tests {
                 every_hours: 0, // tests never shell out to a real backup
                 script: String::new(),
             },
+            sync: Default::default(),
         };
         let boot = crate::boot::bootstrap(&cfg).unwrap();
         let owner = boot.robot.owner_principal;

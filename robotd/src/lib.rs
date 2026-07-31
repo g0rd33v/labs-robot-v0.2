@@ -21,4 +21,6 @@ pub mod prompts;
 pub mod render;
 pub mod robot;
 pub mod scheduler;
+pub mod sync;
+pub mod sync_lane;
 pub mod telegram;
