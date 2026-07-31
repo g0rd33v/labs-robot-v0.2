@@ -6,7 +6,7 @@
 use crate::floor::{self, FloorMatch};
 use crate::types::*;
 use crate::verdict::VerdictProvider;
-use crate::{journal, outbox, receipts, Cell, Envelope, PrismError};
+use crate::{journal, outbox, pending, receipts, Cell, Envelope, PrismError};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use trust::ids;
@@ -28,8 +28,10 @@ pub trait CapabilityRouter: Send + Sync {
         lang: &str,
     ) -> Result<Outcome, PrismError>;
 
-    /// The tool catalog, for the routing call.
-    fn describe(&self) -> Vec<ToolDef>;
+    /// The tool catalog for THIS turn. Takes the cell because part of the
+    /// catalog is situational: the tool that answers a question exists only
+    /// while a question is open.
+    fn describe(&self, cell: &Cell) -> Vec<ToolDef>;
 
     /// Does this proposed call name a real tool with arguments that
     /// typecheck? Returns the registry's own effect class, so a caller
@@ -39,6 +41,14 @@ pub trait CapabilityRouter: Send + Sync {
     /// an input device, never an authority.
     fn validate(&self, tool: &str, args: &serde_json::Value) -> Result<Effect, String>;
 }
+
+/// The tool a model calls to answer a question we asked. Offered only
+/// while something is actually parked, so it cannot be used to conjure a
+/// confirmation out of nothing.
+pub const CONFIRM_TOOL: &str = "confirmation.respond";
+/// Kernel-internal steps: asking, and being told no.
+pub const CONFIRM_REQUEST: &str = "confirmation.request";
+pub const CONFIRM_DECLINED: &str = "confirmation.declined";
 
 /// Milliseconds since the epoch as RFC 3339 local time -- the one wire
 /// representation for a moment, whether the floor computed it or a model
@@ -147,7 +157,7 @@ pub fn run_turn(
             // it. The catalog comes from the registry, so it cannot name a
             // tool that does not exist.
             //
-            let tools = deps.router.describe();
+            let tools = deps.router.describe(cell);
             let now = Local::now().to_rfc3339();
             let routed = deps.verdicts.route(&env.content, &tools, &now);
             let call = validate_proposal(cell, &intent_id, deps, routed.call)?;
@@ -281,23 +291,62 @@ fn validate_proposal(
     proposed: Option<ToolCall>,
 ) -> Result<Option<ValidatedCall>, PrismError> {
     let Some(c) = proposed else { return Ok(None) };
-    match deps.router.validate(&c.tool, &c.args) {
-        Ok(effect) => {
-            // sec 6b: an explicit instruction may delete; an inference may
-            // not. Until the confirmation flow lands, a model-proposed
-            // irreversible action is refused rather than performed.
-            if effect == Effect::Irreversible {
-                let why = serde_json::json!({
-                    "tool": c.tool,
-                    "reason": "irreversible effects are not performed on a model's \
-                               proposal; they need an explicit instruction",
-                })
-                .to_string();
-                cell.with(|conn| journal::step(conn, intent_id, "call.rejected", &why, None))?;
+
+    // an answer to a question we asked: release the parked call, or drop it
+    if c.tool == CONFIRM_TOOL {
+        let said_yes = c.args["confirmed"].as_bool().unwrap_or(false);
+        let Some(p) = cell.with(pending::open)? else {
+            return Ok(None); // nothing was waiting; treat it as ordinary talk
+        };
+        if !said_yes {
+            cell.with(|conn| pending::resolve(conn, &p.id, "declined"))?;
+            return Ok(Some(ValidatedCall {
+                tool: CONFIRM_DECLINED.into(),
+                args: serde_json::json!({ "tool": p.tool }),
+                effect: Effect::Read,
+            }));
+        }
+        // spend the confirmation BEFORE planning: a replayed turn must not
+        // find it still open and delete a second time
+        if !cell.with(|conn| pending::resolve(conn, &p.id, "confirmed"))? {
+            return Ok(None);
+        }
+        // re-validate: the registry is the authority, not the parked row
+        let effect = match deps.router.validate(&p.tool, &p.args) {
+            Ok(e) => e,
+            Err(why) => {
+                let rejected =
+                    serde_json::json!({ "tool": p.tool, "reason": why }).to_string();
+                cell.with(|conn| journal::step(conn, intent_id, "call.rejected", &rejected, None))?;
                 return Ok(None);
             }
+        };
+        let ok = serde_json::json!({ "tool": p.tool, "confirmed_by": "person" }).to_string();
+        cell.with(|conn| journal::step(conn, intent_id, "call.confirmed", &ok, None))?;
+        return Ok(Some(ValidatedCall {
+            tool: p.tool,
+            args: p.args,
+            effect,
+        }));
+    }
+    match deps.router.validate(&c.tool, &c.args) {
+        Ok(effect) => {
             let ok = serde_json::json!({ "tool": c.tool, "effect": effect }).to_string();
             cell.with(|conn| journal::step(conn, intent_id, "call.accepted", &ok, None))?;
+            // sec 6b: an inference does not get to destroy anything. Park
+            // it, ask, and let the answer release it.
+            if effect == Effect::Irreversible {
+                let parked =
+                    cell.with(|conn| pending::park(conn, intent_id, &c.tool, &c.args))?;
+                let note =
+                    serde_json::json!({ "tool": c.tool, "pending_id": parked.id }).to_string();
+                cell.with(|conn| journal::step(conn, intent_id, "call.parked", &note, None))?;
+                return Ok(Some(ValidatedCall {
+                    tool: CONFIRM_REQUEST.into(),
+                    args: serde_json::json!({ "tool": c.tool, "args": c.args }),
+                    effect: Effect::Read,
+                }));
+            }
             Ok(Some(ValidatedCall {
                 tool: c.tool,
                 args: c.args,
@@ -441,7 +490,37 @@ fn execute_step(
 ) -> Result<Outcome, PrismError> {
     // floor answers are system-generated constants computed from local state:
     // they attest to exactly what they say
+    let internal = |claim: &str, say: Rendering| {
+        Outcome::attested(
+            step.step_id.clone(),
+            vec![Evidence {
+                kind: "deterministic".into(),
+                provider: "kernel".into(),
+                external_id: step.capability.clone(),
+                hash: String::new(),
+                ts: ids::ts_ms(),
+            }],
+            claim.into(),
+            say,
+        )
+    };
     match step.capability.as_str() {
+        // the question, and the answer "no" -- both are reads, so neither
+        // produces an action record: nothing happened, and nothing is shown
+        CONFIRM_REQUEST => Ok(internal(
+            "asked the person to confirm an irreversible action",
+            Rendering::new(
+                "confirm_irreversible",
+                serde_json::json!({ "tool": step.args["tool"] }),
+            ),
+        )),
+        CONFIRM_DECLINED => Ok(internal(
+            "the person declined; nothing was done",
+            Rendering::new(
+                "confirmation_declined",
+                serde_json::json!({ "tool": step.args["tool"] }),
+            ),
+        )),
         "answer.fallback" => Ok(Outcome::attested(
             step.step_id.clone(),
             vec![Evidence {

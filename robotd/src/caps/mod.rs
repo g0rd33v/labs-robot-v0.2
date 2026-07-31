@@ -320,11 +320,43 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
 }
 
 impl CapabilityRouter for Registry {
-    fn describe(&self) -> Vec<ToolDef> {
-        self.catalog()
+    fn describe(&self, cell: &Cell) -> Vec<ToolDef> {
+        let mut tools = self.catalog();
+        // the answering tool exists only while a question is open, so a
+        // model cannot invent a confirmation for something nobody asked
+        if prism::pending::is_waiting(cell) {
+            tools.push(ToolDef {
+                name: prism::lifecycle::CONFIRM_TOOL,
+                description: "Answer the yes-or-no question the robot has just \
+                              asked about an irreversible action. Use this, and \
+                              only this, when the person's message is an answer \
+                              to that question -- agreement of any kind is \
+                              confirmed: true, refusal or hesitation is false.",
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "confirmed": {
+                            "type": "boolean",
+                            "description": "True only for a clear yes."
+                        }
+                    },
+                    "required": ["confirmed"],
+                    "additionalProperties": false
+                }),
+                effect: Effect::Read,
+            });
+            tools.sort_by_key(|t| t.name);
+        }
+        tools
     }
 
     fn validate(&self, tool: &str, args: &serde_json::Value) -> Result<Effect, String> {
+        if tool == prism::lifecycle::CONFIRM_TOOL {
+            return args["confirmed"]
+                .as_bool()
+                .map(|_| Effect::Read)
+                .ok_or_else(|| "confirmed must be a boolean".to_string());
+        }
         let cap = self
             .caps
             .get(tool)

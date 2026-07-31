@@ -209,6 +209,15 @@ pub fn english(r: &Rendering) -> String {
              receipt names it.)"
             .into(),
 
+        // ---- confirmation (sec 6b) ----
+        "confirm_irreversible" => format!(
+            "that would permanently delete something ({}), and i inferred it \
+             rather than being told outright -- say yes and i'll do it, or no \
+             and i won't. nothing has happened yet.",
+            s(a, "tool")
+        ),
+        "confirmation_declined" => "alright -- nothing was deleted.".into(),
+
         // ---- turn outcomes ----
         "done" => "done.".into(),
         "partial_note" => "(some of that failed -- the receipt has the honest detail.)".into(),
@@ -217,6 +226,8 @@ pub fn english(r: &Rendering) -> String {
             s(a, "status")
         ),
         "fallback" => "i can't do that one. try \"help\" to see what i can do.".into(),
+        "ops_notice" => "(operational notice)".into(),
+        "media_stored" => format!("stored: {}", s(a, "filename")),
 
         other => format!("[{other}]"),
     }
@@ -368,6 +379,10 @@ mod tests {
             ("partial_note", serde_json::json!({})),
             ("failed_note", serde_json::json!({"status": "failed"})),
             ("fallback", serde_json::json!({})),
+            ("confirm_irreversible", serde_json::json!({"tool": "memory.forget"})),
+            ("confirmation_declined", serde_json::json!({})),
+            ("ops_notice", serde_json::json!({})),
+            ("media_stored", serde_json::json!({"filename": "x.png"})),
         ] {
             let text = english(&Rendering::new(id, slots));
             assert!(!text.is_empty(), "{id}");

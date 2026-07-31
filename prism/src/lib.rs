@@ -9,6 +9,7 @@ pub mod floor;
 pub mod journal;
 pub mod lifecycle;
 pub mod outbox;
+pub mod pending;
 pub mod receipts;
 pub mod replay;
 pub mod types;
@@ -137,5 +138,6 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 ",
     )?;
+    pending::init_schema(conn)?;
     Ok(())
 }

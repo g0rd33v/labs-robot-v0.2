@@ -787,6 +787,102 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Sec 6b, end to end: an inference that would destroy something asks
+    /// first, and only a yes releases it. The English floor still deletes on
+    /// an explicit instruction, because that is an instruction, not a guess.
+    #[test]
+    fn an_inferred_deletion_asks_before_it_deletes() {
+        let (cell, path) = file_cell("confirm");
+        let router = Registry::offline();
+        let run = |verdicts: &Proposes, text: &str| {
+            let deps = TurnDeps {
+                router: &router,
+                verdicts,
+                renderer: &SPEAK,
+                crash: None,
+            };
+            prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
+        };
+
+        // a fact to aim at
+        run(&Proposes(None), "remember that the demo is on friday");
+        let before = cell
+            .with(|c| Ok(mind::facts::count_active(c)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, 1);
+
+        // the model infers a deletion: parked, asked, nothing done
+        let ask = run(
+            &Proposes(call("memory.forget", serde_json::json!({"index": 1}))),
+            "забудь про демо",
+        );
+        assert!(ask.reply.contains("say yes"), "{}", ask.reply);
+        assert!(!ask.reply.contains("✓"), "nothing ran: {}", ask.reply);
+        assert_eq!(cell.with(|c| Ok(mind::facts::count_active(c))).unwrap().unwrap(), 1);
+
+        // "no" leaves it alone
+        let no = run(
+            &Proposes(call(
+                prism::lifecycle::CONFIRM_TOOL,
+                serde_json::json!({"confirmed": false}),
+            )),
+            "нет, не надо",
+        );
+        assert!(no.reply.contains("nothing was deleted"), "{}", no.reply);
+        assert_eq!(cell.with(|c| Ok(mind::facts::count_active(c))).unwrap().unwrap(), 1);
+
+        // ask again, then say yes -- and this time it really goes
+        run(
+            &Proposes(call("memory.forget", serde_json::json!({"index": 1}))),
+            "забудь про демо",
+        );
+        let yes = run(
+            &Proposes(call(
+                prism::lifecycle::CONFIRM_TOOL,
+                serde_json::json!({"confirmed": true}),
+            )),
+            "да, удаляй",
+        );
+        assert!(yes.reply.contains("✓ memory.forget"), "{}", yes.reply);
+        assert_eq!(cell.with(|c| Ok(mind::facts::count_active(c))).unwrap().unwrap(), 0);
+
+        // and a second yes has nothing left to spend
+        let again = run(
+            &Proposes(call(
+                prism::lifecycle::CONFIRM_TOOL,
+                serde_json::json!({"confirmed": true}),
+            )),
+            "да",
+        );
+        assert!(!again.reply.contains("✓ memory.forget"), "{}", again.reply);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The answering tool is offered only while a question is open, so a
+    /// model cannot conjure a confirmation for something nobody asked.
+    #[test]
+    fn the_answering_tool_exists_only_while_a_question_does() {
+        let (cell, path) = file_cell("confirm_catalog");
+        let router = Registry::offline();
+        let names = |c: &prism::Cell| -> Vec<&'static str> {
+            prism::CapabilityRouter::describe(&router, c)
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
+        };
+        assert!(!names(&cell).contains(&prism::lifecycle::CONFIRM_TOOL));
+
+        cell.with(|c| {
+            prism::pending::park(c, "int_x", "memory.forget", &serde_json::json!({"index": 1}))?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(names(&cell).contains(&prism::lifecycle::CONFIRM_TOOL));
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Everything a model can get wrong, and none of it reaches a capability.
     /// Each case must still produce a terminal receipt -- refusing is a
     /// normal turn, not an error.
@@ -809,8 +905,6 @@ mod tests {
                 "time in the past",
                 call("reminder.create", serde_json::json!({"fire_at": past, "about": "x"})),
             ),
-            // sec 6b: an inference may not delete
-            ("irreversible on inference", call("memory.forget", serde_json::json!({"index": 1}))),
         ] {
             let verdicts = Proposes(proposed);
             let deps = TurnDeps {
@@ -898,6 +992,34 @@ mod tests {
             assert_eq!(out.lang, "en", "{text}");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Sec 6a, structurally: the code path that reads untrusted material
+    /// has no ability to act.
+    ///
+    /// Tool calling raises the stakes of prompt injection from "the model
+    /// says something wrong" to "the model DOES something wrong". The only
+    /// robust answer is that a tool catalog never reaches a prompt that
+    /// contains fetched web pages -- there is nothing there to induce. The
+    /// routing call sees the person's message and nothing else; the
+    /// research and answer calls see everything and are offered nothing.
+    #[test]
+    fn untrusted_content_never_meets_a_tool_catalog() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for file in ["src/caps/research.rs", "src/caps/answer.rs"] {
+            let src = std::fs::read_to_string(root.join(file)).unwrap();
+            let code = match src.find("#[cfg(test)]") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            for forbidden in ["describe(", "ToolDef", "catalog(", "routing_schema"] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{file} mentions {forbidden}: the path that reads untrusted \
+                     pages must not be able to offer or accept tools"
+                );
+            }
+        }
     }
 
     /// Law #4 with teeth. The kernel and the crates beneath it hold no
@@ -1074,7 +1196,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(600));
                 Ok(Outcome::utterance(String::new(), vec![], "slow answer".into()))
             }
-            fn describe(&self) -> Vec<prism::types::ToolDef> {
+            fn describe(&self, _cell: &Cell) -> Vec<prism::types::ToolDef> {
                 vec![]
             }
             fn validate(
