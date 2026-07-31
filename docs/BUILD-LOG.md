@@ -5,6 +5,83 @@ dependencies introduced. Newest first.
 
 ---
 
+## Boundary chain: anchored, not HMAC'd (2026-07-31)
+
+The owner decision that had been parked since the review. The analysis
+changed the question, so it is worth recording rather than just the answer.
+
+### Why the proposed HMAC was circular
+
+The boundary log lives **inside `core.db`**, which is SQLCipher-encrypted
+under a key derived from the KEK. The append-only triggers are SQLite
+triggers — anyone who can open the database can drop them.
+
+So rewriting an entry requires decrypting and re-encrypting `core.db`,
+which requires the KEK. The proposed HMAC would have been keyed under that
+same KEK. **The forger holds the MAC key by construction.** It defends
+against an attacker who can write rows but cannot open the database, and
+that state does not exist here.
+
+`kek.key` sits in `data/` beside `core.db` — 64 bytes, same directory.
+Whoever has the data has the key. That is Q4's accepted trade rather than a
+new problem, but it makes the circularity total. An HMAC here would look
+like protection and provide none, which is worse than doing nothing,
+because it is the kind of thing you stop thinking about once it is ticked.
+
+### What was built instead
+
+**Publish the head where the machine cannot reach it.** Every backup now
+carries `chain_head` — `(seq, hash, ts)` — in its manifest, and backups
+already go to two independent off-site destinations. An adversary holding
+the KEK can rewrite local history; they cannot rewrite a hash that left for
+Hetzner and Spaces last week.
+
+- `trust::boundary`: `head()`, `hash_at()`, `record_anchor()`, `anchors()`,
+  `broken_anchors()`, and a `chain_anchors` table.
+- `backup` writes `chain_head` into the manifest **and** records the anchor
+  locally. The local copy trips at the next boot if something rewrote
+  history in between; the off-site copy is what settles an argument.
+- Boot reports broken anchors loudly and tells the owner in chat, naming
+  the manifests to compare against.
+- `robotd chain` prints the head, the published anchors and the
+  verification — an anchor nobody can inspect is no use.
+
+### The test that carries the argument
+
+A log **rewritten from genesis verifies against itself** — recomputing
+every hash is trivial for anyone with the key — and still fails its
+published anchor. Truncation counts too: an anchor whose entry is simply
+gone is a broken anchor, and the loudest kind.
+
+That is precisely the failure an HMAC under the KEK would not have caught
+either, since the rewriter could recompute the MACs as easily as the
+hashes.
+
+### A bug this surfaced
+
+`robotd backup` and `robotd chain` open `core.db` directly, outside boot,
+so neither had run the schema. On a robot that had not yet booted this
+build, `backup` would have failed on the missing anchors table — a backup
+broken by a hardening change is the worst possible trade. Both now call
+`init_core`, which is idempotent.
+
+### Gate
+
+- `cargo test --workspace` — **129 passed**
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+- Live: `robotd backup` on the real robot published
+  `seq 5399 / 093f3aba…` into the sealed manifest; `robotd chain` shows it
+  as `[ok]`; and the head was read back out of the sealed tarball to
+  confirm it really travels.
+
+**Still true, and worth keeping in view:** anyone with the data directory
+has the KEK and can read everything. Anchoring makes a rewrite of the
+*record* detectable. It does nothing for confidentiality, and it does not
+change Q4. If the KEK ever moves off-disk — passphrase sealing, an OS
+keyring — an HMAC becomes meaningful and is worth revisiting then.
+
+---
+
 ## Full live re-verification (2026-07-31)
 
 No code changed. A verification pass after the day's work — the tool-calling
