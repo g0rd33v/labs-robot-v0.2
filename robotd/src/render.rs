@@ -408,6 +408,116 @@ pub fn english(r: &Rendering) -> String {
         "file_missing" => format!("no file called {}.", s(a, "name")),
         "file_deleted" => format!("deleted {} -- the row is gone, not hidden.", s(a, "name")),
 
+        // ---- standing rules ----
+        "instruction_added" => format!(
+            "rule kept: {}\n(i'll follow it from now on -- \"my rules\" lists them, \
+             \"drop rule N\" retires one)",
+            s(a, "rule")
+        ),
+        "instruction_list" => {
+            let lines: Vec<String> = items(a)
+                .iter()
+                .enumerate()
+                .map(|(i, it)| format!("{}. {}", i + 1, s(it, "rule")))
+                .collect();
+            format!(
+                "your standing rules:\n{}\n(\"revise rule N: ...\" changes one, \
+                 \"drop rule N\" retires it -- history stays)",
+                lines.join("\n")
+            )
+        }
+        "instruction_list_empty" => "no standing rules yet -- tell me \"from now on, \
+             ...\" and i'll keep it."
+            .into(),
+        "instruction_revised" => format!(
+            "rule updated: \"{}\" -> \"{}\" (the old wording is kept as history)",
+            s(a, "old"),
+            s(a, "new")
+        ),
+        "instruction_retired" => format!(
+            "dropped: {} -- i'll stop following it. it stays in history; say \
+             \"restore rule\" to bring it back.",
+            s(a, "rule")
+        ),
+        "instruction_missing" => format!("no rule #{} to change.", n(a, "n")),
+
+        // ---- the ledger ----
+        "commitment_list" => {
+            let mut out = String::new();
+            let open = a["open"].as_array().cloned().unwrap_or_default();
+            let closed = a["closed"].as_array().cloned().unwrap_or_default();
+            if open.is_empty() {
+                out.push_str("nothing owed right now.");
+            } else {
+                out.push_str("still owed:\n");
+                for it in &open {
+                    let due = match it.get("due_ms").and_then(|x| x.as_i64()) {
+                        Some(ms) => format!(" (due {})", when(ms)),
+                        None => String::new(),
+                    };
+                    out.push_str(&format!("- {}{}\n", s(it, "what"), due));
+                }
+            }
+            if !closed.is_empty() {
+                out.push_str("\nrecently closed, and why:\n");
+                for it in &closed {
+                    out.push_str(&format!(
+                        "- {} -- {}: {}\n",
+                        s(it, "what"),
+                        s(it, "status"),
+                        s(it, "why")
+                    ));
+                }
+            }
+            out.trim_end().to_string()
+        }
+        "commitment_list_empty" => "the ledger is empty -- you haven't asked me for \
+             anything that waits, and nothing has been dropped."
+            .into(),
+
+        // ---- the registry (sec 4b) ----
+        "registry_overview" => {
+            let k = &a["knowledge"];
+            let g: Vec<String> = a["grants"]["accounts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|x| format!("{} ({})", s(x, "provider"), s(x, "account")))
+                .collect();
+            format!(
+                "the registry -- everything i hold about you, in five categories:\n\
+                 1. knowledge: {} facts ({} confirmed by you), {} active reminders, \
+                 {} open commitments -- \"my facts\" for the items\n\
+                 2. instructions: {} standing rules -- \"my rules\"\n\
+                 3. preferences: how i speak to you -- \"/soul\"\n\
+                 4. media: {} files, {} objects in your vault -- \"my files\"\n\
+                 5. grants: {}\n\
+                 every item can be read, corrected, confirmed, exported (\"export \
+                 my data\") or erased for real. nothing about you lives outside \
+                 these five.",
+                n(k, "facts"),
+                n(k, "confirmed"),
+                n(k, "reminders"),
+                n(k, "commitments_open"),
+                n(&a["instructions"], "active"),
+                n(&a["media"], "files"),
+                n(&a["media"], "vault_objects"),
+                if g.is_empty() { "no outside accounts connected".to_string() } else { g.join(", ") },
+            )
+        }
+        "registry_exported" => format!(
+            "exported -- {} ({}) is in your files, every item with its source. \
+             it's in your vault, not sent anywhere.",
+            s(a, "name"),
+            size(n(a, "size"))
+        ),
+        "fact_confirmed" => format!(
+            "confirmed: {} -- marked as checked by you, today.",
+            s(a, "content")
+        ),
+        "confirm_missing" => format!("no fact #{} to confirm.", n(a, "n")),
+
         // ---- admin ----
         "invite_created" => format!(
             "one-time invite link (works once, member role, their own sealed \
@@ -635,6 +745,14 @@ fn is_control_surface(id: &str) -> bool {
             | "soul_refused"
             | "approval_needed"
             | "confirm_irreversible"
+            // the sec 4b readouts and the Second Law screen. Observed live:
+            // the mentor stance turned the ledger into "you still need to
+            // ... shall we set a notification?" -- a gauge rendered through
+            // a persona. The closed_why column IS the record; a paraphrase
+            // of a reason is a different reason.
+            | "registry_overview"
+            | "commitment_list"
+            | "commitment_list_empty"
     )
 }
 
@@ -1035,6 +1153,9 @@ mod control_surface_tests {
             // sends mail to a third party
             "approval_needed",
             "confirm_irreversible",
+            "registry_overview",
+            "commitment_list",
+            "commitment_list_empty",
         ] {
             assert!(is_control_surface(id), "{id} must not be re-voiced");
         }

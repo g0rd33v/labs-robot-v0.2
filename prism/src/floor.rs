@@ -40,6 +40,9 @@ pub enum FloorMatch {
     /// model can be talked into should be able to produce one.
     ConnectStart,
     ConnectStatus,
+    RegistryShow,
+    CommitmentList,
+    InstructionList,
     WebSearch { query: String },
 }
 
@@ -47,7 +50,7 @@ pub enum FloorMatch {
 // Whole-utterance commands. Matched EXACTLY, never as substrings: an
 // utterance that merely contains one of these is not that command.
 // ---------------------------------------------------------------------
-const EXACT: [(&str, &str); 42] = [
+const EXACT: [(&str, &str); 49] = [
     ("time", "time_now"),
     ("what time is it", "time_now"),
     ("what time is it now", "time_now"),
@@ -83,6 +86,13 @@ const EXACT: [(&str, &str); 42] = [
     ("show facts", "registry_list"),
     ("telegram code", "telegram_code"),
     ("telegram", "telegram_code"),
+    ("/registry", "registry_show"),
+    ("/commitments", "commitment_list"),
+    ("what are you waiting on", "commitment_list"),
+    ("what did i ask you", "commitment_list"),
+    ("my commitments", "commitment_list"),
+    ("my rules", "instruction_list"),
+    ("/rules", "instruction_list"),
     ("/connect", "connect_start"),
     ("/connections", "connect_status"),
     ("connected accounts", "connect_status"),
@@ -211,6 +221,9 @@ pub fn scan(text: &str, now: DateTime<Local>) -> Option<FloorMatch> {
         "soul_show" => Some(FloorMatch::SoulShow),
         "connect_start" => Some(FloorMatch::ConnectStart),
         "connect_status" => Some(FloorMatch::ConnectStatus),
+        "registry_show" => Some(FloorMatch::RegistryShow),
+        "commitment_list" => Some(FloorMatch::CommitmentList),
+        "instruction_list" => Some(FloorMatch::InstructionList),
         _ => None,
     }
 }

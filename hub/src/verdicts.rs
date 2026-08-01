@@ -215,8 +215,8 @@ impl VerdictProvider for GatewayVerdicts {
         }
     }
 
-    fn route(&self, text: &str, tools: &[ToolDef], now: &str) -> Routing {
-        match self.route_call(text, tools, now) {
+    fn route(&self, text: &str, tools: &[ToolDef], now: &str, standing: Option<&str>) -> Routing {
+        match self.route_call(text, tools, now, standing) {
             Some(r) => r,
             None => {
                 tracing::warn!("routing unparseable, deterministic fallback");
@@ -337,11 +337,25 @@ impl GatewayVerdicts {
     ///
     /// Any failure degrades to a verdict with no call: the robot loses the
     /// action, never invents one.
-    fn route_call(&self, text: &str, tools: &[ToolDef], now: &str) -> Option<Routing> {
+    fn route_call(
+        &self,
+        text: &str,
+        tools: &[ToolDef],
+        now: &str,
+        standing: Option<&str>,
+    ) -> Option<Routing> {
+        let mut system = routing_system(tools, now);
+        // the person's standing rules shape what is PROPOSED -- an email
+        // drafted without greetings because they said so -- fenced as data
+        // about their wishes, never as authority over the catalog
+        if let Some(rules) = standing {
+            system.push_str("\n\n");
+            system.push_str(rules);
+        }
         let messages = [
             Msg {
                 role: "system",
-                content: routing_system(tools, now),
+                content: system,
             },
             Msg {
                 role: "user",

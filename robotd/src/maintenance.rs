@@ -65,6 +65,19 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
                 cell.with(|c| {
                     prism::journal::intent_close(c, &intent_id, receipt.status.as_str())
                 })?;
+                // the ledger hears about it too (sec 4.5): if this intent
+                // was something the person is waiting on, its entry closes
+                // with the truth rather than staying open forever
+                cell.with(|c| {
+                    mind::commitments::close(
+                        c,
+                        &intent_id,
+                        "failed",
+                        "the turn hung past its time limit and was closed by the \
+                         sweeper; nothing further ran",
+                    )
+                    .map_err(crate::caps::mind_err)
+                })?;
                 let note = format!(
                     "⚠️ a turn of mine ({}) hung past its time limit and was closed \
                      honestly -- nothing was silently dropped, the receipt records it.",
@@ -166,9 +179,43 @@ mod tests {
             })
             .unwrap();
 
+        // the zombie was something the person asked for -- it is in the
+        // ledger, waiting
+        handle
+            .cell
+            .sql(|c| {
+                mind::commitments::open(
+                    c, "int_zombie", "the hung ask", "approval", "waiting", None,
+                    Some("int_zombie"), None,
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
         let (alerted, closed) = sweep(&robot).unwrap();
         assert_eq!(alerted, 1, "watchdog alerts the 2-minute intent");
         assert_eq!(closed, 1, "sweeper closes the 6-minute zombie");
+
+        // Second Law: the sweep closed the ledger entry WITH the reason --
+        // a hung turn ends visibly, never as a silent drop
+        handle
+            .cell
+            .with(|c| {
+                assert!(!mind::commitments::is_open(c, "int_zombie").unwrap());
+                let settled = mind::commitments::recently_closed(c, 5).unwrap();
+                let mine = settled
+                    .iter()
+                    .find(|x| x.id == mind::commitments::id_for("int_zombie"))
+                    .expect("the swept ask is on the closed list");
+                assert!(
+                    mine.closed_why.as_deref().unwrap().contains("sweeper"),
+                    "the reason names what happened: {:?}",
+                    mine.closed_why
+                );
+                Ok(())
+            })
+            .unwrap();
 
         // second sweep: watchdog does not re-alert, nothing left to close
         let (alerted2, closed2) = sweep(&robot).unwrap();

@@ -5,8 +5,10 @@
 //! encrypted media vault (sec 4a), and Registry-lite (sec 4b): list with
 //! sources, correct (supersession), forget (deletes for real).
 
+pub mod commitments;
 pub mod connections;
 pub mod facts;
+pub mod instructions;
 pub mod files;
 pub mod merge;
 pub mod reminders;
@@ -137,6 +139,40 @@ CREATE TABLE IF NOT EXISTS files (
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
+-- Instructions (sec 4.6 / Registry category 2): the person's standing rules,
+-- in their own words. Versioned by supersession like facts -- a revision is
+-- a new row pointing back, never an overwrite -- and reversible: retiring
+-- stops the robot following a rule without destroying the history of having
+-- had it.
+CREATE TABLE IF NOT EXISTS instructions (
+    id            TEXT PRIMARY KEY,
+    body          TEXT NOT NULL,
+    source_msg_id TEXT NOT NULL REFERENCES messages(id),
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active','superseded','retired')),
+    superseded_by TEXT REFERENCES instructions(id),
+    class         TEXT NOT NULL DEFAULT 'owner_private',
+    created_at    INTEGER NOT NULL
+);
+-- The commitment ledger (sec 4.5): what was asked, what was promised, and
+-- why each closed. The Second Law -- never silently drop a request -- is
+-- enforceable only if closing REQUIRES a reason, so that is a constraint,
+-- not a convention, exactly as source_msg_id is for facts.
+CREATE TABLE IF NOT EXISTS commitments (
+    id            TEXT PRIMARY KEY,
+    what          TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('reminder','approval','promise')),
+    status        TEXT NOT NULL DEFAULT 'open'
+                  CHECK (status IN ('open','waiting','done','declined','cancelled','failed')),
+    source_msg_id TEXT REFERENCES messages(id),
+    intent_id     TEXT,
+    due_at        INTEGER,
+    created_at    INTEGER NOT NULL,
+    closed_at     INTEGER,
+    closed_why    TEXT,
+    CHECK (closed_at IS NULL OR closed_why IS NOT NULL),
+    CHECK ((status IN ('open','waiting')) = (closed_at IS NULL))
+);
 CREATE TABLE IF NOT EXISTS tombstones (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL,
@@ -172,7 +208,12 @@ CREATE TABLE IF NOT EXISTS cell_meta (
     // silently broke sync with a USB stick written before it existed.
     add_missing_columns(
         conn,
-        &[("facts", "class", "TEXT NOT NULL DEFAULT 'owner_private'")],
+        &[
+            ("facts", "class", "TEXT NOT NULL DEFAULT 'owner_private'"),
+            // sec 4's mutation protocol ends at "owner-confirmed fact"; the
+            // Registry's confirm button needs somewhere to put that.
+            ("facts", "confirmed_at", "INTEGER"),
+        ],
     )?;
 
     // the vector door is optional equipment: present when sqlite-vec is

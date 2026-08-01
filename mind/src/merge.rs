@@ -44,6 +44,10 @@ pub struct CellDelta {
     #[serde(default)]
     pub files: Vec<Row>,
     #[serde(default)]
+    pub instructions: Vec<Row>,
+    #[serde(default)]
+    pub commitments: Vec<Row>,
+    #[serde(default)]
     pub tombstones: Vec<Row>,
     /// Soul's relationship state. Knowledge, so it travels -- the robot on
     /// the stick should speak to you the way the one on the machine does.
@@ -67,6 +71,8 @@ pub struct MergeReport {
     pub reminders: usize,
     pub media: usize,
     pub files: usize,
+    pub instructions: usize,
+    pub commitments: usize,
     pub deleted: usize,
     /// Rows that arrived for something already deleted here, and were
     /// therefore refused. A non-zero count is the erase right working.
@@ -75,7 +81,8 @@ pub struct MergeReport {
 
 impl MergeReport {
     pub fn total(&self) -> usize {
-        self.messages + self.facts + self.reminders + self.media + self.files + self.deleted
+        self.messages + self.facts + self.reminders + self.media + self.files
+            + self.instructions + self.commitments + self.deleted
     }
 
     /// What moved that the person would care about.
@@ -86,7 +93,8 @@ impl MergeReport {
     /// makes the log look busy while nothing is happening. Announce
     /// KNOWLEDGE moving; let the transcript catch up quietly.
     pub fn knowledge(&self) -> usize {
-        self.facts + self.reminders + self.media + self.files + self.deleted
+        self.facts + self.reminders + self.media + self.files + self.instructions
+            + self.commitments + self.deleted
     }
     pub fn is_empty(&self) -> bool {
         self.total() == 0
@@ -163,6 +171,22 @@ pub fn export(conn: &Connection, since: i64) -> Result<CellDelta, MindError> {
             "SELECT id, name, hash, size, class, source_msg_id, created_at, updated_at \
              FROM files WHERE updated_at > ?1 \
                AND class NOT IN ('local_only', 'credential')",
+            since,
+        )
+        .unwrap_or_default(),
+        instructions: rows(
+            conn,
+            "SELECT id, body, source_msg_id, status, superseded_by, class, created_at \
+             FROM instructions WHERE created_at > ?1 \
+               AND class NOT IN ('local_only', 'credential')",
+            since,
+        )
+        .unwrap_or_default(),
+        commitments: rows(
+            conn,
+            "SELECT id, what, kind, status, source_msg_id, intent_id, due_at, \
+             created_at, closed_at, closed_why FROM commitments \
+             WHERE created_at > ?1 OR closed_at > ?1",
             since,
         )
         .unwrap_or_default(),
@@ -441,6 +465,100 @@ pub fn apply(conn: &Connection, d: &CellDelta) -> Result<MergeReport, MindError>
         }
     }
 
+    // Instructions: like facts -- insert, then supersede in a second pass,
+    // never overwrite. One asymmetric rule on top: **retired beats
+    // active**, with no timestamp arbitration, because the two mistakes
+    // are not symmetric. Following a rule the person dropped on the other
+    // machine does the thing they said to stop doing; the converse merely
+    // asks them to re-add a rule.
+    for i in &d.instructions {
+        let Some(id) = s(i, "id") else { continue };
+        if tombstoned(&tx, &id)? {
+            rep.refused_resurrections += 1;
+            continue;
+        }
+        let Some(src) = s(i, "source_msg_id") else { continue };
+        let have_src: bool = tx
+            .query_row("SELECT 1 FROM messages WHERE id = ?1", params![src], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        if !have_src {
+            continue;
+        }
+        let theirs = s(i, "status").unwrap_or_else(|| "active".into());
+        rep.instructions += tx.execute(
+            "INSERT OR IGNORE INTO instructions(id, body, source_msg_id, status, \
+             class, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                id,
+                s(i, "body").unwrap_or_default(),
+                src,
+                theirs,
+                s(i, "class").unwrap_or_else(|| "owner_private".into()),
+                i.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0)
+            ],
+        )?;
+        if theirs == "retired" {
+            tx.execute(
+                "UPDATE instructions SET status = 'retired' \
+                 WHERE id = ?1 AND status = 'active'",
+                params![id],
+            )?;
+        }
+    }
+    for i in &d.instructions {
+        let (Some(id), Some(sup)) = (s(i, "id"), s(i, "superseded_by")) else {
+            continue;
+        };
+        let _ = tx.execute(
+            "UPDATE instructions SET superseded_by = ?2, status = 'superseded' \
+             WHERE id = ?1 AND superseded_by IS NULL \
+               AND EXISTS (SELECT 1 FROM instructions WHERE id = ?2)",
+            params![id, sup],
+        );
+    }
+
+    // The ledger: closed beats open, and the FIRST reason stands -- an
+    // arriving closure lands only on a row still open here, so two
+    // instances that both closed one commitment keep their own first
+    // account and converge on "closed" without either rewriting the other.
+    for cm in &d.commitments {
+        let Some(id) = s(cm, "id") else { continue };
+        rep.commitments += tx.execute(
+            "INSERT OR IGNORE INTO commitments(id, what, kind, status, source_msg_id, \
+             intent_id, due_at, created_at, closed_at, closed_why) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                id,
+                s(cm, "what").unwrap_or_default(),
+                s(cm, "kind").unwrap_or_else(|| "promise".into()),
+                s(cm, "status").unwrap_or_else(|| "open".into()),
+                s(cm, "source_msg_id"),
+                s(cm, "intent_id"),
+                cm.get("due_at").and_then(|v| v.as_i64()),
+                i(cm, "created_at"),
+                cm.get("closed_at").and_then(|v| v.as_i64()),
+                s(cm, "closed_why")
+            ],
+        )?;
+        if let (Some(closed_at), Some(why)) =
+            (cm.get("closed_at").and_then(|v| v.as_i64()), s(cm, "closed_why"))
+        {
+            tx.execute(
+                "UPDATE commitments SET status = ?2, closed_at = ?3, closed_why = ?4 \
+                 WHERE id = ?1 AND closed_at IS NULL",
+                params![
+                    id,
+                    s(cm, "status").unwrap_or_else(|| "done".into()),
+                    closed_at,
+                    why
+                ],
+            )?;
+        }
+    }
+
     // the dial: newest write per dimension wins. Two people cannot both be
     // adjusting one person's dial, so this is a straight recency merge --
     // and the bounds travel with the value, so a pin set on the machine is
@@ -640,6 +758,68 @@ mod tests {
         // and it propagates the other way
         apply(&a, &export(&b, 0).unwrap()).unwrap();
         assert!(names(&a).is_empty());
+    }
+
+    /// A rule dropped on one machine must not keep running on the other:
+    /// retired beats active, with no clock to argue with.
+    #[test]
+    fn a_retired_instruction_stays_retired_across_a_sync() {
+        let a = cell();
+        let b = cell();
+        say(&a, "m1", "from now on, no meetings before 10", 10);
+        say(&b, "m1", "from now on, no meetings before 10", 10);
+        crate::instructions::add(&a, "no meetings before 10", "m1", "owner_private").unwrap();
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert_eq!(crate::instructions::active(&b).unwrap().len(), 1, "it travelled");
+
+        // dropped on b; a syncs from b -> retired everywhere
+        crate::instructions::retire(&b, 1).unwrap().unwrap();
+        apply(&a, &export(&b, 0).unwrap()).unwrap();
+        assert!(
+            crate::instructions::active(&a).unwrap().is_empty(),
+            "following a dropped rule does the thing they said to stop doing"
+        );
+
+        // and a local_only rule never travels at all
+        say(&b, "m2", "secret rule", 20);
+        crate::instructions::add(&b, "the safe code is 4471", "m2", "local_only").unwrap();
+        let d = export(&b, 0).unwrap();
+        assert!(
+            d.instructions.iter().all(|r| r
+                .get("body")
+                .and_then(|v| v.as_str())
+                .map(|b| !b.contains("4471"))
+                .unwrap_or(true)),
+            "local_only leaked into the delta"
+        );
+    }
+
+    /// The ledger converges on "closed", and the first reason stands --
+    /// the instance that watched it happen keeps its account.
+    #[test]
+    fn a_closed_commitment_closes_everywhere_with_its_first_reason() {
+        let a = cell();
+        let b = cell();
+        crate::commitments::open(&a, "rem_1", "call mark", "reminder", "open", None, None, None)
+            .unwrap();
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert_eq!(crate::commitments::outstanding(&b).unwrap().len(), 1);
+
+        crate::commitments::close(&a, "rem_1", "done", "fired on time").unwrap();
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        assert!(crate::commitments::outstanding(&b).unwrap().is_empty());
+        let settled = crate::commitments::recently_closed(&b, 1).unwrap();
+        assert_eq!(settled[0].closed_why.as_deref(), Some("fired on time"));
+
+        // b already had its own account? the first one written locally stands
+        crate::commitments::open(&a, "rem_2", "x", "reminder", "open", None, None, None).unwrap();
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        crate::commitments::close(&b, "rem_2", "cancelled", "cancelled by you").unwrap();
+        crate::commitments::close(&a, "rem_2", "done", "fired on time").unwrap();
+        apply(&b, &export(&a, 0).unwrap()).unwrap();
+        let b2 = crate::commitments::recently_closed(&b, 5).unwrap();
+        let mine = b2.iter().find(|c| c.id == "cmt_rem_2").unwrap();
+        assert_eq!(mine.closed_why.as_deref(), Some("cancelled by you"));
     }
 
     /// Sync twice, in either order, and both sides agree. Anything less is

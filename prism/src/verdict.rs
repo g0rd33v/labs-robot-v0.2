@@ -20,7 +20,7 @@ pub trait VerdictProvider: Send + Sync {
     /// honestly can do: no model, no routing beyond the English floor. A
     /// provider that cannot reach a model must degrade to fewer
     /// capabilities, never to guessed ones.
-    fn route(&self, text: &str, _tools: &[ToolDef], _now: &str) -> Routing {
+    fn route(&self, text: &str, _tools: &[ToolDef], _now: &str, _standing: Option<&str>) -> Routing {
         Routing {
             verdict: self.verdict(text),
             call: None,

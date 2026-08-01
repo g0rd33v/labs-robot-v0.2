@@ -363,6 +363,68 @@ struct ClassifyArgs {
     class: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmArgs {
+    index: u32,
+}
+
+pub struct Confirm;
+
+impl Capability for Confirm {
+    fn name(&self) -> &'static str {
+        "memory.confirm"
+    }
+    fn effect(&self) -> Effect {
+        Effect::ReversibleWrite
+    }
+    fn description(&self) -> &'static str {
+        "Mark fact number N as confirmed by the person -- use when they \
+         look at a stored fact and say it is correct, right, or true. This \
+         raises it to owner-confirmed, the strongest standing a fact can \
+         have. Not for new facts (memory.remember) or wrong ones \
+         (memory.correct)."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer", "minimum": 1,
+                    "description": "The fact's number as the registry lists it."
+                }
+            },
+            "required": ["index"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String> {
+        let a: ConfirmArgs = typed(args)?;
+        if a.index == 0 {
+            return Err("facts are numbered from 1".into());
+        }
+        Ok(())
+    }
+    fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        let a: ConfirmArgs = typed(args).map_err(PrismError::Capability)?;
+        let confirmed = ctx
+            .cell
+            .with(|c| mind::facts::confirm_by_index(c, a.index as usize).map_err(mind_err))?;
+        match confirmed {
+            Some(content) => attested(
+                note_evidence("memory.confirm"),
+                format!("confirmed fact #{}", a.index),
+                Rendering::new("fact_confirmed", serde_json::json!({ "content": content })),
+            ),
+            None => attested(
+                note_evidence("memory.confirm"),
+                format!("no fact #{}", a.index),
+                Rendering::new("confirm_missing", serde_json::json!({ "n": a.index })),
+            ),
+        }
+    }
+}
+
 pub struct Classify;
 
 impl Capability for Classify {

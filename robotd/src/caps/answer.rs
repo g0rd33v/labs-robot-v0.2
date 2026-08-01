@@ -124,6 +124,15 @@ impl Capability for ModelAnswer {
             tracing::debug!("{withheld} fact(s) withheld from model context by class");
         }
         let mut system = persona();
+        // standing rules (sec 4.6) shape the answer as they shape proposals;
+        // the block is pre-fenced and pre-filtered by class
+        if let Some(rules) = ctx
+            .cell
+            .with(|c| mind::instructions::context_block(c).map_err(super::mind_err))?
+        {
+            system.push_str("\n\n");
+            system.push_str(&rules);
+        }
         if !facts.is_empty() {
             system.push_str(
                 "\n\nfacts you remember about this person (each has provenance in \

@@ -180,6 +180,10 @@ pub struct TurnDeps<'a> {
     /// Test hook: called at every journal boundary with the point name;
     /// returning true simulates the process dying right there.
     pub crash: Option<&'a dyn Fn(&str) -> bool>,
+    /// The person's standing rules (sec 4.6), already compiled to one
+    /// fenced block by the layer that owns the store -- prism carries it to
+    /// the router without knowing where rules live.
+    pub standing: Option<String>,
 }
 
 /// Every boundary the kill-test must murder us at.
@@ -266,7 +270,9 @@ pub fn run_turn(
             //
             let tools = deps.router.describe(cell);
             let now = Local::now().to_rfc3339();
-            let routed = deps.verdicts.route(&env.content, &tools, &now);
+            let routed = deps
+                .verdicts
+                .route(&env.content, &tools, &now, deps.standing.as_deref());
             let call = validate_proposal(cell, &intent_id, deps, routed.call)?;
             Decision::Verdict {
                 v: routed.verdict,
@@ -683,6 +689,15 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
             FloorMatch::ConnectStatus => {
                 vec![step("connect.status", serde_json::json!({}), Effect::Read)]
             }
+            FloorMatch::RegistryShow => {
+                vec![step("registry.show", serde_json::json!({}), Effect::Read)]
+            }
+            FloorMatch::CommitmentList => {
+                vec![step("commitment.list", serde_json::json!({}), Effect::Read)]
+            }
+            FloorMatch::InstructionList => {
+                vec![step("instruction.list", serde_json::json!({}), Effect::Read)]
+            }
             FloorMatch::WebSearch { query } => vec![step(
                 "web.research",
                 serde_json::json!({ "query": query }),
@@ -909,7 +924,7 @@ pub(crate) fn reply_parts(outcomes: &[Outcome], receipt: &Receipt) -> Vec<ReplyP
 /// is not the phrase-list problem returning -- a phrase list had to be
 /// written once per language and could be evaded by writing in a language
 /// nobody listed. This list is written once, full stop.
-const EFFECT_CLAIMS: [&str; 15] = [
+const EFFECT_CLAIMS: [&str; 20] = [
     "reminder_created",
     "reminder_cancelled",
     "remembered",
@@ -925,6 +940,11 @@ const EFFECT_CLAIMS: [&str; 15] = [
     "email_drafted",
     "email_sent",
     "connect_forgotten",
+    "instruction_added",
+    "instruction_revised",
+    "instruction_retired",
+    "fact_confirmed",
+    "registry_exported",
 ];
 
 /// The deterministic claim-vs-receipt check (arch sec 5 / Q26: "string/set

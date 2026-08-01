@@ -625,6 +625,23 @@ mod tests {
 ///
 /// One-based index into the registry, like every other owner operation on
 /// facts -- the person is looking at a numbered list, not at row ids.
+/// Owner-confirmed (sec 4's mutation protocol, final rung): the person
+/// looked at the fact and said "yes, that is true". Recorded as a moment
+/// rather than a flag, so the Registry can say WHEN it was confirmed --
+/// a confirmation ages like any other assertion.
+pub fn confirm_by_index(conn: &Connection, index: usize) -> Result<Option<String>, MindError> {
+    let listed = registry_list(conn, 100)?;
+    let Some((fact, _, _)) = listed.into_iter().nth(index.saturating_sub(1)) else {
+        return Ok(None);
+    };
+    conn.execute(
+        "UPDATE facts SET confirmed_at = ?2, confidence = 1.0, status = 'stable' \
+         WHERE id = ?1",
+        params![fact.id, trust::ids::ts_ms()],
+    )?;
+    Ok(Some(fact.content))
+}
+
 pub fn classify_by_index(
     conn: &Connection,
     index: usize,

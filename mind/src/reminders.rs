@@ -52,6 +52,18 @@ pub fn create(
         params![intent_id],
         row_to_reminder,
     )?;
+    // the ask enters the ledger (sec 4.5) in the same call that accepts it,
+    // so no caller can create the promise and forget the accounting
+    crate::commitments::open(
+        conn,
+        &reminder.id,
+        &reminder.about,
+        "reminder",
+        "open",
+        None,
+        Some(intent_id),
+        Some(reminder.fire_at),
+    )?;
     Ok(reminder)
 }
 
@@ -106,6 +118,7 @@ pub fn cancel_latest(conn: &Connection, intent_id: &str) -> Result<Option<Remind
                 intent_id,
                 &serde_json::json!({ "op": "cancel_latest", "id": rem.id }),
             )?;
+            crate::commitments::close(&tx, &rem.id, "cancelled", "cancelled by you")?;
         }
         None => {
             crate::facts::set_op_marker(
@@ -140,6 +153,7 @@ pub fn mark_fired(conn: &Connection, id: &str) -> Result<(), MindError> {
         "UPDATE reminders SET status = 'fired' WHERE id = ?1",
         params![id],
     )?;
+    crate::commitments::close(conn, id, "done", "fired on time")?;
     Ok(())
 }
 

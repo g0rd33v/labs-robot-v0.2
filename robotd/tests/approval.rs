@@ -56,7 +56,7 @@ impl prism::verdict::VerdictProvider for Proposes {
             ..Default::default()
         }
     }
-    fn route(&self, _content: &str, _tools: &[ToolDef], _now: &str) -> Routing {
+    fn route(&self, _content: &str, _tools: &[ToolDef], _now: &str, _standing: Option<&str>) -> Routing {
         Routing {
             verdict: Verdict {
                 action: VerdictAction::Task,
@@ -116,6 +116,7 @@ fn a_send_parks_for_approval_and_cannot_execute_without_one() {
         verdicts: &verdicts,
         renderer: &speak,
         crash: None,
+            standing: None,
     };
 
     let env = envelope(&cell, "email someone@example.com the quarterly numbers");
@@ -175,6 +176,7 @@ fn declining_closes_the_intent_and_still_nothing_runs() {
         verdicts: &verdicts,
         renderer: &speak,
         crash: None,
+            standing: None,
     };
     let env = envelope(&cell, "send it");
     let out = prism::lifecycle::run_turn(&cell, &env, &deps).unwrap();
@@ -214,6 +216,7 @@ fn approving_is_what_lets_it_through() {
         verdicts: &verdicts,
         renderer: &speak,
         crash: None,
+            standing: None,
     };
     let env = envelope(&cell, "send it");
     let out = prism::lifecycle::run_turn(&cell, &env, &deps).unwrap();
@@ -233,6 +236,100 @@ fn approving_is_what_lets_it_through() {
         "approval did not release the step"
     );
     assert!(prism::approval::waiting(&cell).unwrap().is_empty());
+}
+
+/// THE GATE for gap item 9: **the Second Law is a screen — nothing asked
+/// for is silently dropped.** Every deferred ask lands in the ledger the
+/// moment it is deferred, and every way it can end — approval, decline —
+/// writes a reason a person can read. (The reminder and sweeper paths have
+/// their own hooks, tested beside them; this drives the approval path end
+/// to end because it is the one with the most ways to end.)
+#[test]
+fn every_deferred_ask_is_in_the_ledger_and_closes_with_a_reason() {
+    let cell = cell();
+    let executed = Arc::new(AtomicUsize::new(0));
+    let router = Counting {
+        inner: Registry::offline(),
+        executed,
+    };
+    let verdicts = Proposes("email.send", send_args());
+    let speak = robotd::render::Speak::offline();
+    let deps = prism::TurnDeps {
+        router: &router,
+        verdicts: &verdicts,
+        renderer: &speak,
+        crash: None,
+        standing: None,
+    };
+
+    // hooks live in robotd's orchestration; this test mirrors them the way
+    // robot.rs runs them, then asserts the screen a person would see
+    let env = envelope(&cell, "отправь письмо анне про демо");
+    let out = prism::lifecycle::run_turn(&cell, &env, &deps).unwrap();
+    cell.with(|c| {
+        mind::commitments::open(
+            c,
+            &out.intent_id,
+            &env.content,
+            "approval",
+            "waiting",
+            env.source_msg_id.as_deref(),
+            Some(&out.intent_id),
+            None,
+        )
+        .map_err(|e| prism::PrismError::Capability(e.to_string()))
+    })
+    .unwrap();
+
+    // the ask is on the screen, verbatim, while it waits
+    let owed = cell
+        .with(|c| {
+            mind::commitments::outstanding(c)
+                .map_err(|e| prism::PrismError::Capability(e.to_string()))
+        })
+        .unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].what, "отправь письмо анне про демо", "their words, not a summary");
+
+    // declined -> off the owed list, onto the closed list, with the reason
+    prism::approval::respond(&cell, &out.intent_id, false, &deps)
+        .unwrap()
+        .unwrap();
+    cell.with(|c| {
+        mind::commitments::close(c, &out.intent_id, "declined", "you declined it; nothing ran")
+            .map_err(|e| prism::PrismError::Capability(e.to_string()))
+    })
+    .unwrap();
+
+    let (owed, settled) = cell
+        .with(|c| {
+            Ok((
+                mind::commitments::outstanding(c).unwrap(),
+                mind::commitments::recently_closed(c, 5).unwrap(),
+            ))
+        })
+        .unwrap();
+    assert!(owed.is_empty(), "answered means no longer owed");
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].closed_why.as_deref(), Some("you declined it; nothing ran"));
+
+    // and the reminder path opens/closes through its own hooks
+    cell.with(|c| {
+        let r = mind::reminders::create(c, "int_r1", 12345, "проверить почту").unwrap();
+        assert!(mind::commitments::is_open(c, &r.id).unwrap(), "created = ledgered");
+        mind::reminders::mark_fired(c, &r.id).unwrap();
+        assert!(!mind::commitments::is_open(c, &r.id).unwrap());
+        // looked up by id, not by ordering: two closes in one millisecond
+        // tie on closed_at, and the screen's order is not the assertion
+        let closed = mind::commitments::recently_closed(c, 10).unwrap();
+        let mine = closed
+            .iter()
+            .find(|x| x.id == mind::commitments::id_for(&r.id))
+            .unwrap();
+        assert_eq!(mine.closed_why.as_deref(), Some("fired on time"));
+        Ok(())
+    })
+    .unwrap();
 }
 
 /// Config may widen approval requirements and never narrow them. Without

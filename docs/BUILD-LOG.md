@@ -5,6 +5,132 @@ dependencies introduced. Newest first.
 
 ---
 
+## The headline, completed — instructions, the Registry, the ledger (2026-08-01)
+
+Items 7–9 of `docs/GAP-ANALYSIS.md`: §4b's five categories become real, and
+the two §4 stores that were missing land with them.
+
+### Instructions (§4.6) — words the models read, nowhere else
+
+A standing rule is stored verbatim (law 5), versioned by supersession
+exactly as fact correction works, and injected into model context as one
+fenced, class-filtered block — into the ROUTING call as well as the answer
+path, because tool arguments are authored at routing time and "write emails
+without greetings" must shape the draft, not just the chat.
+
+The three spec words, as mechanisms rather than adjectives: **versioned** —
+a revision is a new row pointing back; **reversible** — retire has an undo
+and destroys nothing; **testable** — a rule is words in a bounded block, so
+the worst a bad rule can do is what a bad sentence can do, and which
+sentences are in force is one query.
+
+Prism carries the block without knowing where rules live (`TurnDeps.standing`
+— prism cannot depend on mind), which changed `VerdictProvider::route` to
+take it. Rules sync; **retired beats active** with no clock arbitration,
+because the two mistakes are not symmetric: following a dropped rule does
+the thing the person said to stop doing, while the converse merely asks
+them to re-add it.
+
+Live: "from now on, always answer me in exactly one sentence" → `✓
+instruction.add`; "why is the sky blue?" → exactly one sentence, from a
+mentor stance whose initiative habitually appends follow-up questions. The
+rule outranked the persona, which is the intended order.
+
+### The Registry (§4b) — the claim, made checkable
+
+*Gate: "nothing about you exists outside these five categories" is
+checkable against the schema.* `caps::registry_pims::census` maps every
+table a cell can contain to knowledge / instructions / preferences / media
+/ grants, or to named **substrate** — the ground the categories cite: your
+own messages (the sources), the journal, the receipts. The test walks
+`sqlite_master` and fails on any table it has never heard of, so the exact
+question that went unasked when `connections` was added — *which category
+is this, and what rights apply?* — is now unskippable at build time.
+
+`registry.show` / `/registry` renders the five categories with counts.
+`registry.export` writes the item-by-item JSON **into the person's own
+vault** — the export right satisfied without a boundary crossing; getting
+the file off the machine is then their call, made with it in hand.
+`memory.confirm` completes the §4 mutation protocol's final rung
+(owner-confirmed), recorded as a timestamp rather than a flag, because a
+confirmation ages like any other assertion. The `confirmed_at` column
+arrives via the additive-migration mechanism items 4–6 built, so older
+cells gain it on first open.
+
+### The commitment ledger (§4.5) — the Second Law as a constraint
+
+*Gate: nothing asked for is silently dropped.* Three mechanisms carry it:
+
+* **Closing requires a reason.** A schema CHECK, like the source FK on
+  facts: there is no way to write a closed commitment without a `why`, so a
+  silent drop is not a discipline failure, it is a constraint violation.
+* **Openings are hooks, not conventions.** Reminder creation opens an entry
+  inside the same call; a turn ending parked opens one in the orchestrator;
+  the zombie sweeper closes entries for the turns it kills. Nothing depends
+  on a caller remembering the accounting.
+* **Ids derive from the backing thing** (`cmt_<reminder-id>`), so two
+  instances that both hold the ask hold ONE ledger entry after a sync, and
+  the FIRST reason recorded stands — the instance that watched it happen
+  keeps its account.
+
+`commitment.list` / `/commitments` is the screen: everything owed, then
+"recently closed, and why", verbatim. Live: create a reminder in Russian →
+owed; cancel it → *"полить цветы -- cancelled: cancelled by you"*.
+
+What is deliberately absent: the `promise` kind is schema-ready but nothing
+creates one — the robot has no deferred executor beyond reminders yet, so
+model-made promises would be theater. An unanswered clarifying question is
+also not ledgered: the ledger holds deferred WORK, and a visible question
+the person chose not to answer defers nothing.
+
+### Two defects found by running it, again
+
+1. **The router acknowledged a rule without storing it.** The Russian "с
+   этого момента всегда отвечай одним предложением" chitchatted — the model
+   replied "Принято, я буду..." and saved nothing; "my rules" said zero.
+   The English equivalent stored fine. Fixed by sharpening
+   `instruction.add`'s description ("any language; acknowledging without
+   calling this tool means the rule is NOT saved"); the same sentence then
+   routed correctly. The false acknowledgement is the exact class the
+   sampled expression-verify exists for.
+2. **The persona re-voiced the gauges.** `/commitments` came back as "You
+   still need to полить цветы… shall we set a notification?" — the Second
+   Law screen reworded by the mentor stance. The `closed_why` column IS the
+   record; a paraphrase of a reason is a different reason. `registry_overview`
+   and `commitment_list` joined the control surfaces: translated, never
+   re-voiced — same rule, same argument as the dial readout and the
+   approval prompt before them.
+
+### Gate
+
+222 tests (was 207), clippy clean, `robotd eval` PASS (66 routing cases, 0
+misroutes; kill-suite 12/12; floor p95 1.6 ms). Live, in Russian and
+English: rule kept → rule obeyed → rules listed; ledger opened by a
+reminder, closed by a cancel, shown verbatim with its reason; the
+five-category registry with a confirmed fact; the item-by-item export
+landing in the vault as a file. Rules and ledger entries synced to the USB
+peer in the same session.
+
+### Assumptions
+
+* **"Registry" the floor phrase still shows facts** (knowledge detail);
+  `/registry` shows the five categories. The word means both things and the
+  detailed view is the one people reached for all week.
+* **cell_meta maps to Preferences** in the census, though it also holds two
+  engine values (`vec_ready`, the ultra counter). Table-level mapping keeps
+  the census honest without a key-level inventory; noted here rather than
+  hidden.
+* **Instructions do not rewire governance.** "Always ask before sending" is
+  context for the models, not a change to the approval table — the gates
+  that cannot be narrowed cannot be narrowed by a rule either, and §14's
+  config-may-only-widen principle applies unchanged.
+
+### Dependencies
+
+None new.
+
+---
+
 ## Reach — calendar, email, files (2026-07-31)
 
 Items 4–6 of `docs/GAP-ANALYSIS.md`. §14 names five capabilities; two

@@ -446,11 +446,17 @@ impl RobotCore {
                 gateway: self.gateway.clone(),
                 voice: cell_voice(cell),
             };
+            // the person's standing rules (sec 4.6), compiled once per turn
+            // and handed to the router -- prism carries the block without
+            // knowing where rules live
+            let standing =
+                cell.with(|c| mind::instructions::context_block(c).map_err(crate::caps::mind_err))?;
             let deps = TurnDeps {
                 router: &router,
                 verdicts: verdicts.as_ref(),
                 renderer: &speak,
                 crash: None,
+                standing,
             };
             // the cell is locked only in short bursts inside run_turn; the
             // model call in the middle happens with it free
@@ -458,12 +464,43 @@ impl RobotCore {
             // likely the answer to it. Checked BEFORE routing, because a
             // model asked to interpret "yes" with no idea a question is
             // open will happily interpret it as something else.
-            let out = match parked_answer(cell, &env.content)? {
-                Some((intent, yes)) => prism::approval::respond(cell, &intent, yes, &deps)?
+            let answered_park = parked_answer(cell, &env.content)?;
+            let out = match &answered_park {
+                Some((intent, yes)) => prism::approval::respond(cell, intent, *yes, &deps)?
                     .map(Ok)
                     .unwrap_or_else(|| prism::run_turn(cell, &env, &deps))?,
                 None => prism::run_turn(cell, &env, &deps)?,
             };
+            // the ledger (sec 4.5), kept by the orchestrator because prism
+            // cannot depend on mind. An answered park closes its entry with
+            // the answer; a turn that ends parked opens one -- so anything
+            // waiting on a person is in the ledger, and the reason it
+            // stopped waiting is recorded whichever way it went.
+            let parked_now = prism::approval::waiting_for(cell, &out.intent_id)?.is_some();
+            cell.with(|c| {
+                if let Some((intent, yes)) = &answered_park {
+                    let (status, why) = if *yes {
+                        ("done", "you approved it; it ran")
+                    } else {
+                        ("declined", "you declined it; nothing ran")
+                    };
+                    mind::commitments::close(c, intent, status, why).map_err(crate::caps::mind_err)?;
+                }
+                if parked_now {
+                    mind::commitments::open(
+                        c,
+                        &out.intent_id,
+                        &env.content,
+                        "approval",
+                        "waiting",
+                        env.source_msg_id.as_deref(),
+                        Some(&out.intent_id),
+                        None,
+                    )
+                    .map_err(crate::caps::mind_err)?;
+                }
+                Ok(())
+            })?;
             // remember what language this person speaks to us in, so the
             // lanes that talk to them when they are not asking -- a
             // reminder firing at 03:00, a backup failure -- do it in their
@@ -896,6 +933,7 @@ mod tests {
             verdicts: &FallbackVerdict,
             renderer: &SPEAK,
             crash: None,
+            standing: None,
         }
     }
 
@@ -945,6 +983,7 @@ mod tests {
             text: &str,
             _tools: &[prism::types::ToolDef],
             _now: &str,
+            _standing: Option<&str>,
         ) -> prism::types::Routing {
             let mut v = FallbackVerdict.verdict(text);
             v.lang = "ru".into();
@@ -979,6 +1018,7 @@ mod tests {
             verdicts: &verdicts,
             renderer: &SPEAK,
             crash: None,
+            standing: None,
         };
         let out = prism::run_turn(
             &cell,
@@ -1015,6 +1055,7 @@ mod tests {
                 verdicts,
                 renderer: &SPEAK,
                 crash: None,
+            standing: None,
             };
             prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
         };
@@ -1128,6 +1169,7 @@ mod tests {
                 verdicts,
                 renderer: &SPEAK,
                 crash: None,
+            standing: None,
             };
             prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
         };
@@ -1212,6 +1254,7 @@ mod tests {
                 verdicts: &verdicts,
                 renderer: &SPEAK,
                 crash: None,
+            standing: None,
             };
             let out =
                 prism::run_turn(&cell, &envelope(&cell, "что-нибудь сделай"), &deps).unwrap();
@@ -1443,6 +1486,7 @@ mod tests {
                     verdicts: &FallbackVerdict,
                     renderer: &SPEAK,
                     crash: Some(&crash),
+            standing: None,
                 };
                 let err = prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap_err();
                 assert!(matches!(err, PrismError::SimulatedCrash(_)), "{text}@{point}");
@@ -1520,6 +1564,7 @@ mod tests {
                 verdicts: &FallbackVerdict,
                 renderer: &SPEAK,
                 crash: None,
+            standing: None,
             };
             prism::run_turn(&cell, &env, &deps).unwrap()
         });

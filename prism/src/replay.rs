@@ -42,6 +42,7 @@ pub fn resume_incomplete(
         verdicts: &NoReDecide,
         renderer,
         crash: None,
+            standing: None,
     };
 
     for intent_id in cell.with(journal::open_intents)? {

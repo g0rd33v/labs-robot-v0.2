@@ -15,10 +15,13 @@ pub mod admin;
 pub mod answer;
 pub mod basics;
 pub mod calendar;
+pub mod commitments;
 pub mod connect;
 pub mod email;
 pub mod files;
+pub mod instructions;
 pub mod memory;
+pub mod registry_pims;
 pub mod reminders;
 pub mod research;
 pub mod soul;
@@ -410,6 +413,14 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(memory::Forget),
         Box::new(memory::Correct),
         Box::new(memory::Classify),
+        Box::new(memory::Confirm),
+        Box::new(instructions::Add),
+        Box::new(instructions::List),
+        Box::new(instructions::Revise),
+        Box::new(instructions::Retire),
+        Box::new(commitments::List),
+        Box::new(registry_pims::Show),
+        Box::new(registry_pims::Export),
         Box::new(admin::Invite),
         Box::new(admin::TelegramBindCode),
         Box::new(answer::ModelAnswer),

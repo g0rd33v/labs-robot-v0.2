@@ -262,18 +262,38 @@ conflicting edits both survive, and deletions travel as tombstones.
 
 ### Then — the headline feature, completed (§4b)
 
-**7. Procedural memory + instructions store.** (§4.6) Versioned, testable,
-reversible. ~3 days.
+**7. Procedural memory + instructions store.** ✅ **done.** (§4.6)
+`mind::instructions` + `instruction.add/list/revise/retire`, injected
+verbatim into both model paths (routing and answering) as one fenced,
+class-filtered block. *Versioned*: revision is supersession, never
+overwrite. *Reversible*: retire has an undo, and history stays. *Testable*:
+a rule is words the models read, nowhere else — which sentences are in
+force is one query, and the injection contract is a unit test.
+Demonstrated live: "always answer in exactly one sentence" bound the very
+next answer, overriding the mentor stance's follow-up habit. Rules sync;
+retired beats active across instances.
 
-**8. The Registry, all five categories.** Knowledge · instructions ·
-preferences · media · grants, each with read/correct/confirm/export/erase.
-~3–4 days.
-*Gate: the claim "nothing about you exists outside these five categories"
-is checkable against the schema.*
+**8. The Registry, all five categories.** ✅ **done.** `registry.show`
+(and `/registry`) renders the five categories with counts;
+`registry.export` writes the item-by-item JSON into the person's own vault
+— the export right without a boundary crossing; `memory.confirm` completes
+the §4 mutation protocol's last rung (owner-confirmed, with a timestamp).
+Correct/erase existed per category.
+*Gate: met.* `caps::registry_pims::census` maps every table a cell can
+contain to a category or to named substrate; the test walks
+`sqlite_master` and fails on any table it has never heard of — adding a
+store without answering "which category?" is now a failing build.
 
-**9. Commitment ledger proper.** (§4.5) Beyond reminders: promises,
-waiting conditions, why each closed. ~2–3 days.
-*Gate: the Second Law is a screen — nothing asked for is silently dropped.*
+**9. Commitment ledger proper.** ✅ **done.** (§4.5) `mind::commitments`:
+closing **requires** a reason (schema CHECK, like the source FK on facts);
+openings are hooks, not conventions — reminder creation, approval parking,
+and the zombie sweeper each write their own entries; ids derive from the
+backing thing so two instances converge on one ledger. `commitment.list`
+(and `/commitments`) is the screen, rendered verbatim, never re-voiced.
+*Gate: met.* Proven by counting: an ask enters the ledger the moment it is
+deferred, and every ending — approved, declined, cancelled, fired, swept —
+closes it with words a person can read. 'promise' is schema-ready and
+waits for the background lanes that could make promises.
 
 ### Then — prove the numbers the document sells
 

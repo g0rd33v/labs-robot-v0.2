@@ -108,7 +108,7 @@ fn eval_multilingual(
         let lang = case["lang"].as_str().unwrap_or("?");
         cases += 1;
 
-        let routed = prism::verdict::VerdictProvider::route(&verdicts, text, &tools, &now);
+        let routed = prism::verdict::VerdictProvider::route(&verdicts, text, &tools, &now, None);
         let got = routed.call.as_ref().map(|c| c.tool.as_str()).unwrap_or("none");
         if got != want {
             misroutes.push(format!("  MISROUTE [{lang}] {text:?} -> {got} (wanted {want})"));
@@ -262,6 +262,7 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
                     verdicts: &FallbackVerdict,
                     renderer: &speak,
                     crash: Some(&crash),
+            standing: None,
                 };
                 let env = envelope(&cell, text)?;
                 let crashed = matches!(
@@ -307,6 +308,7 @@ fn eval_latency() -> anyhow::Result<i32> {
         verdicts: &FallbackVerdict,
                     renderer: &speak,
         crash: None,
+            standing: None,
     };
     let mut times = vec![];
     for _ in 0..20 {
