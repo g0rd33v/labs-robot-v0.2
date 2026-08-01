@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS core_journal (
     kind         TEXT NOT NULL,
     payload_json TEXT NOT NULL
 );
+-- The meter (sec 2b): one row per model call, so cost is a measurement
+-- rather than an estimate. Token counts and the provider's own cost
+-- figure; no content -- the boundary log carries the hashes, this carries
+-- the arithmetic. Core-file because cost is an instance concern: the
+-- operator pays one bill, not one per cell.
+CREATE TABLE IF NOT EXISTS model_calls (
+    seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                INTEGER NOT NULL,
+    role              TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens     INTEGER NOT NULL DEFAULT 0,
+    cost_usd          REAL,
+    latency_ms        INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS invites (
     token_hash TEXT PRIMARY KEY,
     role       TEXT NOT NULL DEFAULT 'member',

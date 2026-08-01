@@ -297,17 +297,52 @@ waits for the background lanes that could make promises.
 
 ### Then — prove the numbers the document sells
 
-**10. Speed instrumentation.** (§2c) TTFT and turn latency into the eval
-suite as gates, not observations. ~2 days.
-*Gate: p50/p95 measured per class; a change that loses the budget fails.*
+**10. Speed instrumentation.** ✅ **done, with a recorded deviation.** Per
+class in `eval --live`: routing p50/p95 over the 60-case corpus, full
+answer turns end-to-end, floor ≤300ms (offline, long green). First
+measurement: routing p50 ~3.2–3.9s / p95 ~10.7s, full turn p50 ~4.1–7.0s —
+**the §2c budget (3s p50 / 6s p95) is lost today**, because §2c's own
+techniques (streaming, parallel fan-out, latency-aware provider routing)
+are unbuilt. The gates therefore RATCHET against the measured baseline
+(fail on regression) with the budget printed beside them, tightening as the
+speed work lands — a budget-gate red on day one catches nothing. TTFT is
+not measured: nothing streams yet; it arrives with streaming.
 
-**11. Cache-stable context layout.** (§6, §2b) The 30–70% input-cost claim,
-collected. ~2–3 days.
-*Gate: measured cache-hit rate and cost delta, published in BUILD-LOG.*
+**11. Cache-stable context layout.** ✅ **built and measured.** Two
+cache-killers removed: the routing prompt carried the per-call timestamp
+*before* the catalog (everything after the first changed token re-prefills
+at full price — the catalog never cached), and the answer path put
+per-query recalled facts in the system message, invalidating the whole
+conversation every turn. Now: stable prefix → semi-stable (standing rules)
+→ volatile (timestamp, recall) dead last.
+*Gate: measured and published.* First eval-run figure: **cache-hit ~27% of
+input tokens** — under §6's 30–70% claim, expected for an eval of
+independent one-shot contexts; session traffic with append-only history is
+the favourable case. Numbers in BUILD-LOG; `robotd cost` tracks it per seat
+continuously.
 
-**12. Per-turn cost accounting.** (§2b) Close the "TO-VERIFY".
+**12. Per-turn cost accounting.** ✅ **done.** The meter: every model call
+records tokens, cache hits, latency, and **the provider's own cost figure**
+(no local price table — prices drift, and a stale table is an estimate in a
+measurement's clothes) into `model_calls` in core.db. `robotd cost [--days N]`
+reports per seat; `eval --live` prints calls/turn and run cost. First
+measurements: **1.10 calls/turn** (§2b's TO-VERIFY assumed ~2 router calls
+— Bender's one-call design is confirmed by measurement) and a full live
+eval run — 75 calls, 36K input tokens — cost **$0.0043**.
 
-**13. LongMemEval + LoCoMo.** (§12) The published-numbers promise. ~3 days.
+**13. LongMemEval + LoCoMo.** ✅ **harness done; full-dataset numbers
+pending.** Two parts. First the prerequisite: recall searched *facts only*,
+so a question about an earlier conversation found nothing — §4.3's
+"semantic index over everything" now covers messages (FTS + dated snippets
+into answer context, with a backfill for older cells). Then the harness:
+`robotd eval --memory <file>` speaks LongMemEval's own format — sessions
+ingested as real messages, questions answered by the real recall+answer
+path, graded by the evaluator seat (never the generator, Q26). Bundled
+smoke set: **10/10** across single-hop, multi-session, temporal, update and
+abstention. The smoke set proves the harness, it is not the benchmark: the
+published-numbers promise closes when the LongMemEval-S / LoCoMo datasets
+are downloaded (owner-side: ~1GB, HF/GitHub) and a full run is recorded
+here and in BUILD-LOG.
 
 ### Then — the rest of the control room and the platform
 

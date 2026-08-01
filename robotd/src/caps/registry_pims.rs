@@ -68,9 +68,14 @@ pub const CELL_TABLES: &[(&str, Category)] = &[
     ("soul_journal", Category::Substrate),
 ];
 
-/// Shadow/index tables the engine creates around declared ones.
+/// Shadow/index tables the engine creates around declared ones. An index
+/// holds no data of its own -- its content is the declared table's, and its
+/// category is that table's category.
 fn is_shadow(name: &str) -> bool {
-    name.starts_with("facts_fts") || name.starts_with("facts_vec") || name == "sqlite_sequence"
+    name.starts_with("facts_fts")
+        || name.starts_with("facts_vec")
+        || name.starts_with("messages_fts")
+        || name == "sqlite_sequence"
 }
 
 /// Walk the actual schema; return any table the map cannot account for.

@@ -14,7 +14,7 @@ pub mod merge;
 pub mod reminders;
 pub mod vault;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -108,6 +108,18 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     content, content='facts', content_rowid='rowid'
 );
+-- sec 4.3: the semantic index covers EVERYTHING, and conversations are
+-- most of everything. Facts answer what-do-we-know; this answers
+-- what-was-said -- the store LongMemEval-class questions exercise.
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content, content='messages', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+END;
 CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
     INSERT INTO facts_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
@@ -200,6 +212,29 @@ CREATE TABLE IF NOT EXISTS cell_meta (
 ",
     )?;
 
+    // Older cells wrote messages before messages_fts existed. An external-
+    // content FTS table reads rows from its content table, so no count can
+    // reveal an unbuilt index -- a one-time marker in cell_meta says
+    // whether this cell has ever rebuilt. Without this, every pre-existing
+    // conversation is invisible to recall on exactly the instances with
+    // the most to recall.
+    let built: bool = conn
+        .query_row(
+            "SELECT 1 FROM cell_meta WHERE key = 'messages_fts_built'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(MindError::Sql)?
+        .is_some();
+    if !built {
+        conn.execute_batch("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');")?;
+        conn.execute(
+            "INSERT INTO cell_meta(key, value) VALUES ('messages_fts_built', '1')",
+            [],
+        )?;
+    }
+
     // `CREATE TABLE IF NOT EXISTS` creates tables; it never adds a column
     // to one that already exists. So every column added after a cell was
     // first written is invisible to that cell, and the failure is not a
@@ -235,6 +270,52 @@ CREATE TABLE IF NOT EXISTS cell_meta (
 #[cfg(test)]
 mod schema_tests {
     use super::*;
+
+    /// What was said is findable later, and hostile input is terms, not
+    /// FTS syntax.
+    #[test]
+    fn conversation_is_searchable_and_a_query_is_never_syntax() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_cell_schema(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages(id, ts, direction, surface, content) VALUES
+             ('m1', 100, 'in', 'web', 'my dentist appointment is on thursday'),
+             ('m2', 200, 'out', 'web', 'noted -- thursday it is'),
+             ('m3', 300, 'in', 'web', 'the wifi password at the office changed');",
+        )
+        .unwrap();
+
+        let hits = recall_messages(&conn, "when is my dentist visit", 5).unwrap();
+        assert!(
+            hits.iter().any(|(_, _, c)| c.contains("dentist")),
+            "{hits:?}"
+        );
+        // operators and quotes arrive as words, never as query syntax
+        for hostile in ["dentist\" OR \"*", "NEAR(a b)", "col: *", "\"\"\""] {
+            let r = recall_messages(&conn, hostile, 5);
+            assert!(r.is_ok(), "hostile query errored: {hostile:?}");
+        }
+        assert!(recall_messages(&conn, "   ", 5).unwrap().is_empty());
+    }
+
+    /// Older cells wrote messages before the index existed; opening them
+    /// backfills, so history is searchable exactly where there is most of it.
+    #[test]
+    fn a_pre_index_cell_backfills_its_conversation_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        // a cell born before messages_fts: table without the index
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, ts INTEGER NOT NULL,
+                 direction TEXT NOT NULL, surface TEXT NOT NULL, lang TEXT,
+                 content TEXT NOT NULL, media_ref TEXT);
+             INSERT INTO messages(id, ts, direction, surface, content)
+                 VALUES ('m1', 1, 'in', 'web', 'the old conversation about the boiler');",
+        )
+        .unwrap();
+        init_cell_schema(&conn).unwrap();
+        let hits = recall_messages(&conn, "boiler", 5).unwrap();
+        assert_eq!(hits.len(), 1, "pre-existing words must be indexed");
+    }
 
     /// The failure this fixes, reproduced: a cell written before `class`
     /// existed. `CREATE TABLE IF NOT EXISTS` leaves it alone, so every
@@ -300,6 +381,44 @@ pub fn record_message(
         params![id, trust::ids::ts_ms(), direction, surface, content],
     )?;
     Ok(id)
+}
+
+/// What was said, found again (§4.3).
+///
+/// FTS over the whole conversation history, newest-first among equals.
+/// Distinct from `facts::recall`: facts are curated knowledge with
+/// provenance; this is verbatim conversation, and it is what questions
+/// like "when did I mention the dentist" actually need — the fact may
+/// never have been extracted, but the words were said.
+pub fn recall_messages(
+    conn: &Connection,
+    query: &str,
+    k: usize,
+) -> Result<Vec<(i64, String, String)>, MindError> {
+    // FTS5 query syntax is an injection surface of its own (quotes,
+    // operators); every term is quoted so the person's words are terms,
+    // never syntax. OR-joined: recall is retrieval, not boolean algebra.
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .take(12)
+        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .collect();
+    if terms.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT m.ts, m.direction, m.content \
+         FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+         WHERE messages_fts MATCH ?1 \
+         ORDER BY bm25(messages_fts), m.ts DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![terms.join(" OR "), k as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Number of stored messages. Used by tests and gate demos.

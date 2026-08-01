@@ -1,0 +1,297 @@
+[
+  {
+    "question_id": "smoke_01_single_hop",
+    "question_type": "single-session-user",
+    "question": "what breed is my dog?",
+    "answer": "a border collie",
+    "haystack_dates": [
+      "2026-03-02T10:00:00+00:00",
+      "2026-03-15T18:30:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "long day. walked Rex for an hour though"
+        },
+        {
+          "role": "assistant",
+          "content": "an hour is a good walk. Rex must be tired."
+        },
+        {
+          "role": "user",
+          "content": "border collies are never tired, that's the problem"
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "remind me to buy coffee tomorrow"
+        },
+        {
+          "role": "assistant",
+          "content": "done, tomorrow it is."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_02_multi_session",
+    "question_type": "multi-session",
+    "question": "which city does my sister live in, and what is her cat called?",
+    "answer": "she lives in Porto and the cat is called Mango",
+    "haystack_dates": [
+      "2026-01-10T09:00:00+00:00",
+      "2026-02-20T21:00:00+00:00",
+      "2026-02-25T08:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "flying to Porto next week to see my sister"
+        },
+        {
+          "role": "assistant",
+          "content": "nice -- how long will you stay?"
+        },
+        {
+          "role": "user",
+          "content": "just the weekend"
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "my sister's cat Mango knocked her laptop off the table during our call"
+        },
+        {
+          "role": "assistant",
+          "content": "cats have no respect for hardware."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "what's a good gift for someone who likes ceramics?"
+        },
+        {
+          "role": "assistant",
+          "content": "a small kiln course, or a nice glaze set."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_03_temporal",
+    "question_type": "temporal-reasoning",
+    "question": "when did I tell you about my knee injury -- roughly what month?",
+    "answer": "in April 2026",
+    "haystack_dates": [
+      "2026-04-07T19:00:00+00:00",
+      "2026-06-01T12:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "hurt my knee at football today, it's swollen"
+        },
+        {
+          "role": "assistant",
+          "content": "ice it and keep it up. see someone if it's not better in a couple of days."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "signed up for the 10k in september"
+        },
+        {
+          "role": "assistant",
+          "content": "good goal. build up slowly."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_04_update",
+    "question_type": "knowledge-update",
+    "question": "what car do I drive now?",
+    "answer": "an electric Renault; the old diesel Passat was sold",
+    "haystack_dates": [
+      "2026-01-05T10:00:00+00:00",
+      "2026-05-12T16:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "the Passat needs new brakes again, diesel money pit"
+        },
+        {
+          "role": "assistant",
+          "content": "old diesels do that."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "sold the Passat! picked up the electric Renault today"
+        },
+        {
+          "role": "assistant",
+          "content": "congratulations -- enjoy the quiet."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_05_abstention",
+    "question_type": "single-session-user",
+    "question": "what is my blood type?",
+    "answer": "This information was never mentioned; the correct response is to say it is not known.",
+    "haystack_dates": [
+      "2026-02-01T09:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "book me a dentist appointment for tuesday"
+        },
+        {
+          "role": "assistant",
+          "content": "which tuesday -- this one or next?"
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_06_assistant_side",
+    "question_type": "single-session-assistant",
+    "question": "what did you suggest I do about the mold in the bathroom?",
+    "answer": "ventilate after showers and treat it with a vinegar solution",
+    "haystack_dates": [
+      "2026-03-20T20:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "there's mold above the shower again"
+        },
+        {
+          "role": "assistant",
+          "content": "ventilate after showers and treat the patch with a vinegar solution; if it returns behind paint, that's a moisture problem."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_07_preference",
+    "question_type": "single-session-preference",
+    "question": "how do I take my coffee?",
+    "answer": "black, no sugar",
+    "haystack_dates": [
+      "2026-01-22T08:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "ordering coffee for the office. mine's black no sugar as always"
+        },
+        {
+          "role": "assistant",
+          "content": "noted -- black, no sugar."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_08_multi_hop",
+    "question_type": "multi-session",
+    "question": "who recommended the restaurant where I had my birthday dinner?",
+    "answer": "Anna recommended it (the Georgian place, Suliko)",
+    "haystack_dates": [
+      "2026-04-01T13:00:00+00:00",
+      "2026-04-18T23:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Anna keeps recommending that Georgian place, Suliko"
+        },
+        {
+          "role": "assistant",
+          "content": "worth trying -- Georgian food is underrated."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "birthday dinner at Suliko was great, khachapuri for days"
+        },
+        {
+          "role": "assistant",
+          "content": "happy birthday! good choice then."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_09_number",
+    "question_type": "single-session-user",
+    "question": "what apartment number did I move to?",
+    "answer": "apartment 4B",
+    "haystack_dates": [
+      "2026-05-30T17:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "moved in! apartment 4B, third floor, actual sunlight"
+        },
+        {
+          "role": "assistant",
+          "content": "sunlight is the true luxury. congratulations."
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "smoke_10_update_abstention",
+    "question_type": "knowledge-update",
+    "question": "am I still vegetarian?",
+    "answer": "no -- started eating fish in May 2026 (pescatarian now)",
+    "haystack_dates": [
+      "2026-02-14T12:00:00+00:00",
+      "2026-05-25T19:00:00+00:00"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "veggie option for the flight please, i'm vegetarian"
+        },
+        {
+          "role": "assistant",
+          "content": "noted for bookings."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "update: started eating fish again, doctor's advice. pescatarian i guess"
+        },
+        {
+          "role": "assistant",
+          "content": "noted -- fish is in, meat still out."
+        }
+      ]
+    ]
+  }
+]

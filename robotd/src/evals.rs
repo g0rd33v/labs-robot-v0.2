@@ -34,6 +34,9 @@ pub fn live_gateway(
                  (law #3 covers this process too): {e}"
             )
         })?;
+    // opened outside boot, so the schema has not run here -- without this
+    // the meter's table does not exist and every call goes unmetered
+    trust::schema::init_core(&conn)?;
     let sink = std::sync::Arc::new(std::sync::Mutex::new(conn));
     Ok(std::sync::Arc::new(hub::ModelGateway::new(
         std::sync::Arc::new(hub::UreqApi::new(
@@ -59,8 +62,20 @@ pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> an
     if live {
         match gateway {
             Some(gw) => {
-                hard_failures += eval_multilingual(gw.clone(), &Registry::offline())?;
+                let meter_start = trust::ids::ts_ms();
+                let mut turns = 0usize;
+                let (f, n) = eval_multilingual(gw.clone(), &Registry::offline())?;
+                hard_failures += f;
+                turns += n;
+                let (f, n) = eval_speed_live(gw.clone())?;
+                hard_failures += f;
+                turns += n;
                 hard_failures += eval_injection(&gw)?;
+                // sec 2b/sec 6, measured: read the meter back for exactly
+                // the calls this run made
+                if let Err(e) = eval_meter_report(meter_start, turns) {
+                    println!("\n[meter] unreadable: {e}");
+                }
             }
             None => println!("\n[injection] SKIPPED: no OPENROUTER_API_KEY in environment"),
         }
@@ -90,13 +105,14 @@ pub fn run(live: bool, gateway: Option<std::sync::Arc<hub::ModelGateway>>) -> an
 fn eval_multilingual(
     gw: std::sync::Arc<hub::ModelGateway>,
     registry: &Registry,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, usize)> {
     let corpus = std::fs::read_to_string("evals/multilingual.jsonl")?;
     let verdicts = hub::GatewayVerdicts { gateway: gw };
     let tools = registry.catalog();
     let now = chrono::Local::now().to_rfc3339();
 
     let mut cases = 0;
+    let mut route_ms: Vec<i64> = vec![];
     let mut misroutes: Vec<String> = vec![];
     let mut mangled: Vec<String> = vec![];
     let mut wide: Vec<String> = vec![];
@@ -108,7 +124,9 @@ fn eval_multilingual(
         let lang = case["lang"].as_str().unwrap_or("?");
         cases += 1;
 
+        let t0 = Instant::now();
         let routed = prism::verdict::VerdictProvider::route(&verdicts, text, &tools, &now, None);
+        route_ms.push(t0.elapsed().as_millis() as i64);
         let got = routed.call.as_ref().map(|c| c.tool.as_str()).unwrap_or("none");
         if got != want {
             misroutes.push(format!("  MISROUTE [{lang}] {text:?} -> {got} (wanted {want})"));
@@ -180,11 +198,329 @@ fn eval_multilingual(
     for m in misroutes.iter().chain(mangled.iter()).chain(wide.iter()) {
         println!("{m}");
     }
-    Ok(if misroutes.len() <= allowed && mangled.is_empty() {
-        0
+
+    // sec 2c, gated: the routing call is the long pole of every acting
+    // turn. Measured on the same sixty calls the quality bars use, against
+    // the routine-turn budget (<= 3s p50, <= 6s p95).
+    // Ratchet bars, not the sec 2c budget: measured baseline 2026-08-01
+    // was p50 3233ms / p95 10817ms, and the budget (3000/6000) is lost
+    // until sec 2c's own techniques land -- streaming, parallel fan-out,
+    // latency-aware provider routing. A budget gate that is red on day one
+    // catches nothing; a ratchet catches every regression from here, and
+    // tightens as the speed work lands. The budget stays printed so the
+    // gap cannot be forgotten.
+    route_ms.sort_unstable();
+    let (p50, p95) = (pct(&route_ms, 0.50), pct(&route_ms, 0.95));
+    let speed_ok = p50 <= 4_000 && p95 <= 13_500;
+    println!(
+        "[routing speed] p50 {p50}ms, p95 {p95}ms over {} calls \
+         (ratchet: p50 <= 4000, p95 <= 13500; sec 2c budget 3000/6000 NOT \
+         yet met) {}",
+        route_ms.len(),
+        if speed_ok { "" } else { "FAIL" }
+    );
+
+    let quality_ok = misroutes.len() <= allowed && mangled.is_empty();
+    Ok((i32::from(!(quality_ok && speed_ok)), cases))
+}
+
+fn pct(sorted: &[i64], p: f64) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Full answer-class turns, timed end to end (sec 2c: "full answer,
+/// routine turn <= 3s p50, <= 6s p95"). Routing plus the answer model plus
+/// rendering -- the whole path a question actually takes, driven through
+/// run_turn rather than assembled by hand.
+fn eval_speed_live(gw: std::sync::Arc<hub::ModelGateway>) -> anyhow::Result<(i32, usize)> {
+    let (cell, path) = temp_cell("speed-live")?;
+    let registry = Registry::new(
+        crate::caps::Services {
+            gateway: Some(gw.clone()),
+            ..Default::default()
+        },
+        crate::caps::Policy::default(),
+        crate::caps::Instance::default(),
+    );
+    let verdicts = hub::GatewayVerdicts { gateway: gw };
+    let speak = crate::render::Speak::offline();
+    let deps = TurnDeps {
+        router: &registry,
+        verdicts: &verdicts,
+        renderer: &speak,
+        crash: None,
+        standing: None,
+    };
+    let questions = [
+        "what is the capital of france?",
+        "how many minutes are in a day?",
+        "what does DNS stand for?",
+        "is rust memory safe?",
+        "who wrote war and peace?",
+        "what is 15% of 80?",
+        "name a planet with rings",
+        "what year did the berlin wall fall?",
+    ];
+    let mut ms: Vec<i64> = vec![];
+    for q in questions {
+        let env = envelope(&cell, q)?;
+        let t0 = Instant::now();
+        let out = prism::run_turn(&cell, &env, &deps)?;
+        ms.push(t0.elapsed().as_millis() as i64);
+        if out.reply.trim().is_empty() {
+            println!("  EMPTY REPLY for {q:?}");
+        }
+    }
+    let _ = std::fs::remove_file(path);
+    ms.sort_unstable();
+    let (p50, p95) = (pct(&ms, 0.50), pct(&ms, 0.95));
+    // Ratchet, as above: baseline 2026-08-01 p50 7006ms. Two sequential
+    // model calls with no streaming cannot make the 3s budget; the ratchet
+    // holds the line while that work is unbuilt.
+    let pass = p50 <= 9_000;
+    println!(
+        "\n[turn speed] full answer turn: p50 {p50}ms (ratchet: <= 9000; \
+         sec 2c budget 3000 NOT yet met) p95 {p95}ms ({} samples, reported){}",
+        ms.len(),
+        if pass { "" } else { " FAIL" }
+    );
+    Ok((i32::from(!pass), questions.len()))
+}
+
+/// The memory benchmark (sec 12 / gap item 13): LongMemEval-format QA
+/// against the REAL pipeline -- sessions ingested as messages, questions
+/// answered by the answer capability with its actual recall (facts +
+/// conversation FTS), graded by the evaluator seat, which by Q26's law is
+/// never the seat that generated.
+///
+/// The file format is LongMemEval's own (question, answer,
+/// haystack_dates, haystack_sessions), so the published datasets drop in
+/// unchanged: `robotd eval --memory evals/longmemeval_s.json`. The bundled
+/// smoke set proves the harness and gives a first number; it is NOT the
+/// benchmark, and the BUILD-LOG says which one any published figure came
+/// from.
+///
+/// Deliberately not routing: the multilingual eval gates routing. This
+/// measures MEMORY -- can the robot find and use what was said -- which is
+/// what LongMemEval tests.
+pub fn eval_memory(
+    path: &std::path::Path,
+    gw: std::sync::Arc<hub::ModelGateway>,
+) -> anyhow::Result<i32> {
+    let raw = std::fs::read_to_string(path)?;
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&raw)?;
+    let registry = Registry::new(
+        crate::caps::Services {
+            gateway: Some(gw.clone()),
+            ..Default::default()
+        },
+        crate::caps::Policy::default(),
+        crate::caps::Instance::default(),
+    );
+
+    let mut per_type: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let mut failures: Vec<String> = vec![];
+    let total = cases.len();
+
+    for (i, case) in cases.iter().enumerate() {
+        let question = case["question"].as_str().unwrap_or_default();
+        let gold = case["answer"].as_str().unwrap_or_default();
+        let qtype = case["question_type"].as_str().unwrap_or("unknown").to_string();
+        let (cell, cell_path) = temp_cell(&format!("memory-{i}"))?;
+
+        // ingest the haystack as the conversation it claims to be, with
+        // real timestamps so temporal questions have something to stand on
+        let sessions = case["haystack_sessions"].as_array().cloned().unwrap_or_default();
+        let dates = case["haystack_dates"].as_array().cloned().unwrap_or_default();
+        cell.with(|c| {
+            for (si, session) in sessions.iter().enumerate() {
+                let ts = dates
+                    .get(si)
+                    .and_then(|d| d.as_str())
+                    .and_then(parse_haystack_date)
+                    .unwrap_or(1_600_000_000_000 + si as i64 * 86_400_000);
+                let mut t = ts;
+                for turn in session.as_array().cloned().unwrap_or_default() {
+                    let dir = if turn["role"].as_str() == Some("user") { "in" } else { "out" };
+                    let content = turn["content"].as_str().unwrap_or_default();
+                    if content.is_empty() {
+                        continue;
+                    }
+                    c.execute(
+                        "INSERT INTO messages(id, ts, direction, surface, content) \
+                         VALUES (?1, ?2, ?3, 'bench', ?4)",
+                        rusqlite::params![trust::ids::new_id("msg"), t, dir, content],
+                    )
+                    .map_err(|e| PrismError::Capability(e.to_string()))?;
+                    t += 60_000;
+                }
+            }
+            Ok(())
+        })?;
+
+        // the real answer path: recall over facts + conversation, then the
+        // answer seat
+        let reply = prism::CapabilityRouter::execute(
+            &registry,
+            &cell,
+            "answer.model",
+            &serde_json::json!({ "query": question, "tier": "fast" }),
+            &format!("bench_{i}"),
+            "en",
+        );
+        let _ = std::fs::remove_file(cell_path);
+        let reply = match reply {
+            // model prose lands in `detail`; a rendering means a template
+            Ok(out) => match &out.rendering {
+                Some(r) => crate::render::english(r),
+                None => out.detail.clone(),
+            },
+            Err(e) => format!("(the answer path failed: {e})"),
+        };
+
+        let verdict = judge(&gw, question, gold, &reply)?;
+        let slot = per_type.entry(qtype.clone()).or_default();
+        slot.1 += 1;
+        if verdict {
+            slot.0 += 1;
+        } else {
+            failures.push(format!(
+                "  MISS [{qtype}] q={question:?} gold={gold:?} got={:?}",
+                reply.chars().take(160).collect::<String>()
+            ));
+        }
+        println!("  [{}/{}] {} {}", i + 1, total, if verdict { "ok  " } else { "MISS" }, question);
+    }
+
+    let correct: usize = per_type.values().map(|(c, _)| c).sum();
+    println!("\n[memory] {correct}/{total} correct ({:.0}%) on {}:", 
+        100.0 * correct as f64 / total.max(1) as f64, path.display());
+    for (t, (c, n)) in &per_type {
+        println!("  {t}: {c}/{n}");
+    }
+    for f in &failures {
+        println!("{f}");
+    }
+    println!(
+        "(baseline numbers -- published in BUILD-LOG with the dataset named; \
+         the harness gates on RUNNING, accuracy bars come once a full \
+         dataset sets the baseline)"
+    );
+    Ok(0)
+}
+
+/// LongMemEval writes dates as \"2023/05/20 (Sat) 02:21\"; the smoke set
+/// writes RFC 3339. Both should land on a timestamp rather than a guess.
+fn parse_haystack_date(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp_millis());
+    }
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !"()".contains(*c))
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| w.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for fmt in ["%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y/%m/%d", "%Y-%m-%d"] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&cleaned, fmt) {
+            return Some(dt.and_utc().timestamp_millis());
+        }
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(&cleaned, fmt) {
+            return Some(d.and_hms_opt(12, 0, 0)?.and_utc().timestamp_millis());
+        }
+    }
+    None
+}
+
+/// The grader, on the evaluator seat (Q26: never the seat that generated).
+/// Strict shape, temperature 0 -- judging is not a place for creativity.
+fn judge(
+    gw: &hub::ModelGateway,
+    question: &str,
+    gold: &str,
+    reply: &str,
+) -> anyhow::Result<bool> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "correct": { "type": "boolean" } },
+        "required": ["correct"],
+        "additionalProperties": false
+    });
+    let prompt = format!(
+        "you grade a memory benchmark. QUESTION: {question}\nGOLD ANSWER: \
+         {gold}\nRESPONSE: {reply}\n\ndoes the response convey the gold \
+         answer's information? partial but correct counts; contradicting or \
+         missing it does not. if the gold answer says the information is \
+         unknown/absent, the response is correct only if it also declines."
+    );
+    let messages = [Msg { role: "user", content: prompt }];
+    match gw.chat_at(Role::Evaluator, &messages, Some(schema), 100, 0.0) {
+        Ok(out) => {
+            let v: serde_json::Value = serde_json::from_str(out.content.trim()).unwrap_or_default();
+            Ok(v["correct"].as_bool().unwrap_or(false))
+        }
+        // an unavailable judge fails the case -- \"ungraded\" must never
+        // count as passed
+        Err(e) => {
+            println!("  judge unavailable ({e}) -- counted as MISS");
+            Ok(false)
+        }
+    }
+}
+
+/// Read the meter back for this run: cache-hit rate (sec 6's claim,
+/// measured), calls per turn (sec 2b's TO-VERIFY (a), measured), and what
+/// the run cost in the provider's own accounting.
+fn eval_meter_report(since_ts: i64, turns: usize) -> anyhow::Result<()> {
+    let cfg = crate::config::load(&crate::cli::default_config())?;
+    let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+    let keys = trust::keys::KeyChain::load_or_create(&data_dir.join("kek.key"))?;
+    let core = trust::cells::open_encrypted(&data_dir.join("core.db"), &keys.core_db_key())?;
+    trust::schema::init_core(&core)?;
+    let (calls, prompt, cached, cost): (i64, i64, i64, Option<f64>) = core.query_row(
+        "SELECT count(*), coalesce(sum(prompt_tokens),0), coalesce(sum(cached_tokens),0), \
+         sum(cost_usd) FROM model_calls WHERE ts >= ?1",
+        [since_ts],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    // sec 2b's TO-VERIFY (a) asks about ROUTER calls per turn specifically,
+    // and the run window also holds non-turn calls (the injection suite,
+    // graders) -- so the per-turn figure divides the route seat alone by
+    // the turns, or it answers a question nobody asked
+    let route_calls: i64 = core.query_row(
+        "SELECT count(*) FROM model_calls WHERE ts >= ?1 AND role = 'route'",
+        [since_ts],
+        |r| r.get(0),
+    )?;
+    let cache_pct = if prompt > 0 {
+        100.0 * cached as f64 / prompt as f64
     } else {
-        1
-    })
+        0.0
+    };
+    let per_turn = if turns > 0 {
+        route_calls as f64 / turns as f64
+    } else {
+        0.0
+    };
+    println!(
+        "\n[meter] this run: {calls} model calls, {route_calls} routing calls \
+         over {turns} turns ({per_turn:.2} router calls/turn incl. hedges -- \
+         sec 2b assumed ~2), cache-hit {cache_pct:.1}% of {prompt} input \
+         tokens (sec 6 claims 30-70% where caching applies; see `robotd \
+         cost` for per-seat), cost {}",
+        match cost {
+            Some(c) => format!("${c:.4}"),
+            None => "unpriced by provider".into(),
+        }
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------- routing

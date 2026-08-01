@@ -52,6 +52,18 @@ async fn main() -> anyhow::Result<()> {
             println!("backup sealed: {}", path.display());
             Ok(())
         }
+        Cmd::Cost { config, days } => {
+            let cfg = config::load(&config)?;
+            let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+            let keys = trust::keys::KeyChain::load_or_create(&data_dir.join("kek.key"))?;
+            let core = trust::cells::open_encrypted(
+                &data_dir.join("core.db"),
+                &keys.core_db_key(),
+            )?;
+            trust::schema::init_core(&core)?;
+            println!("{}", robotd::costs::report(&core, days)?);
+            Ok(())
+        }
         Cmd::Chain { config } => {
             let cfg = config::load(&config)?;
             let data_dir = std::path::Path::new(&cfg.robot.data_dir);
@@ -135,8 +147,15 @@ async fn main() -> anyhow::Result<()> {
             println!("notice delivered to the owner's chat");
             Ok(())
         }
-        Cmd::Eval { config, live } => {
+        Cmd::Eval { config, live, memory } => {
             let cfg = config::load(&config)?;
+            if let Some(path) = memory {
+                // the memory benchmark always needs the live gateway: the
+                // answer seat produces the response, the evaluator grades it
+                let gw = evals::live_gateway(&cfg)?;
+                let code = evals::eval_memory(&path, gw)?;
+                std::process::exit(code);
+            }
             let gateway = if live {
                 Some(evals::live_gateway(&cfg)?)
             } else {

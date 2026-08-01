@@ -123,7 +123,10 @@ impl Capability for List {
     fn description(&self) -> &'static str {
         "List the reminders that are still pending, with their times. Use \
          when the person asks what they have coming up, what is scheduled, \
-         or what they asked to be reminded of."
+         or what they asked to be reminded of. Only about the FUTURE: a \
+         question about the past -- when did i ask, what did i say, did you \
+         remind me -- is a memory question, answered from memory with tool \
+         \"none\", not a reminders listing."
     }
     fn schema(&self) -> serde_json::Value {
         super::no_args()

@@ -266,9 +266,16 @@ fn tool_line(t: &ToolDef) -> String {
 /// Everything language-specific about this robot now lives in ONE English
 /// sentence per tool, written beside the code that runs -- and in this
 /// prompt, which never names a language.
-fn routing_system(tools: &[ToolDef], now: &str) -> String {
+/// The routing system prompt, laid out for the provider's prompt cache
+/// (sec 6 / sec 2c: "cache-stable prefixes"): everything stable first --
+/// instructions, output shape, the catalog -- then the person's standing
+/// rules (change rarely), and the timestamp DEAD LAST, because it changes
+/// every call and everything after the first changed token re-prefills at
+/// full price. It used to sit in the middle, which quietly priced the
+/// whole catalog as uncacheable on every single turn.
+fn routing_system(tools: &[ToolDef], now: &str, standing: Option<&str>) -> String {
     let catalog: Vec<String> = tools.iter().map(tool_line).collect();
-    format!(
+    let mut out = format!(
         "you are the router of a personal robot. do BOTH of these, always.\n\n\
          1. CLASSIFY the message into `verdict`.\n\
          2. CHOOSE the one tool that does what the person is asking for and \
@@ -285,14 +292,19 @@ fn routing_system(tools: &[ToolDef], now: &str) -> String {
          - `lang` is the BCP 47 tag of the language they wrote in (en, ru, \
          tr, ja, zh, pt-BR...).\n\
          - resolve every relative time into an absolute RFC 3339 timestamp \
-         from the current time below.\n\
+         from the current time at the very end of this prompt.\n\
          - one call at most.\n\n\
          {}\n\n\
-         current local time: {now}\n\n\
          tools:\n\n{}",
         output_shape(tools),
         catalog.join("\n\n")
-    )
+    );
+    if let Some(rules) = standing {
+        out.push_str("\n\n");
+        out.push_str(rules);
+    }
+    out.push_str(&format!("\n\ncurrent local time: {now}"));
+    out
 }
 
 /// The sentinel meaning "no tool fits". A plain string rather than null:
@@ -344,18 +356,13 @@ impl GatewayVerdicts {
         now: &str,
         standing: Option<&str>,
     ) -> Option<Routing> {
-        let mut system = routing_system(tools, now);
-        // the person's standing rules shape what is PROPOSED -- an email
-        // drafted without greetings because they said so -- fenced as data
-        // about their wishes, never as authority over the catalog
-        if let Some(rules) = standing {
-            system.push_str("\n\n");
-            system.push_str(rules);
-        }
+        // standing rules shape what is PROPOSED -- an email drafted without
+        // greetings because they said so -- fenced as data about their
+        // wishes, never as authority over the catalog
         let messages = [
             Msg {
                 role: "system",
-                content: system,
+                content: routing_system(tools, now, standing),
             },
             Msg {
                 role: "user",

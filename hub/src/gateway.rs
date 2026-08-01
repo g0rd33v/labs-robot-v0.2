@@ -171,6 +171,39 @@ pub struct ChatOut {
     pub content: String,
     /// the exact model that produced the content -- for the receipt
     pub model: String,
+    /// what the call cost, when the provider said (sec 2b: measured, not
+    /// estimated). None on transports that report nothing.
+    pub usage: Option<CallUsage>,
+}
+
+/// One call's arithmetic, as the provider reported it.
+#[derive(Debug, Clone, Default)]
+pub struct CallUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    /// tokens the provider served from its prompt cache -- the number that
+    /// makes sec 6's cache-stable layout a measurement instead of a hope
+    pub cached_tokens: i64,
+    /// the provider's own charge in USD, when it reports one
+    pub cost_usd: Option<f64>,
+    pub latency_ms: i64,
+}
+
+impl CallUsage {
+    /// Parse the OpenAI-compatible `usage` object; OpenRouter adds `cost`
+    /// when the request asks for accounting.
+    pub fn from_response(resp: &serde_json::Value, latency_ms: i64) -> Option<CallUsage> {
+        let u = resp.get("usage")?;
+        Some(CallUsage {
+            prompt_tokens: u["prompt_tokens"].as_i64().unwrap_or(0),
+            completion_tokens: u["completion_tokens"].as_i64().unwrap_or(0),
+            cached_tokens: u["prompt_tokens_details"]["cached_tokens"]
+                .as_i64()
+                .unwrap_or(0),
+            cost_usd: u["cost"].as_f64(),
+            latency_ms,
+        })
+    }
 }
 
 /// The raw transport, mockable for tests.
@@ -346,6 +379,7 @@ impl ModelGateway {
         let body_str = body.to_string();
         // no crossing record, no crossing: the log write gates the call
         self.log(Direction::Out, model, role.as_str(), &body_str)?;
+        let started = std::time::Instant::now();
         let resp = match self.api.post_chat(model, body, timeout_ms) {
             Ok(r) => r,
             Err(e) => {
@@ -355,6 +389,7 @@ impl ModelGateway {
                 return Err(e);
             }
         };
+        let latency_ms = started.elapsed().as_millis() as i64;
         let resp_str = resp.to_string();
         self.log(Direction::In, model, role.as_str(), &resp_str)?;
         let content = resp["choices"][0]["message"]["content"]
@@ -362,10 +397,39 @@ impl ModelGateway {
             .ok_or_else(|| HubError::Gateway(format!("{model}: no content in response")))?
             .to_string();
         let model_used = resp["model"].as_str().unwrap_or(model).to_string();
+        let usage = CallUsage::from_response(&resp, latency_ms);
+        self.meter(role, &model_used, usage.as_ref(), latency_ms);
         Ok(ChatOut {
             content,
             model: model_used,
+            usage,
         })
+    }
+
+    /// The meter (sec 2b). Best-effort by design, unlike the boundary log:
+    /// a lost arithmetic row costs a cent of accounting, and failing the
+    /// person's turn over it would price bookkeeping above service.
+    fn meter(&self, role: Role, model: &str, usage: Option<&CallUsage>, latency_ms: i64) {
+        let Some(sink) = &self.boundary else { return };
+        let Ok(conn) = sink.lock() else { return };
+        let (p, c, cached, cost) = match usage {
+            Some(u) => (u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.cost_usd),
+            None => (0, 0, 0, None),
+        };
+        let _ = conn.execute(
+            "INSERT INTO model_calls(ts, role, model, prompt_tokens, completion_tokens, \
+             cached_tokens, cost_usd, latency_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                trust::ids::ts_ms(),
+                role.as_str(),
+                model,
+                p,
+                c,
+                cached,
+                cost,
+                latency_ms
+            ],
+        );
     }
 
     /// One chat completion through the chain. `schema` requests structured
@@ -395,6 +459,9 @@ impl ModelGateway {
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            // sec 2b: ask the router for its own accounting, so cost is the
+            // provider's number rather than our price-table estimate
+            "usage": { "include": true },
         });
         if let Some(s) = schema {
             // Strict constrained decoding cannot express a tool call's `args`,
@@ -463,6 +530,7 @@ impl ModelGateway {
                 return Ok(ChatOut {
                     content: text,
                     model,
+                    usage: None,
                 });
             }
             Err(e) => tracing::warn!("audio endpoint failed, trying chat shape: {e}"),
@@ -511,6 +579,7 @@ impl ModelGateway {
             let role_name = role.as_str();
             std::thread::spawn(move || {
                 let model = model_owned;
+                let started = std::time::Instant::now();
                 let result = api.post_chat(&model, &body, timeout_ms).and_then(|resp| {
                     // the response is unusable unless its crossing is
                     // recorded: no record, no bytes
@@ -541,9 +610,40 @@ impl ModelGateway {
                         .ok_or_else(|| HubError::Gateway(format!("{model}: no content")))?
                         .to_string();
                     let model_used = resp["model"].as_str().unwrap_or(&model).to_string();
+                    // the meter, same as the unhedged path -- routing goes
+                    // THROUGH here, and an unmetered router hides the most
+                    // frequent seat on the bill
+                    let latency_ms = started.elapsed().as_millis() as i64;
+                    let usage = CallUsage::from_response(&resp, latency_ms);
+                    if let Some(sink) = &boundary {
+                        if let Ok(conn) = sink.lock() {
+                            let (pt, ct, cached, cost) = match &usage {
+                                Some(u) => {
+                                    (u.prompt_tokens, u.completion_tokens, u.cached_tokens, u.cost_usd)
+                                }
+                                None => (0, 0, 0, None),
+                            };
+                            let _ = conn.execute(
+                                "INSERT INTO model_calls(ts, role, model, prompt_tokens, \
+                                 completion_tokens, cached_tokens, cost_usd, latency_ms) \
+                                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                                rusqlite::params![
+                                    trust::ids::ts_ms(),
+                                    role_name,
+                                    model_used,
+                                    pt,
+                                    ct,
+                                    cached,
+                                    cost,
+                                    latency_ms
+                                ],
+                            );
+                        }
+                    }
                     Ok(ChatOut {
                         content,
                         model: model_used,
+                        usage,
                     })
                 });
                 let _ = tx.send(result);

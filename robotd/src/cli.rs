@@ -43,6 +43,8 @@ pub enum Cmd {
     Eval {
         config: PathBuf,
         live: bool,
+        /// run the memory benchmark on this LongMemEval-format file
+        memory: Option<PathBuf>,
     },
     Notify {
         config: PathBuf,
@@ -57,6 +59,10 @@ pub enum Cmd {
     },
     Chain {
         config: PathBuf,
+    },
+    Cost {
+        config: PathBuf,
+        days: i64,
     },
     BackupRestore {
         config: PathBuf,
@@ -78,7 +84,7 @@ pub enum Cmd {
     Version,
 }
 
-fn default_config() -> PathBuf {
+pub fn default_config() -> PathBuf {
     PathBuf::from("robot.toml")
 }
 
@@ -135,8 +141,9 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
         Some("eval") => {
             let mut rest = rest;
             let live = take_flag(&mut rest, "--live");
+            let memory = take_value(&mut rest, "--memory")?.map(PathBuf::from);
             reject_extra(&rest, "eval")?;
-            Ok(Cmd::Eval { config, live })
+            Ok(Cmd::Eval { config, live, memory })
         }
         Some("notify") => {
             if rest.len() != 1 {
@@ -154,6 +161,16 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
         Some("chain") => {
             reject_extra(&rest, "chain")?;
             Ok(Cmd::Chain { config })
+        }
+        Some("cost") => {
+            let mut rest = rest;
+            let days = take_value(&mut rest, "--days")?
+                .map(|d| d.parse::<i64>())
+                .transpose()
+                .map_err(|_| "--days needs a number".to_string())?
+                .unwrap_or(7);
+            reject_extra(&rest, "cost")?;
+            Ok(Cmd::Cost { config, days })
         }
         Some("sync") => {
             // `--with <path>` reads as a sentence and leaves room for other
@@ -313,7 +330,16 @@ mod tests {
             p(&["eval", "--live"]).unwrap(),
             Cmd::Eval {
                 config: PathBuf::from("robot.toml"),
-                live: true
+                live: true,
+                memory: None
+            }
+        );
+        assert_eq!(
+            p(&["eval", "--memory", "evals/memory-smoke.json"]).unwrap(),
+            Cmd::Eval {
+                config: PathBuf::from("robot.toml"),
+                live: false,
+                memory: Some(PathBuf::from("evals/memory-smoke.json"))
             }
         );
         assert!(p(&["eval", "oops"]).unwrap_err().contains("no extra"));
