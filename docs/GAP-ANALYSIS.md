@@ -347,12 +347,37 @@ here and in BUILD-LOG.
 
 ### Then — the rest of the control room and the platform
 
-**14. Dashboard panels 5–10**, Soul first (revision history, diffs,
-rollback). ~4–5 days.
-**15. Soul S3–S6**, once the owner has lived with S2 and set the numbers.
-**16. Load test** to M5's gate. **17. Update channel** with signed releases
-and self-rollback. **18. Recovery Kit.** **19. Tiers 2/1 and Connect to
-Labs** — gated on the Control Plane existing.
+**14. Dashboard panels 5–10.** ✅ **done** — all ten §10a panels render
+from the live stores: Conversations (self-only, labeled), Commitments
+(reasons verbatim), Receipts, Hub (no secret ever displayed), Models &
+Routing (cast + 24h meter with TTFT), Soul (dial with pins; revision table
+honestly empty pending S3), System. Rollback buttons arrive with S3's
+first revision to roll back.
+
+**15. Soul S3–S6.** ⛔ **blocked on the owner**: the SOUL.md questions
+(board 3413) and the S3+ numbers (board 3415). Not approximated.
+
+**16. Load test.** ✅ **harness done, capacity measured**: `robotd
+loadtest` drives governed turns with drops counted from the journal.
+25K turns → 124/sec on one writer lane = **107× M5's 100K/day gate, zero
+dropped intents**, p50 5.12ms. The 48h sustained form is now a one-line
+ops run.
+
+**17. Update channel.** ✅ **done** (local properties; fleet waves are
+Control-Plane work, stated): ed25519-signed manifests (signature covers
+version+channel+hash — no replay), `update --apply` health-checks the
+staged binary against this robot's data before the rename-switch,
+`--rollback` keeps the previous binary, pinning prints its price, and a
+tampered manifest was refused live: "it does not install, anywhere."
+
+**18. Recovery Kit.** ✅ **done**: `recovery-kit` prints the checksummed
+master-key code with §13d's no-backdoor sentence verbatim; `recover`
+rebuilds `kek.key`, catches mistranscription by checksum, and refuses to
+clobber a different live key. Proven by a live lose-and-restore.
+Shamir 2-of-3 deferred with multi-member tiers.
+
+**19. Tiers 2/1 and Connect to Labs.** ⛔ **blocked on the Control Plane
+existing.**
 
 ---
 

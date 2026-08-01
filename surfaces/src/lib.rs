@@ -289,7 +289,14 @@ async fn dash_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Respo
     let robot = st.robot.clone();
     match tokio::task::spawn_blocking(move || robot.dashboard(principal)).await {
         Ok(Ok(data)) => Html(dash::render(&data)).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, "dashboard failed").into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("dashboard failed: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "dashboard failed").into_response()
+        }
+        Err(e) => {
+            tracing::error!("dashboard join error: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "dashboard failed").into_response()
+        }
     }
 }
 

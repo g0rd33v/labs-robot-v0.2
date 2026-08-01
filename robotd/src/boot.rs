@@ -303,6 +303,7 @@ mod tests {
             },
             sync: Default::default(),
             policy: Default::default(),
+            update: Default::default(),
         };
         (cfg, dir)
     }

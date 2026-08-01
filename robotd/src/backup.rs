@@ -133,6 +133,7 @@ mod tests {
             },
             sync: Default::default(),
             policy: Default::default(),
+            update: Default::default(),
         };
         // boot a robot with one fact so there's something real to back up
         let boot = crate::boot::bootstrap(&cfg).unwrap();

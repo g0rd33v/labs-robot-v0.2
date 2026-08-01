@@ -44,6 +44,10 @@ ureq = { version = "2", features = ["json"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # audio bytes -> base64 for the STT seat's input_audio content parts
 base64 = "0.22"
+# sec 13e: releases are signed and the binary verifies before applying --
+# unsigned or tampered updates do not install, anywhere. ed25519 because the
+# verify key can be embedded in source and the signing key never ships.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 # vector search inside the encrypted cell (Q20, arch sec 13: sqlite-vec)
 sqlite-vec = "0.1"
 # key material, tokens, ids

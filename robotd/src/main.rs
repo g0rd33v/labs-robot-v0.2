@@ -52,6 +52,60 @@ async fn main() -> anyhow::Result<()> {
             println!("backup sealed: {}", path.display());
             Ok(())
         }
+        Cmd::Health { config } => {
+            let cfg = config::load(&config)?;
+            std::process::exit(robotd::health::health(&cfg)?);
+        }
+        Cmd::Loadtest { config, turns } => {
+            let _ = config; // scratch cell; the config only locates nothing yet
+            std::process::exit(robotd::health::loadtest(turns)?);
+        }
+        Cmd::RecoveryKit { config } => {
+            let cfg = config::load(&config)?;
+            let data_dir = std::path::Path::new(&cfg.robot.data_dir);
+            // the slug is worth printing on the kit so recovery ends at a
+            // working chat, not at a working directory
+            let keys = trust::keys::KeyChain::load_or_create(&data_dir.join("kek.key"))?;
+            let core = trust::cells::open_encrypted(&data_dir.join("core.db"), &keys.core_db_key())?;
+            trust::schema::init_core(&core)?;
+            let slug = trust::schema::meta_get(&core, "slug_token")?.unwrap_or_default();
+            drop(core);
+            robotd::recovery::print_kit(data_dir, &cfg.robot.name, &slug)?;
+            Ok(())
+        }
+        Cmd::Recover { config, code } => {
+            let cfg = config::load(&config)?;
+            robotd::recovery::recover(std::path::Path::new(&cfg.robot.data_dir), &code)?;
+            Ok(())
+        }
+        Cmd::Update { config, action } => {
+            let cfg = config::load(&config)?;
+            let url = cfg.update.channel_url.clone();
+            let pin = if cfg.update.pin_version.is_empty() {
+                None
+            } else {
+                Some(cfg.update.pin_version.as_str())
+            };
+            let code = match action {
+                cli::UpdateAction::Check => {
+                    if url.is_empty() {
+                        anyhow::bail!("no [update] channel_url in robot.toml -- updates are manual");
+                    }
+                    robotd::update::check(&url, pin)?
+                }
+                cli::UpdateAction::Apply => {
+                    if url.is_empty() {
+                        anyhow::bail!("no [update] channel_url in robot.toml -- updates are manual");
+                    }
+                    robotd::update::apply(&url, pin)?
+                }
+                cli::UpdateAction::Rollback => robotd::update::rollback()?,
+                cli::UpdateAction::Sign { binary, version, channel, changelog } => {
+                    robotd::update::sign(&binary, &version, &channel, &changelog)?
+                }
+            };
+            std::process::exit(code);
+        }
         Cmd::Cost { config, days } => {
             let cfg = config::load(&config)?;
             let data_dir = std::path::Path::new(&cfg.robot.data_dir);

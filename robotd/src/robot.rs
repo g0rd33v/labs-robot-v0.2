@@ -901,6 +901,47 @@ impl surfaces::Robot for RobotCore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        // panel 8: the whole cast, and what each seat actually did today
+        if let Some(gw) = &self.gateway {
+            d.cast = vec![
+                ("verdict".into(), gw.cast.verdict.clone()),
+                ("route".into(), gw.cast.route.clone()),
+                ("answer".into(), gw.cast.answer.clone()),
+                ("super".into(), gw.cast.super_.clone()),
+                ("ultra".into(), gw.cast.ultra.clone()),
+                ("evaluator".into(), gw.cast.evaluator.clone()),
+                ("extract".into(), gw.cast.extract.clone()),
+                ("vision".into(), gw.cast.vision.clone()),
+                ("stt".into(), gw.cast.stt.clone()),
+            ];
+        }
+        {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            let day_ago = trust::ids::ts_ms() - 24 * 60 * 60 * 1000;
+            let mut stmt = core.prepare(
+                "SELECT role, count(*),                         100.0 * coalesce(sum(cached_tokens),0) / max(sum(prompt_tokens), 1),                         coalesce(sum(cost_usd), 0.0),                         CAST(avg(latency_ms) AS INTEGER),                         CAST(avg(first_token_ms) AS INTEGER)                  FROM model_calls WHERE ts > ?1 GROUP BY role ORDER BY role",
+            )?;
+            d.meter = stmt
+                .query_map(params![day_ago], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        d.instance_id = self.instance_id.clone();
+        d.version = env!("CARGO_PKG_VERSION").into();
+        // panel 7: connector states, described without a single secret
+        d.hub.push((
+            "openrouter".into(),
+            if self.gateway.is_some() { "online (key in memory)".into() } else { "no key -- floor only".into() },
+        ));
+        d.hub.push((
+            "serper".into(),
+            if d.search_online { "online".into() } else { "no key -- web search off".into() },
+        ));
+        d.hub.push((
+            "google".into(),
+            if self.oauth_app.is_none() { "no client configured".into() } else { "client configured".into() },
+        ));
         {
             let handle = self.cell(self.owner_principal)?;
             handle.cell.with(|c| {
@@ -912,6 +953,99 @@ impl surfaces::Robot for RobotCore {
                     .into_iter()
                     .map(|(f, src, ts)| (f.content, src.chars().take(60).collect(), ts))
                     .collect();
+                // panel 3, self always (viewing others is policy, later)
+                d.conversations = mind::recent_messages(c, 20)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(dir, content)| (0i64, dir, content.chars().take(120).collect()))
+                    .collect();
+                // panel 5: the ledger, open then why-closed
+                d.commitments_open = mind::commitments::outstanding(c)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|x| (x.what, x.kind, x.due_at))
+                    .collect();
+                d.commitments_closed = mind::commitments::recently_closed(c, 10)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|x| (x.what, x.status, x.closed_why.unwrap_or_default()))
+                    .collect();
+                // panel 6: recent receipts beside the boundary log
+                let mut stmt = c
+                    .prepare(
+                        "SELECT intent_id, status, body_json FROM receipts                          ORDER BY rowid DESC LIMIT 15",
+                    )
+                    .map_err(crate::caps::mind_err)?;
+                d.receipts = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(crate::caps::mind_err)?
+                    .filter_map(|x| x.ok())
+                    .map(|(i, st, cj)| {
+                        let claim = serde_json::from_str::<serde_json::Value>(&cj)
+                            .ok()
+                            .and_then(|v| v["claims"][0]["claim"].as_str().map(String::from))
+                            .unwrap_or_default();
+                        (i.chars().take(12).collect(), st, claim.chars().take(90).collect())
+                    })
+                    .collect();
+                // panel 7 continued: the person's own connected accounts
+                for acc in mind::connections::list(c).unwrap_or_default() {
+                    d.hub.push((
+                        format!("google: {}", acc.account),
+                        format!(
+                            "connected{}",
+                            if acc.has_scope(hub::google::SCOPE_MAIL_SEND) {
+                                ", send enabled"
+                            } else {
+                                ", send off"
+                            }
+                        ),
+                    ));
+                }
+                // panel 9: soul, read from the same stores /soul reads
+                d.soul_stance = soul::stance::get(c)
+                    .ok()
+                    .flatten()
+                    .map(|st| st.label())
+                    .unwrap_or_else(|| "its own".into());
+                if let Ok(dial) = soul::dial::load(c) {
+                    d.soul_evolution = dial.evolution;
+                    d.soul_dial = dial
+                        .settings
+                        .iter()
+                        .map(|v| {
+                            (v.dimension.as_str().to_string(), v.value, v.floor, v.ceiling, v.pinned())
+                        })
+                        .collect();
+                }
+                let mut stmt = c
+                    .prepare(
+                        "SELECT created_at, reason, applied FROM soul_revisions                          ORDER BY created_at DESC LIMIT 10",
+                    )
+                    .map_err(crate::caps::mind_err)?;
+                d.soul_revisions = stmt
+                    .query_map([], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+                    })
+                    .map_err(crate::caps::mind_err)?
+                    .filter_map(|x| x.ok())
+                    .collect();
+                // panel 10: vault usage + standing rules
+                d.vault_objects = c
+                    .query_row("SELECT count(*) FROM media", [], |r| r.get(0))
+                    .unwrap_or(0);
+                d.files_count = c
+                    .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+                    .unwrap_or(0);
+                d.standing_rules = mind::instructions::active(c)
+                    .map(|v| v.len() as i64)
+                    .unwrap_or(0);
                 Ok(())
             })?;
         }

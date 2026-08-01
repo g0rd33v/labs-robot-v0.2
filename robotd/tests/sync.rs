@@ -44,6 +44,7 @@ fn cfg_at(dir: &Path) -> RobotConfig {
         },
         sync: Default::default(),
         policy: Default::default(),
+            update: Default::default(),
     }
 }
 

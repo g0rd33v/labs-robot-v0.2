@@ -25,6 +25,33 @@ pub struct DashData {
     pub facts: Vec<(String, String, i64)>,
     /// (ts, direction, channel, counterparty, purpose, size)
     pub boundary: Vec<(i64, String, String, String, String, i64)>,
+    /// Conversations (panel 3), self only for now: (ts, direction, snippet)
+    pub conversations: Vec<(i64, String, String)>,
+    /// Commitments (panel 5): open (what, kind, due_ms)
+    pub commitments_open: Vec<(String, String, Option<i64>)>,
+    /// and recently closed (what, status, why)
+    pub commitments_closed: Vec<(String, String, String)>,
+    /// Receipts (panel 6): (ts-ish intent, status, claim)
+    pub receipts: Vec<(String, String, String)>,
+    /// Hub (panel 7): (connector, status line) -- no secrets, ever
+    pub hub: Vec<(String, String)>,
+    /// Models & Routing (panel 8): (seat, model) from the cast
+    pub cast: Vec<(String, String)>,
+    /// and the meter per seat, today: (seat, calls, cache%, usd, p50ms, ttft_p50ms)
+    pub meter: Vec<(String, i64, f64, f64, i64, Option<i64>)>,
+    /// Soul (panel 9)
+    pub soul_stance: String,
+    /// (dimension, value, floor, ceiling, pinned)
+    pub soul_dial: Vec<(String, i64, i64, i64, bool)>,
+    pub soul_evolution: bool,
+    /// (created_at, reason, applied)
+    pub soul_revisions: Vec<(i64, String, bool)>,
+    /// System (panel 10)
+    pub instance_id: String,
+    pub version: String,
+    pub vault_objects: i64,
+    pub files_count: i64,
+    pub standing_rules: i64,
 }
 
 fn esc(s: &str) -> String {
@@ -97,6 +124,130 @@ pub fn render(d: &DashData) -> String {
         })
         .collect();
 
+    let convo_rows: String = if d.conversations.is_empty() {
+        "<tr><td colspan=2 class=dim>no conversation yet</td></tr>".into()
+    } else {
+        d.conversations
+            .iter()
+            .map(|(_, dir, snip)| {
+                format!(
+                    "<tr><td class={}>{}</td><td>{}</td></tr>",
+                    if dir == "in" { "ok" } else { "outb" },
+                    if dir == "in" { "you" } else { "robot" },
+                    esc(snip)
+                )
+            })
+            .collect()
+    };
+
+    let open_rows: String = if d.commitments_open.is_empty() {
+        "<tr><td colspan=3 class=dim>nothing owed right now</td></tr>".into()
+    } else {
+        d.commitments_open
+            .iter()
+            .map(|(what, kind, due)| {
+                format!(
+                    "<tr><td>{}</td><td class=dim>{}</td><td class=dim>{}</td></tr>",
+                    esc(what),
+                    esc(kind),
+                    due.map(fmt_ts).unwrap_or_default()
+                )
+            })
+            .collect()
+    };
+    let closed_rows: String = if d.commitments_closed.is_empty() {
+        "<tr><td colspan=3 class=dim>nothing closed yet</td></tr>".into()
+    } else {
+        d.commitments_closed
+            .iter()
+            .map(|(what, status, why)| {
+                format!(
+                    "<tr><td>{}</td><td class=dim>{}</td><td>{}</td></tr>",
+                    esc(what),
+                    esc(status),
+                    esc(why)
+                )
+            })
+            .collect()
+    };
+
+    let receipt_rows: String = if d.receipts.is_empty() {
+        "<tr><td colspan=3 class=dim>no receipts yet</td></tr>".into()
+    } else {
+        d.receipts
+            .iter()
+            .map(|(intent, status, claim)| {
+                format!(
+                    "<tr><td class=dim>{}</td><td class={}>{}</td><td>{}</td></tr>",
+                    esc(intent),
+                    if status == "verified" { "ok" } else { "outb" },
+                    esc(status),
+                    esc(claim)
+                )
+            })
+            .collect()
+    };
+
+    let hub_rows: String = d
+        .hub
+        .iter()
+        .map(|(name, status)| {
+            format!("<tr><td>{}</td><td class=dim>{}</td></tr>", esc(name), esc(status))
+        })
+        .collect();
+
+    let cast_rows: String = d
+        .cast
+        .iter()
+        .map(|(seat, model)| {
+            format!("<tr><td>{}</td><td class=dim>{}</td></tr>", esc(seat), esc(model))
+        })
+        .collect();
+    let meter_rows: String = if d.meter.is_empty() {
+        "<tr><td colspan=6 class=dim>no calls in the last 24h</td></tr>".into()
+    } else {
+        d.meter
+            .iter()
+            .map(|(seat, calls, cache, usd, p50, ttft)| {
+                format!(
+                    "<tr><td>{}</td><td>{calls}</td><td class=dim>{cache:.1}%</td>\
+                     <td class=dim>${usd:.4}</td><td class=dim>{p50}ms</td><td class=dim>{}</td></tr>",
+                    esc(seat),
+                    ttft.map(|t| format!("{t}ms")).unwrap_or_else(|| "--".into())
+                )
+            })
+            .collect()
+    };
+
+    let dial_rows: String = d
+        .soul_dial
+        .iter()
+        .map(|(dim, value, floor, ceiling, pinned)| {
+            format!(
+                "<tr><td>{}</td><td><b>{value}</b></td><td class=dim>{floor}..{ceiling}{}</td></tr>",
+                esc(dim),
+                if *pinned { " (pinned)" } else { "" }
+            )
+        })
+        .collect();
+    let rev_rows: String = if d.soul_revisions.is_empty() {
+        "<tr><td colspan=3 class=dim>no revisions yet -- nightly self-revision (S3) \
+         waits on the owner's numbers</td></tr>"
+            .into()
+    } else {
+        d.soul_revisions
+            .iter()
+            .map(|(ts, reason, applied)| {
+                format!(
+                    "<tr><td class=dim>{}</td><td>{}</td><td class=dim>{}</td></tr>",
+                    fmt_ts(*ts),
+                    esc(reason),
+                    if *applied { "applied" } else { "proposed" }
+                )
+            })
+            .collect()
+    };
+
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -145,9 +296,45 @@ pub fn render(d: &DashData) -> String {
 <h2>registry (pims) -- every fact and its source</h2>
 <table><tr><th>#</th><th>fact</th><th>source (your words)</th></tr>{facts_rows}</table>
 
+<h2>conversations -- your last {convo_n} turns (others by policy, later)</h2>
+<table><tr><th>who</th><th>message</th></tr>{convos}</table>
+
+<h2>commitments -- the second law as a screen</h2>
+<table><tr><th>still owed</th><th>kind</th><th>due</th></tr>{copen}</table>
+<p></p>
+<table><tr><th>recently closed</th><th>status</th><th>why</th></tr>{cclosed}</table>
+
+<h2>receipts -- every action's evidence</h2>
+<table><tr><th>intent</th><th>status</th><th>claim</th></tr>{receipts}</table>
+
 <h2>boundary log -- last {bshown} crossings (every byte in and out)</h2>
 {chainbanner}
 <table><tr><th>ts</th><th>dir</th><th>channel</th><th>counterparty</th><th>purpose</th><th>size</th></tr>{brows}</table>
+
+<h2>hub -- every connector, no secret ever displayed</h2>
+<table><tr><th>connector</th><th>status</th></tr>{hub}</table>
+
+<h2>models &amp; routing -- the cast, and what each seat did (24h)</h2>
+<table><tr><th>seat</th><th>model</th></tr>{cast}</table>
+<p></p>
+<table><tr><th>seat</th><th>calls</th><th>cache</th><th>usd</th><th>avg</th><th>ttft</th></tr>{meter}</table>
+
+<h2>soul -- speaking as: {stance} &middot; self-adjustment {evolution}</h2>
+<table><tr><th>dimension</th><th>value</th><th>bounds</th></tr>{dial}</table>
+<p></p>
+<table><tr><th>when</th><th>revision</th><th>state</th></tr>{revs}</table>
+
+<h2>system</h2>
+<div class="cards">
+  <div class=card><span class=lbl>version</span><b>{version}</b></div>
+  <div class=card><span class=lbl>instance</span><b class=dim>{instance}</b></div>
+  <div class=card><span class=lbl>vault objects</span><b>{vault_n}</b><span class=dim>{files_n} named files</span></div>
+  <div class=card><span class=lbl>standing rules</span><b>{rules_n}</b></div>
+</div>
+<p class=dim>export: `robotd package` &middot; backups: `robotd backup` &middot; updates:
+`robotd update --check` (signed; unsigned never installs) &middot; recovery:
+`robotd recovery-kit` -- if the passphrase and the kit are both lost, the data
+is gone, by design.</p>
 </main></body></html>"#,
         name = esc(&d.robot_name),
         id = esc(&d.robot_id),
@@ -174,6 +361,23 @@ pub fn render(d: &DashData) -> String {
             "<p class=off>the hash chain does not verify: the record below cannot be              trusted as complete. this is reported, not hidden.</p>".to_string()
         },
         brows = boundary_rows,
+        convo_n = d.conversations.len(),
+        convos = convo_rows,
+        copen = open_rows,
+        cclosed = closed_rows,
+        receipts = receipt_rows,
+        hub = hub_rows,
+        cast = cast_rows,
+        meter = meter_rows,
+        stance = esc(&d.soul_stance),
+        evolution = if d.soul_evolution { "on" } else { "off" },
+        dial = dial_rows,
+        revs = rev_rows,
+        version = esc(&d.version),
+        instance = esc(&d.instance_id),
+        vault_n = d.vault_objects,
+        files_n = d.files_count,
+        rules_n = d.standing_rules,
     )
 }
 

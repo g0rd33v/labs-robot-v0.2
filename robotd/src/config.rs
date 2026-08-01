@@ -70,6 +70,8 @@ pub struct RobotConfig {
     pub backup: BackupSection,
     pub sync: SyncSection,
     pub policy: PolicySection,
+    #[serde(default)]
+    pub update: UpdateSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +186,15 @@ pub struct HubSection {
     /// evaluator seat. Turns that acted are always verified regardless.
     pub verify_percent: u32,
     pub cast: hub::Cast,
+}
+
+/// sec 13e. Absent url = updates are manual, which is a fine state for a
+/// self-hosted robot; pinning is the owner's stated right.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct UpdateSection {
+    pub channel_url: String,
+    pub pin_version: String,
 }
 
 impl Default for HubSection {

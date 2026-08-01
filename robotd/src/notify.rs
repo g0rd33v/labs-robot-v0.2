@@ -123,6 +123,7 @@ mod tests {
             },
             sync: Default::default(),
             policy: Default::default(),
+            update: Default::default(),
         };
         let boot = crate::boot::bootstrap(&cfg).unwrap();
         let owner = boot.robot.owner_principal;

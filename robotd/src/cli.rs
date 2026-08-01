@@ -36,6 +36,19 @@ notes:
 ";
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum UpdateAction {
+    Check,
+    Apply,
+    Rollback,
+    Sign {
+        binary: PathBuf,
+        version: String,
+        channel: String,
+        changelog: String,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum Cmd {
     Serve {
         config: PathBuf,
@@ -63,6 +76,24 @@ pub enum Cmd {
     Cost {
         config: PathBuf,
         days: i64,
+    },
+    Health {
+        config: PathBuf,
+    },
+    Loadtest {
+        config: PathBuf,
+        turns: usize,
+    },
+    RecoveryKit {
+        config: PathBuf,
+    },
+    Recover {
+        config: PathBuf,
+        code: String,
+    },
+    Update {
+        config: PathBuf,
+        action: UpdateAction,
     },
     BackupRestore {
         config: PathBuf,
@@ -161,6 +192,56 @@ pub fn parse(argv: &[String]) -> Result<Cmd, String> {
         Some("chain") => {
             reject_extra(&rest, "chain")?;
             Ok(Cmd::Chain { config })
+        }
+        Some("health") => {
+            reject_extra(&rest, "health")?;
+            Ok(Cmd::Health { config })
+        }
+        Some("loadtest") => {
+            let mut rest = rest;
+            let turns = take_value(&mut rest, "--turns")?
+                .map(|d| d.parse::<usize>())
+                .transpose()
+                .map_err(|_| "--turns needs a number".to_string())?
+                .unwrap_or(25_000);
+            reject_extra(&rest, "loadtest")?;
+            Ok(Cmd::Loadtest { config, turns })
+        }
+        Some("recovery-kit") => {
+            reject_extra(&rest, "recovery-kit")?;
+            Ok(Cmd::RecoveryKit { config })
+        }
+        Some("recover") => {
+            let mut rest = rest;
+            let code = take_value(&mut rest, "--code")?
+                .ok_or_else(|| "recover needs --code <recovery code>".to_string())?;
+            reject_extra(&rest, "recover")?;
+            Ok(Cmd::Recover { config, code })
+        }
+        Some("update") => {
+            let mut rest = rest;
+            let action = if take_flag(&mut rest, "--check") {
+                UpdateAction::Check
+            } else if take_flag(&mut rest, "--apply") {
+                UpdateAction::Apply
+            } else if take_flag(&mut rest, "--rollback") {
+                UpdateAction::Rollback
+            } else if let Some(binary) = take_value(&mut rest, "--sign")? {
+                let version = take_value(&mut rest, "--release-version")?
+                    .ok_or_else(|| "--sign needs --release-version".to_string())?;
+                let channel = take_value(&mut rest, "--channel")?.unwrap_or_else(|| "stable".into());
+                let changelog = take_value(&mut rest, "--changelog")?.unwrap_or_default();
+                UpdateAction::Sign {
+                    binary: PathBuf::from(binary),
+                    version,
+                    channel,
+                    changelog,
+                }
+            } else {
+                return Err("update needs one of --check, --apply, --rollback, --sign <binary>".into());
+            };
+            reject_extra(&rest, "update")?;
+            Ok(Cmd::Update { config, action })
         }
         Some("cost") => {
             let mut rest = rest;

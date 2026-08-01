@@ -5,6 +5,117 @@ dependencies introduced. Newest first.
 
 ---
 
+## The control room and the ops layer — items 14, 16, 17, 18 (2026-08-01)
+
+The remaining gap-analysis items that were buildable without an owner
+decision or a Control Plane. Two were neither, and are named as blocked
+rather than approximated: **15 (Soul S3–S6)** waits on the owner's answers
+to the SOUL.md questions, and **19 (Tiers 2/1, Connect to Labs)** waits on
+a Control Plane existing.
+
+### 14. The Dashboard: all ten §10a panels
+
+Was four (overview, people, registry, boundary); now ten. The additions,
+each reading the stores the chat writes — no panel has its own state:
+
+* **Conversations** — own last 20 turns; viewing others is policy work,
+  says so on the label rather than pretending.
+* **Commitments** — the ledger live: owed, then closed **with the reason
+  verbatim** ("полить цветы — cancelled: cancelled by you").
+* **Receipts** — every action's claim beside the boundary log it cites.
+* **Hub** — every connector's status with **no secret ever displayed**:
+  presence and state only, per §10a's masked-forever rule.
+* **Models & Routing** — the §6a cast per seat, and the meter's last 24h
+  (calls, cache%, cost, avg, TTFT) beside it — the §12 metrics rendered
+  for the owner, not engagement analytics.
+* **Soul** — stance, dial with bounds and pins visible (brevity shows
+  `85..85 (pinned)`), and the revision table honest about its emptiness:
+  "no revisions yet — nightly self-revision (S3) waits on the owner's
+  numbers".
+* **System** — version, instance id, vault usage, standing rules, and the
+  one-line operational truths: signed updates, package export, and the
+  Recovery Kit sentence including "the data is gone, by design".
+
+### 16. The load harness, and M5's number
+
+`robotd loadtest --turns N`: synthetic turns through the FULL governed
+pipeline — real cell, journal, receipts, outbox — with the gate counted
+structurally: a dropped intent is an open intent with no terminal receipt,
+read from the journal, not from the harness's own bookkeeping.
+
+Measured: **25,000 governed turns in 200.9s = 124 turns/sec on ONE writer
+lane** — 10.7M turns/day capacity against M5's 100K/day gate, **107×
+headroom**, zero dropped intents, p50 5.12ms / p95 7.51ms per turn. The
+gate's full form (48h sustained) is an ops run this harness now makes a
+one-liner; the burst run establishes the capacity and the zero-drop
+property.
+
+### 17. Updates: signed, health-checked, rollback-able
+
+§13e scaled to a self-hosted instance — the local properties exist, the
+fleet properties (canary waves, staged rollout) are Control-Plane work and
+are not pretended at:
+
+* **Releases are ed25519-signed**; the manifest's signature covers
+  version+channel+hash so it cannot be replayed onto different bytes or a
+  different version. Proven live: a valid manifest checks clean; one
+  flipped character → "SIGNATURE INVALID — it does not install, anywhere."
+* **`update --apply` health-checks the STAGED binary first** — `robotd
+  health` is §13e's own check (boot, chain verification, one synthetic
+  governed turn) run in the NEW binary against THIS robot's data before it
+  becomes the binary. The switch is **rename, never copy-over** (exit 137,
+  learned live, is now a comment in the code). The previous binary stays
+  for `update --rollback`.
+* **Pinning** is the owner's right, with the §13e trade printed — and a
+  pinned SECURITY release says so in capitals.
+* The verify key is embedded at build; the signing key lives in the
+  owner's keychain (`RELEASE_SIGNING_KEY`) and never touches disk.
+  `update --sign` is the operator-side half and prints the manifest.
+
+### 18. The Recovery Kit
+
+`robotd recovery-kit` prints the one-page kit: the master key as a
+9-group checksummed code, the slug, the restore steps, and the §13d
+sentence verbatim — *if the passphrase and the Kit are both lost, the data
+is gone, by design*. Terminal-only on purpose: a recovery code written to
+the same disk as the key it recovers protects against nothing.
+
+`robotd recover --code …` rebuilds `kek.key`, refuses to clobber a
+DIFFERENT existing key (overwriting a live KEK with a mistyped code would
+be the tool of loss, not recovery), and the checksum catches transcription
+errors — proven live: lose the key file, recover byte-identical from the
+code; flip one character, get told to compare against the printed kit.
+Shamir 2-of-3 for family instances is deferred with the multi-member
+tiers.
+
+### Gate
+
+230 tests, clippy clean, offline eval PASS. Live: all ten panels rendering
+real data; loadtest 25K/0 dropped; update check/tamper/sign cycle; recovery
+lose-and-restore cycle. One defect caught by the http suite on the way: the
+new receipts panel queried a column (`claims_json`) that does not exist
+(`body_json` does) — the dashboard 500'd, and the handler now logs WHY
+instead of swallowing the error into a blind 500.
+
+### Assumptions
+
+* The Conversations panel is self-only until member-view policy (§10a's
+  "others by policy") is designed with the consent surface it needs.
+* The release keypair generated today is the instance's channel key:
+  public half embedded as the build default, private half in the macOS
+  keychain. Rotation = embed new key, sign that release with the old one.
+* `loadtest` exercises the deterministic floor class; model-latency
+  classes are the speed gates' territory, and mixing them would measure
+  the provider, not the robot.
+
+### Dependencies
+
+* **`ed25519-dalek` 2.x** — release signatures (§13e). Chosen because the
+  verify key embeds in source as 32 bytes and the signing key never ships;
+  the crate is the Rust ecosystem's standard, audited implementation.
+
+---
+
 ## The speed tranche — §2c's own fix list, built and measured (2026-08-01)
 
 The measurement tranche found §2c's budget lost; this one implements §2c's
