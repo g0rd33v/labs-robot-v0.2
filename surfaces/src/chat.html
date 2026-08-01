@@ -77,8 +77,32 @@
     try {
       const r = await fetch('/api/history?after=' + lastTs);
       if (!r.ok) return;
-      (await r.json()).forEach(render);
+      const rows = await r.json();
+      if (rows.some(x => x.direction === 'out')) clearDraft();
+      rows.forEach(render);
     } catch (_) { /* robot restarting; next event catches up */ }
+  }
+
+  // the streaming draft: the answer being born, before its canonical
+  // message lands through history. display-only.
+  let draftEl = null;
+  function showDraft(text) {
+    if (!draftEl) {
+      draftEl = document.createElement('div');
+      draftEl.className = 'msg out';
+      const w = document.createElement('div');
+      w.className = 'who';
+      w.textContent = 'bender';
+      const b = document.createElement('div');
+      b.className = 'draft-body';
+      draftEl.append(w, b);
+      log.appendChild(draftEl);
+    }
+    draftEl.querySelector('.draft-body').textContent = text + ' \u258c';
+    log.scrollTop = log.scrollHeight;
+  }
+  function clearDraft() {
+    if (draftEl) { draftEl.remove(); draftEl = null; }
   }
 
   function busy(on) {
@@ -133,9 +157,12 @@
     es.onmessage = (e) => {
       // 'resync' means the server dropped events for this client; refetch
       // everything rather than sit silently stale
-      if (e.data === 'resync') { lastTs = 0; seen.clear(); log.innerHTML = ''; }
+      if (e.data === 'resync') { lastTs = 0; seen.clear(); log.innerHTML = ''; draftEl = null; }
       poll();
     };
+    es.addEventListener('draft', (e) => {
+      try { showDraft(JSON.parse(e.data)); } catch (_) {}
+    });
   } catch (_) {}
   poll();
   setInterval(poll, 15000);

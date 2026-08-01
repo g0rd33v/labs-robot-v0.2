@@ -136,6 +136,13 @@ pub struct GatewayConfig {
     pub answer_timeout_ms: u64,
     /// hedge deadline for the verdict class (Q19)
     pub hedge_after_ms: u64,
+    /// sec 2c #4: which provider variant OpenRouter should prefer.
+    /// "latency" picks the lowest measured time-to-first-token endpoint --
+    /// the right sort for a 5K-token routing prefill and for streaming
+    /// answers alike. None sends no preference (the router's default,
+    /// which sorts by PRICE and was measured at p50 3.1-3.9s on the route
+    /// seat).
+    pub provider_sort: Option<String>,
     /// hedge deadline for the ROUTING class, which is a different animal:
     /// the doorman's 2.5s was sized for a one-line classification, and a
     /// routing call carrying the whole catalog normally takes longer than
@@ -156,6 +163,7 @@ impl Default for GatewayConfig {
             answer_timeout_ms: 45_000,
             hedge_after_ms: 2500,
             route_hedge_after_ms: 8000,
+            provider_sort: Some("latency".into()),
         }
     }
 }
@@ -215,6 +223,26 @@ pub trait ChatApi: Send + Sync {
         timeout_ms: u64,
     ) -> Result<serde_json::Value, HubError>;
 
+    /// Streaming chat (sec 2c #1). Calls `on_chunk` per content delta and
+    /// returns the ASSEMBLED response in the same shape `post_chat`
+    /// returns, so everything downstream -- usage parsing, logging,
+    /// metering -- is one code path. The default degrades to the plain
+    /// call and emits the whole content as one chunk: a transport that
+    /// cannot stream still works, it just has nothing to say early.
+    fn post_chat_stream(
+        &self,
+        model: &str,
+        body: &serde_json::Value,
+        timeout_ms: u64,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<serde_json::Value, HubError> {
+        let resp = self.post_chat(model, body, timeout_ms)?;
+        if let Some(c) = resp["choices"][0]["message"]["content"].as_str() {
+            on_chunk(c);
+        }
+        Ok(resp)
+    }
+
     /// The router's audio endpoint (multipart). Default: unsupported.
     fn post_transcription(
         &self,
@@ -248,6 +276,64 @@ impl UreqApi {
 }
 
 impl ChatApi for UreqApi {
+    fn post_chat_stream(
+        &self,
+        model: &str,
+        body: &serde_json::Value,
+        timeout_ms: u64,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> Result<serde_json::Value, HubError> {
+        use std::io::{BufRead, BufReader};
+        let mut body = body.clone();
+        body["model"] = serde_json::Value::String(model.to_string());
+        body["stream"] = serde_json::Value::Bool(true);
+        let resp = self
+            .agent
+            .post(&format!("{}/chat/completions", self.base_url))
+            .set("authorization", &format!("Bearer {}", self.api_key))
+            .set("content-type", "application/json")
+            .timeout(Duration::from_millis(timeout_ms))
+            .send_json(body)
+            .map_err(|e| HubError::Gateway(format!("{model}: {e}")))?;
+
+        let mut content = String::new();
+        let mut model_used = model.to_string();
+        let mut usage = serde_json::Value::Null;
+        let reader = BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let line = line.map_err(|e| HubError::Gateway(format!("{model}: stream: {e}")))?;
+            let Some(data) = line.strip_prefix("data: ") else { continue };
+            if data.trim() == "[DONE]" {
+                break;
+            }
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue; // a malformed keep-alive is not a reason to lose the stream
+            };
+            if let Some(m) = chunk["model"].as_str() {
+                model_used = m.to_string();
+            }
+            // usage rides the final chunk when accounting was requested
+            if !chunk["usage"].is_null() {
+                usage = chunk["usage"].clone();
+            }
+            if let Some(delta) = chunk["choices"][0]["delta"]["content"].as_str() {
+                if !delta.is_empty() {
+                    content.push_str(delta);
+                    on_chunk(delta);
+                }
+            }
+        }
+        if content.is_empty() {
+            return Err(HubError::Gateway(format!("{model}: stream produced no content")));
+        }
+        // the same shape post_chat returns, so downstream stays one path
+        Ok(serde_json::json!({
+            "model": model_used,
+            "usage": usage,
+            "choices": [{ "message": { "content": content } }],
+        }))
+    }
+
     fn post_chat(
         &self,
         model: &str,
@@ -410,6 +496,17 @@ impl ModelGateway {
     /// a lost arithmetic row costs a cent of accounting, and failing the
     /// person's turn over it would price bookkeeping above service.
     fn meter(&self, role: Role, model: &str, usage: Option<&CallUsage>, latency_ms: i64) {
+        self.meter_full(role, model, usage, latency_ms, None);
+    }
+
+    fn meter_full(
+        &self,
+        role: Role,
+        model: &str,
+        usage: Option<&CallUsage>,
+        latency_ms: i64,
+        first_token_ms: Option<i64>,
+    ) {
         let Some(sink) = &self.boundary else { return };
         let Ok(conn) = sink.lock() else { return };
         let (p, c, cached, cost) = match usage {
@@ -418,7 +515,8 @@ impl ModelGateway {
         };
         let _ = conn.execute(
             "INSERT INTO model_calls(ts, role, model, prompt_tokens, completion_tokens, \
-             cached_tokens, cost_usd, latency_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+             cached_tokens, cost_usd, latency_ms, first_token_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             rusqlite::params![
                 trust::ids::ts_ms(),
                 role.as_str(),
@@ -427,9 +525,81 @@ impl ModelGateway {
                 c,
                 cached,
                 cost,
-                latency_ms
+                latency_ms,
+                first_token_ms
             ],
         );
+    }
+
+    /// Streaming chat (sec 2c #1): tokens reach `on_token` as they arrive,
+    /// and time-to-first-token is finally a number rather than a promise.
+    ///
+    /// Same chain walk, same law-3 discipline as `chat`: the request gates
+    /// on its outbound crossing, and the INBOUND crossing is written from
+    /// the assembled response after the stream ends -- the log records
+    /// what crossed, and what crossed is the whole reply, not each packet.
+    /// No hedging: a stream that has produced tokens cannot be raced
+    /// without discarding words already shown to a person.
+    pub fn chat_stream(
+        &self,
+        role: Role,
+        messages: &[Msg],
+        max_tokens: u32,
+        temperature: f32,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<ChatOut, HubError> {
+        let mut body = serde_json::json!({
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "usage": { "include": true },
+        });
+        if let Some(sort) = &self.cfg.provider_sort {
+            body["provider"] = serde_json::json!({ "sort": sort });
+        }
+        let chain = self.cast.chain(role);
+        let mut last_err = HubError::Gateway("empty chain".into());
+        for model in chain.iter() {
+            let body_str = body.to_string();
+            self.log(Direction::Out, model, role.as_str(), &body_str)?;
+            let started = std::time::Instant::now();
+            let mut first_token: Option<i64> = None;
+            let mut relay = |delta: &str| {
+                if first_token.is_none() {
+                    first_token = Some(started.elapsed().as_millis() as i64);
+                }
+                on_token(delta);
+            };
+            match self
+                .api
+                .post_chat_stream(model, &body, self.cfg.answer_timeout_ms, &mut relay)
+            {
+                Ok(resp) => {
+                    let latency_ms = started.elapsed().as_millis() as i64;
+                    let resp_str = resp.to_string();
+                    self.log(Direction::In, model, role.as_str(), &resp_str)?;
+                    let content = resp["choices"][0]["message"]["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let model_used = resp["model"].as_str().unwrap_or(model).to_string();
+                    let usage = CallUsage::from_response(&resp, latency_ms);
+                    self.meter_full(role, &model_used, usage.as_ref(), latency_ms, first_token);
+                    return Ok(ChatOut {
+                        content,
+                        model: model_used,
+                        usage,
+                    });
+                }
+                Err(e) => {
+                    let note = format!("error: {e}");
+                    self.log(Direction::In, model, role.as_str(), &note)?;
+                    tracing::warn!("gateway stream {role:?} ({model}) failed: {e}");
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
     }
 
     /// One chat completion through the chain. `schema` requests structured
@@ -463,6 +633,9 @@ impl ModelGateway {
             // provider's number rather than our price-table estimate
             "usage": { "include": true },
         });
+        if let Some(sort) = &self.cfg.provider_sort {
+            body["provider"] = serde_json::json!({ "sort": sort });
+        }
         if let Some(s) = schema {
             // Strict constrained decoding cannot express a tool call's `args`,
             // which is a different shape per tool and so has to stay a

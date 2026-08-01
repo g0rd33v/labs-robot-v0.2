@@ -100,8 +100,17 @@ impl Capability for ModelAnswer {
 
         // context compiler-lite: persona + recalled facts + recent turns,
         // all read under short locks so the model call below runs with the
-        // person's cell free
-        let emb = ctx.services.query_embedding(query);
+        // person's cell free. The embedding was ideally computed in
+        // parallel with routing (sec 2c #2) and is just picked up here.
+        let emb = match ctx
+            .services
+            .premix_embedding
+            .as_ref()
+            .and_then(|cell| cell.get().cloned())
+        {
+            Some(pre) => pre,
+            None => ctx.services.query_embedding(query),
+        };
         let recalled = ctx
             .cell
             .with(|c| Ok(mind::facts::recall(c, query, emb.as_deref(), 5)))?
@@ -202,7 +211,23 @@ impl Capability for ModelAnswer {
             content: last,
         });
 
-        match gw.chat(role_for(tier), &messages, None, 1200) {
+        // sec 2c #1: stream. The person sees the answer being born instead
+        // of a spinner; TTFT becomes a measured number in the meter either
+        // way. The draft sink carries the accumulated text, throttled so a
+        // fast stream does not turn into a firehose of SSE frames.
+        let mut acc = String::new();
+        let mut last_sent = 0usize;
+        let sink = ctx.services.draft.clone();
+        let mut on_token = |delta: &str| {
+            acc.push_str(delta);
+            if let Some(sink) = &sink {
+                if acc.len() - last_sent >= 48 {
+                    last_sent = acc.len();
+                    sink(&acc);
+                }
+            }
+        };
+        match gw.chat_stream(role_for(tier), &messages, 1200, 0.4, &mut on_token) {
             Ok(out) => spoke(
                 vec![super::model_evidence(&out.model, &out.content)],
                 format!("{}{quota_note}", out.content),

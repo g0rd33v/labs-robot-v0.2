@@ -32,6 +32,9 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// A principal-bound sink for streamed draft text.
+pub type DraftSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Outbound services a capability may use. Built once at boot.
 #[derive(Default, Clone)]
 pub struct Services {
@@ -47,6 +50,17 @@ pub struct Services {
     /// is useful for ten minutes and writing it to disk would give it a
     /// lifetime it has no business having.
     pub pending_auth: Option<Arc<Mutex<HashMap<String, hub::oauth::Attempt>>>>,
+    /// sec 2c #2, parallel fan-out: the query embedding, computed on its
+    /// own thread WHILE the routing model call runs, so the answer path
+    /// finds it ready instead of computing it serially. The outer Option is
+    /// the wiring (absent outside a live turn); the inner is the result
+    /// (None until the thread finishes, or if embedding is off).
+    pub premix_embedding: Option<Arc<std::sync::OnceLock<Option<Vec<f32>>>>>,
+    /// Where streamed answer tokens go while a reply is still being born
+    /// (sec 2c #1). Principal-bound by the closure; None outside a live
+    /// surface turn. Carries the ACCUMULATED draft, not deltas, so a
+    /// dropped update costs smoothness and never words.
+    pub draft: Option<DraftSink>,
     /// The acting cell's vault. Per-cell rather than instance-wide because
     /// its key is derived from that cell's DEK -- vault bytes shred with the
     /// cell they belong to, which only holds if there is one vault per cell.

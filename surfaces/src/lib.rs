@@ -42,6 +42,8 @@ pub trait Robot: Send + Sync {
     fn accept_invite(&self, token: &str) -> anyhow::Result<(i64, String)>;
     /// New-message signal: receivers get the principal id that has news.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<i64>;
+    /// Live draft text while an answer streams: (principal, accumulated).
+    fn subscribe_drafts(&self) -> tokio::sync::broadcast::Receiver<(i64, String)>;
     fn dashboard(&self, principal: i64) -> anyhow::Result<DashData>;
     fn owner_principal(&self) -> i64;
     /// Finish an OAuth sign-in; returns which account was connected.
@@ -396,7 +398,7 @@ async fn api_stream(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Resp
         return (StatusCode::UNAUTHORIZED, "no session").into_response();
     };
     let rx = st.robot.subscribe();
-    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |item| {
+    let news = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |item| {
         match item {
             Ok(p) if p == principal => Some(Ok::<Event, std::convert::Infallible>(
                 Event::default().data("new"),
@@ -411,6 +413,24 @@ async fn api_stream(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Resp
             }
         }
     });
+    // sec 2c #1: the draft lane. Accumulated text (never deltas), so a
+    // dropped frame costs smoothness, not words; JSON-encoded so newlines
+    // survive the SSE framing. Display-only -- the canonical reply still
+    // arrives via "new" and the history endpoint, receipt attached.
+    let drx = st.robot.subscribe_drafts();
+    let drafts = tokio_stream::wrappers::BroadcastStream::new(drx).filter_map(move |item| {
+        match item {
+            Ok((p, text)) if p == principal => {
+                let payload = serde_json::to_string(&text).unwrap_or_default();
+                Some(Ok::<Event, std::convert::Infallible>(
+                    Event::default().event("draft").data(payload),
+                ))
+            }
+            Ok(_) => None,
+            Err(_) => None, // a lagged draft is just a less smooth draft
+        }
+    });
+    let stream = news.merge(drafts);
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
@@ -428,6 +448,9 @@ mod tests {
         }
         fn tell_owner(&self, _text: &str) -> anyhow::Result<()> {
             Ok(())
+        }
+        fn subscribe_drafts(&self) -> tokio::sync::broadcast::Receiver<(i64, String)> {
+            tokio::sync::broadcast::channel(1).1
         }
 
         fn handle_message(&self, p: i64, t: String) -> anyhow::Result<String> {

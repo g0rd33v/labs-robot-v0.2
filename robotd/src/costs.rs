@@ -39,8 +39,8 @@ fn percentile(sorted: &[i64], p: f64) -> i64 {
 pub fn report(core: &Connection, days: i64) -> anyhow::Result<String> {
     let since = trust::ids::ts_ms() - days * 24 * 60 * 60 * 1000;
     let mut stmt = core.prepare(
-        "SELECT role, prompt_tokens, completion_tokens, cached_tokens, cost_usd, latency_ms \
-         FROM model_calls WHERE ts > ?1 ORDER BY role",
+        "SELECT role, prompt_tokens, completion_tokens, cached_tokens, cost_usd, latency_ms, \
+         first_token_ms FROM model_calls WHERE ts > ?1 ORDER BY role",
     )?;
     let mut seats: std::collections::BTreeMap<String, (SeatRow, Vec<i64>)> = Default::default();
     let rows = stmt.query_map([since], |r| {
@@ -51,12 +51,14 @@ pub fn report(core: &Connection, days: i64) -> anyhow::Result<String> {
             r.get::<_, i64>(3)?,
             r.get::<_, Option<f64>>(4)?,
             r.get::<_, i64>(5)?,
+            r.get::<_, Option<i64>>(6)?,
         ))
     })?;
+    let mut ttft: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
     for row in rows {
-        let (role, p, c, cached, cost, lat) = row?;
+        let (role, p, c, cached, cost, lat, first) = row?;
         let entry = seats.entry(role.clone()).or_default();
-        entry.0.role = role;
+        entry.0.role = role.clone();
         entry.0.calls += 1;
         entry.0.prompt += p;
         entry.0.completion += c;
@@ -66,6 +68,9 @@ pub fn report(core: &Connection, days: i64) -> anyhow::Result<String> {
             entry.0.priced_calls += 1;
         }
         entry.1.push(lat);
+        if let Some(f) = first {
+            ttft.entry(role).or_default().push(f);
+        }
     }
 
     if seats.is_empty() {
@@ -121,6 +126,16 @@ pub fn report(core: &Connection, days: i64) -> anyhow::Result<String> {
         out.push_str(&format!(
             "({} calls carried no provider cost figure and are counted but unpriced)\n",
             tcalls - tpriced
+        ));
+    }
+    // sec 2c: TTFT exists only where a call streamed; absence is honest
+    for (role, mut f) in ttft {
+        f.sort_unstable();
+        out.push_str(&format!(
+            "ttft[{role}]: p50 {}ms, p95 {}ms over {} streamed calls\n",
+            percentile(&f, 0.50),
+            percentile(&f, 0.95),
+            f.len()
         ));
     }
     Ok(out)

@@ -112,8 +112,22 @@ impl Capability for WebResearch {
             },
         ];
         // temperature 0.0: variance over untrusted input is not creativity,
-        // it is a security property left to chance
-        match gw.chat_at(Role::Answer, &messages, None, 1200, 0.0) {
+        // it is a security property left to chance. Streamed (sec 2c #1):
+        // the synthesis is the longest visible wait of a research turn, and
+        // the person watches it being written instead of a spinner.
+        let mut acc = String::new();
+        let mut last_sent = 0usize;
+        let sink = ctx.services.draft.clone();
+        let mut on_token = |delta: &str| {
+            acc.push_str(delta);
+            if let Some(sink) = &sink {
+                if acc.len() - last_sent >= 48 {
+                    last_sent = acc.len();
+                    sink(&acc);
+                }
+            }
+        };
+        match gw.chat_stream(Role::Answer, &messages, 1200, 0.0, &mut on_token) {
             Ok(out) => {
                 // the citations are data, so they are rendered, not written
                 let mut sources = String::from("\n\nsources:");

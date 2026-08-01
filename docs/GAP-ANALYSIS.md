@@ -301,12 +301,13 @@ waits for the background lanes that could make promises.
 class in `eval --live`: routing p50/p95 over the 60-case corpus, full
 answer turns end-to-end, floor ≤300ms (offline, long green). First
 measurement: routing p50 ~3.2–3.9s / p95 ~10.7s, full turn p50 ~4.1–7.0s —
-**the §2c budget (3s p50 / 6s p95) is lost today**, because §2c's own
-techniques (streaming, parallel fan-out, latency-aware provider routing)
-are unbuilt. The gates therefore RATCHET against the measured baseline
-(fail on regression) with the budget printed beside them, tightening as the
-speed work lands — a budget-gate red on day one catches nothing. TTFT is
-not measured: nothing streams yet; it arrives with streaming.
+**the §2c budget (3s p50 / 6s p95) was lost that morning** — and mostly
+recovered the same day by the speed tranche (see BUILD-LOG): provider
+routing, streaming, async verify. After: routing p50 2817 / p95 4844
+(budget met), turn p95 4210 (met), turn p50 3115 (115ms over — the
+remaining move is speculative verdict/answer overlap), TTFT p50 349ms
+(measured at last; budget ≤1s met). The routing p95 gate IS the budget
+now.
 
 **11. Cache-stable context layout.** ✅ **built and measured.** Two
 cache-killers removed: the routing prompt carried the per-call timestamp

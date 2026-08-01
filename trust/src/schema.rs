@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS model_calls (
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     cached_tokens     INTEGER NOT NULL DEFAULT 0,
     cost_usd          REAL,
-    latency_ms        INTEGER NOT NULL
+    latency_ms        INTEGER NOT NULL,
+    first_token_ms    INTEGER
 );
 CREATE TABLE IF NOT EXISTS invites (
     token_hash TEXT PRIMARY KEY,
@@ -87,6 +88,22 @@ END;
 
 pub fn init_core(conn: &Connection) -> Result<(), TrustError> {
     conn.execute_batch(CORE_SCHEMA)?;
+    // CREATE TABLE IF NOT EXISTS never adds a column to an existing table
+    // (the lesson the cells learned as "no such column: class", now applied
+    // here BEFORE it bites): every column the core schema gains after first
+    // ship must also be added additively.
+    let additions: &[(&str, &str, &str)] = &[("model_calls", "first_token_ms", "INTEGER")];
+    for (table, column, ddl) in additions {
+        let present = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|c| c == column);
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl};"))?;
+        }
+    }
     Ok(())
 }
 

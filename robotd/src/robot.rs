@@ -83,6 +83,10 @@ pub struct RobotCore {
     pub robot_name: String,
     pub started_at: i64,
     events: broadcast::Sender<i64>,
+    /// live draft text while an answer streams: (principal, accumulated).
+    /// Display-only -- the canonical reply still lands through the outbox
+    /// with its receipt; a draft nobody receives costs nothing.
+    drafts: broadcast::Sender<(i64, String)>,
 }
 
 impl RobotCore {
@@ -125,6 +129,7 @@ impl RobotCore {
             robot_name,
             started_at: trust::ids::ts_ms(),
             events: broadcast::channel(64).0,
+            drafts: broadcast::channel(256).0,
         }
     }
 
@@ -166,8 +171,13 @@ impl RobotCore {
     /// it (Q26). Journals the verdict; never blocks delivery, because an
     /// evaluator that can stop the robot talking is a new way for the robot
     /// to go silent.
+    /// Runs OFF the turn's critical path (sec 2c #6): it verified the same
+    /// way for months while BLOCKING the reply on an evaluator round trip
+    /// -- measured p50 832ms, on every acting turn. The check is about the
+    /// record, not the delivery; the journal row lands the same either
+    /// way, and the person gets their reply an evaluator-call earlier.
     fn expression_verify(&self, cell: &Cell, out: &prism::TurnOutput) {
-        let Some(gw) = &self.gateway else { return };
+        let Some(gw) = self.gateway.clone() else { return };
         let acted = out
             .receipt
             .claims
@@ -177,7 +187,9 @@ impl RobotCore {
             return;
         }
         let claims: Vec<String> = out.receipt.claims.iter().map(|c| c.claim.clone()).collect();
-        let verdict = hub::evaluator::expression_supported(gw, &out.reply, &claims);
+        let (cell, intent_id, reply) = (cell.clone(), out.intent_id.clone(), out.reply.clone());
+        std::thread::spawn(move || {
+        let verdict = hub::evaluator::expression_supported(&gw, &reply, &claims);
         let payload = match &verdict {
             Some(v) => serde_json::json!({
                 "supported": v.supported, "why": v.why, "sampled": !acted,
@@ -188,14 +200,14 @@ impl RobotCore {
             None => serde_json::json!({ "supported": null, "why": "evaluator unavailable" }),
         };
         let _ = cell.with(|c| {
-            prism::journal::step(c, &out.intent_id, "expression.verified", &payload.to_string(), None)
+            prism::journal::step(c, &intent_id, "expression.verified", &payload.to_string(), None)
         });
         if verdict.as_ref().is_some_and(|v| !v.supported) {
             tracing::warn!(
-                "expression-verify: reply for {} claims more than its receipt",
-                out.intent_id
+                "expression-verify: reply for {intent_id} claims more than its receipt"
             );
         }
+        });
     }
 
     pub fn cell(&self, principal: i64) -> anyhow::Result<CellHandle> {
@@ -360,11 +372,31 @@ impl RobotCore {
     /// Takes the acting cell's vault: it is keyed from that cell's DEK, so
     /// there is no instance-wide one to hold on `self`.
     pub fn router(&self, vault: Option<Arc<mind::vault::MediaVault>>) -> Registry {
+        self.router_with_draft(vault, None)
+    }
+
+    /// As `router`, with a live draft sink for the turn's streamed tokens.
+    pub fn router_with_draft(
+        &self,
+        vault: Option<Arc<mind::vault::MediaVault>>,
+        draft: Option<crate::caps::DraftSink>,
+    ) -> Registry {
+        self.router_full(vault, draft, None)
+    }
+
+    pub fn router_full(
+        &self,
+        vault: Option<Arc<mind::vault::MediaVault>>,
+        draft: Option<crate::caps::DraftSink>,
+        premix_embedding: Option<Arc<std::sync::OnceLock<Option<Vec<f32>>>>>,
+    ) -> Registry {
         let mut reg = Registry::new(
             Services {
                 embedder: self.embedder.clone(),
                 gateway: self.gateway.clone(),
                 research: self.research.clone(),
+                draft,
+                premix_embedding,
                 vault,
                 google: self.google.clone(),
                 oauth_app: self.oauth_app.clone(),
@@ -437,7 +469,27 @@ impl RobotCore {
                 device_trust: "session".into(),
                 source_msg_id: Some(msg_id),
             };
-            let router = self.router(Some(handle.vault.clone()));
+            let drafts = self.drafts.clone();
+            let draft_sink: crate::caps::DraftSink = Arc::new(move |text: &str| {
+                let _ = drafts.send((principal, text.to_string()));
+            });
+            // sec 2c #2: the embedding runs on its own thread while the
+            // routing model call runs -- max(), not sum(). ~30-50ms of the
+            // serial path, and the pattern the speculative context build
+            // will extend.
+            let premix = Arc::new(std::sync::OnceLock::new());
+            if let Some(embedder) = self.embedder.clone() {
+                let slot = premix.clone();
+                let text = env.content.clone();
+                std::thread::spawn(move || {
+                    let _ = slot.set(embedder.embed_query(&text).ok());
+                });
+            }
+            let router = self.router_full(
+                Some(handle.vault.clone()),
+                Some(draft_sink),
+                Some(premix),
+            );
             let verdicts: Box<dyn VerdictProvider> = match &self.gateway {
                 Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
                 None => Box::new(FallbackVerdict),
@@ -600,6 +652,10 @@ pub fn cell_lang(cell: &Cell) -> String {
 const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus", "flac"];
 
 impl surfaces::Robot for RobotCore {
+    fn subscribe_drafts(&self) -> broadcast::Receiver<(i64, String)> {
+        self.drafts.subscribe()
+    }
+
     fn complete_google_auth(&self, state: &str, code: &str) -> anyhow::Result<String> {
         RobotCore::complete_google_auth(self, state, code)
     }

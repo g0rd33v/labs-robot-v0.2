@@ -202,20 +202,18 @@ fn eval_multilingual(
     // sec 2c, gated: the routing call is the long pole of every acting
     // turn. Measured on the same sixty calls the quality bars use, against
     // the routine-turn budget (<= 3s p50, <= 6s p95).
-    // Ratchet bars, not the sec 2c budget: measured baseline 2026-08-01
-    // was p50 3233ms / p95 10817ms, and the budget (3000/6000) is lost
-    // until sec 2c's own techniques land -- streaming, parallel fan-out,
-    // latency-aware provider routing. A budget gate that is red on day one
-    // catches nothing; a ratchet catches every regression from here, and
-    // tightens as the speed work lands. The budget stays printed so the
-    // gap cannot be forgotten.
+    // The ratchet's history, kept honest: baseline 2026-08-01 morning was
+    // p50 3233ms / p95 10817ms with no provider preference. The speed
+    // tranche (provider sort by latency, sec 2c #4) measured p50 2817 /
+    // p95 4844 the same day -- so the p95 gate IS the sec 2c budget now,
+    // and p50 keeps 500ms of provider-weather headroom over its 3000ms
+    // budget, printed so the residue stays visible.
     route_ms.sort_unstable();
     let (p50, p95) = (pct(&route_ms, 0.50), pct(&route_ms, 0.95));
-    let speed_ok = p50 <= 4_000 && p95 <= 13_500;
+    let speed_ok = p50 <= 3_500 && p95 <= 6_000;
     println!(
         "[routing speed] p50 {p50}ms, p95 {p95}ms over {} calls \
-         (ratchet: p50 <= 4000, p95 <= 13500; sec 2c budget 3000/6000 NOT \
-         yet met) {}",
+         (gate: p50 <= 3500, p95 <= 6000 = sec 2c budget) {}",
         route_ms.len(),
         if speed_ok { "" } else { "FAIL" }
     );
@@ -278,13 +276,17 @@ fn eval_speed_live(gw: std::sync::Arc<hub::ModelGateway>) -> anyhow::Result<(i32
     let _ = std::fs::remove_file(path);
     ms.sort_unstable();
     let (p50, p95) = (pct(&ms, 0.50), pct(&ms, 0.95));
-    // Ratchet, as above: baseline 2026-08-01 p50 7006ms. Two sequential
-    // model calls with no streaming cannot make the 3s budget; the ratchet
-    // holds the line while that work is unbuilt.
-    let pass = p50 <= 9_000;
+    // Baseline 2026-08-01 morning: p50 7006ms. After the speed tranche
+    // (streaming, provider sort, async verify, embedding fan-out): 3115ms
+    // -- 115ms over the 3s budget, which two sequential model calls
+    // approach but cannot reliably beat. Gate at 4500 (regression floor),
+    // budget printed; the residue closes when the verdict/answer calls
+    // overlap speculatively.
+    let pass = p50 <= 4_500;
     println!(
-        "\n[turn speed] full answer turn: p50 {p50}ms (ratchet: <= 9000; \
-         sec 2c budget 3000 NOT yet met) p95 {p95}ms ({} samples, reported){}",
+        "\n[turn speed] full answer turn: p50 {p50}ms (gate: <= 4500; \
+         sec 2c budget 3000, measured 115ms over) p95 {p95}ms ({} samples, \
+         reported){}",
         ms.len(),
         if pass { "" } else { " FAIL" }
     );
@@ -499,6 +501,15 @@ fn eval_meter_report(since_ts: i64, turns: usize) -> anyhow::Result<()> {
         [since_ts],
         |r| r.get(0),
     )?;
+    // sec 2c's headline metric, at last: time-to-first-token where a call
+    // streamed. The budget is <= 1s p50 at the surface; gateway TTFT is
+    // the lower bound of that.
+    let ttft: Option<i64> = core.query_row(
+        "SELECT CAST(avg(first_token_ms) AS INTEGER) FROM model_calls \
+         WHERE ts >= ?1 AND first_token_ms IS NOT NULL",
+        [since_ts],
+        |r| r.get(0),
+    )?;
     let cache_pct = if prompt > 0 {
         100.0 * cached as f64 / prompt as f64
     } else {
@@ -514,10 +525,15 @@ fn eval_meter_report(since_ts: i64, turns: usize) -> anyhow::Result<()> {
          over {turns} turns ({per_turn:.2} router calls/turn incl. hedges -- \
          sec 2b assumed ~2), cache-hit {cache_pct:.1}% of {prompt} input \
          tokens (sec 6 claims 30-70% where caching applies; see `robotd \
-         cost` for per-seat), cost {}",
+         cost` for per-seat), cost {}{}",
         match cost {
             Some(c) => format!("${c:.4}"),
             None => "unpriced by provider".into(),
+        },
+        match ttft {
+            Some(t) => format!(", avg TTFT {t}ms on streamed calls (sec 2c budget: first \
+                 visible response <= 1s p50)"),
+            None => String::new(),
         }
     );
     Ok(())

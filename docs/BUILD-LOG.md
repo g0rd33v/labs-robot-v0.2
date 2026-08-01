@@ -5,6 +5,100 @@ dependencies introduced. Newest first.
 
 ---
 
+## The speed tranche — §2c's own fix list, built and measured (2026-08-01)
+
+The measurement tranche found §2c's budget lost; this one implements §2c's
+own techniques and closes most of the gap, same day, measured by the same
+gates.
+
+### Before → after, one live eval apart
+
+| metric | morning baseline | after this tranche | §2c budget |
+|---|---|---|---|
+| routing p50 | 3128–3864ms | **2817ms** | ≤3000 **met** |
+| routing p95 | 10664–11037ms | **4844ms** | ≤6000 **met** |
+| full turn p50 | 4099–7006ms | **3115ms** | ≤3000 (115ms over) |
+| full turn p95 | 5300–17012ms | **4210ms** | ≤6000 **met** |
+| TTFT (answer seat) | unmeasurable | **p50 349ms / p95 466ms** | ≤1000 **met** |
+| cache-hit, eval run | 9.7% | **30.5%** | 30–70% **entered** |
+
+The gates tightened accordingly: routing p95's gate IS the budget now
+(6000), p50 gates at 3500 with the 3000 budget printed; the turn gate holds
+at 4500 until the last 115ms falls to speculative overlap of the
+verdict/answer calls.
+
+### What did it
+
+**Provider routing (§2c #4)** — the single biggest lever, three lines of
+body: `provider: {"sort": "latency"}` on every call. OpenRouter's default
+sort is PRICE; the route seat was being served by whichever provider was
+cheapest that minute, which is what p95 11s looks like. Sorting by measured
+latency more than halved routing p95 and doubled the route seat's
+cache-hit (8.6% → 16.7%) — the faster providers also cache better.
+
+**Streaming (§2c #1)** — end to end: the transport speaks SSE
+(`post_chat_stream`, assembling the same response shape so usage, logging
+and metering stay one code path), the gateway walks the same chain with the
+same law-3 discipline (outbound crossing gates the call; the inbound
+crossing records the assembled reply — the log records what crossed, and
+what crossed is the whole reply), and both the answer path AND the research
+synthesis stream into a per-principal draft lane: robot broadcast → SSE
+`draft` events → a live bubble in the chat that the canonical, receipted
+message replaces. The draft carries ACCUMULATED text, never deltas, so a
+dropped frame costs smoothness and never words. Verified live: draft events
+growing 48→96→144→…, the bubble caught on screen mid-stream at 206 chars.
+No streaming for routing (its output is not for people) and no hedging of
+streams (a stream that has shown words cannot be raced without unsaying
+them).
+
+**Expression-verify off the critical path (§2c #6)** — found by reading:
+the Q26 evaluator check ran SYNCHRONOUSLY before the reply returned,
+p50 832ms, on every acting turn — for a check about the record, not the
+delivery. It runs on its own thread now; the journal row lands the same.
+
+**Parallel fan-out (§2c #2)** — the query embedding computes on its own
+thread while the routing call runs; the answer path picks it up ready.
+Honestly small (~30ms of a 3s turn) — recorded as the pattern the
+speculative context build will extend, not as a win.
+
+### Also found by running it
+
+`hub::research` truncated fetched pages at a byte index. A Cyrillic page
+whose cap landed mid-character **panicked the whole turn** — found live, on
+a Russian question about Roman roads, as an `[error 500]` in the chat.
+Truncation is boundary-safe now, with a test that walks every cap position
+through Cyrillic text. Latent since M4; only reachable when a fetched page
+was non-ASCII at exactly the cap.
+
+Also: TTFT lands in the meter (`first_token_ms`, added additively — the
+core schema now has the same never-forget-ALTER discipline the cells
+learned), `robotd cost` prints per-seat TTFT, and the eval's meter line
+carries it beside the §2c budget.
+
+### Gate
+
+227 tests, clippy clean, offline eval PASS; live eval PASS with the
+numbers in the table above (60 multilingual / 0 misroutes / 0
+not-their-words / injection 69-0). Streaming verified in the browser, in
+both the answer and research paths. The full-turn p50 budget is the one
+line still amber: 3115ms vs 3000, and the remaining move — speculative
+overlap of verdict and answer context — is named, not vague.
+
+### Assumptions
+
+* `provider_sort` defaults to "latency" for every seat; config can unset
+  it. Price-sorting saved ~nothing at our token volumes ($0.04/run) and
+  cost 6 seconds of p95 — the trade is not close.
+* The draft lane is display-only by construction: it rides a broadcast
+  channel outside the outbox, and the receipts law applies to the canonical
+  message that replaces it, which is unchanged.
+
+### Dependencies
+
+None new.
+
+---
+
 ## The numbers, measured — speed, cache, cost, memory (2026-08-01)
 
 Items 10–13 of `docs/GAP-ANALYSIS.md`. Nothing here adds a capability; it

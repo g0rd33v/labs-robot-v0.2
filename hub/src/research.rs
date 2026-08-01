@@ -187,7 +187,16 @@ impl Research {
             .map_err(|e| HubError::Gateway(format!("read {url}: {e}")))?;
         self.log(Direction::In, url, "web-fetch", html.as_bytes())?;
         let mut text = extract_text(&html);
-        text.truncate(cap);
+        // truncate on a CHARACTER boundary: `cap` is a byte index, and a
+        // Cyrillic or CJK page whose cap landed mid-character panicked the
+        // whole turn (found live, on a Russian question about Roman roads)
+        if text.len() > cap {
+            let mut cut = cap;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
         Ok(text)
     }
 }
@@ -302,6 +311,26 @@ pub fn extract_text(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The truncation cap is a byte index; the text is UTF-8. A cap landing
+    /// mid-character must shorten to the boundary, not panic the turn --
+    /// this exact case took down a live turn on a Cyrillic page.
+    #[test]
+    fn truncation_never_splits_a_character() {
+        let text = "дороги строились из камня и бетона".to_string();
+        for cap in 0..text.len() + 2 {
+            let mut t = text.clone();
+            if t.len() > cap {
+                let mut cut = cap;
+                while cut > 0 && !t.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                t.truncate(cut);
+            }
+            assert!(t.len() <= cap, "cap {cap}");
+            assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+        }
+    }
+
     use super::*;
 
     #[test]
