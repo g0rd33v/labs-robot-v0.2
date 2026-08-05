@@ -34,10 +34,42 @@ member-facing half of the Registry.**
   the routing call before the answer seat is even asked. The person sees a
   typing indicator, then nothing, then a fast stream.
 
-The fix is named and unbuilt: §2c #2's speculative fan-out — start the
-answer-context build (and, for the predictable classes, the answer itself)
-concurrently with routing, so the critical path is max() not sum(). Floor
-turns already answer in **1.5 ms p50**, 200× inside their 300 ms budget.
+Floor turns already answer in **1.5 ms p50**, 200× inside their 300 ms
+budget. For everything else, two hypotheses were tested on 2026-08-05 and
+one survived:
+
+**Tested and rejected — route on §6a's specified seat.** §6a assigns
+*Router / verdicts* to `gemma-4-26b-a4b-it`; the code routes on
+`gemma-4-31b-it`, a drift dating from the tool-calling rebuild. Reverting
+to the spec'd model measured **worse on both axes**: routing p50 4357 ms
+(vs 2987), p95 7691 ms, 0% cache-hit, and it emitted schema-invalid
+verdicts (`"door": "fast"`, `"door": "none"`) that fell through to the
+deterministic fallback. The reason is in §6a's own cost table: it sized
+this call at **1.5K input tokens**, and the tool catalog has made it
+**5.0K** — a different call than the one the seat was chosen for. The 31b
+stays, and this paragraph is the evidence for the deviation.
+
+**The remaining arithmetic.** Routing p50 is ~3.0 s and the answer's own
+TTFT is ~350 ms, so displayed TTFT ≈ 3.3 s. No amount of answer-side
+speed helps: **routing is a wall in front of it.** Trimming the catalog
+(~3.3K tokens of tool descriptions) would shave perhaps 40% off prefill —
+still ~2 s, and it attacks the multilingual mechanism that took three
+attempts to get right.
+
+**The design that does reach it: early decision from a streamed router.**
+Stream the routing call and put `call.tool` FIRST in the output shape.
+The tool decision then arrives ~600 ms in, while the rest of the verdict
+is still streaming — and for the answer path (`tool: "none"`) nothing else
+is needed, so the answer can start immediately. Displayed TTFT becomes
+router-TTFT + answer-TTFT ≈ **950 ms**, under budget, with **no
+speculation, no retraction, and no wasted calls**. It is not §2c #2's
+speculative fan-out; it is better, because nothing is guessed.
+
+The cost is real: it reorders the routing output contract (touching
+salvage, repair and the eval corpus) and adds concurrency to `run_turn`.
+That is a deliberate change to the one contract that took three attempts
+to stabilise, so it wants an explicit decision rather than a quiet
+commit.
 
 ---
 
