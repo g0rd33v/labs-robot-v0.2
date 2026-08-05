@@ -39,7 +39,7 @@
 </style>
 </head>
 <body>
-<header>bender<small>robot v0.2</small><a href="/dash">dashboard</a></header>
+<header>bender<small>robot v0.2</small><a href="__PREFIX__/dash">dashboard</a></header>
 <div id="log"></div>
 <div id="thinking">thinking&hellip;</div>
 <form id="f">
@@ -75,7 +75,7 @@
 
   async function poll() {
     try {
-      const r = await fetch('/api/history?after=' + lastTs);
+      const r = await fetch('__PREFIX__/api/history?after=' + lastTs);
       if (!r.ok) return;
       const rows = await r.json();
       if (rows.some(x => x.direction === 'out')) clearDraft();
@@ -117,7 +117,7 @@
     input.value = '';
     busy(true);
     try {
-      const r = await fetch('/api/message', {
+      const r = await fetch('__PREFIX__/api/message', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -137,7 +137,7 @@
     if (!file) return;
     busy(true);
     try {
-      const r = await fetch('/api/upload', {
+      const r = await fetch('__PREFIX__/api/upload', {
         method: 'POST',
         headers: { 'x-filename': encodeURIComponent(file.name) },
         body: file,
@@ -153,7 +153,7 @@
   // SSE push: replies and scheduler fires arrive the moment they exist;
   // a slow poll stays on as the fallback when the stream reconnects.
   try {
-    const es = new EventSource('/api/stream');
+    const es = new EventSource('__PREFIX__/api/stream');
     es.onmessage = (e) => {
       // 'resync' means the server dropped events for this client; refetch
       // everything rather than sit silently stale

@@ -66,15 +66,27 @@ struct Session {
 pub struct WebState {
     pub robot: Arc<dyn Robot>,
     pub slug_hash: String,
+    /// Mount point when the robot lives under a path on a shared domain
+    /// (`/bender/demo`). Empty = the root. Every link and fetch the client
+    /// makes is written relative to this, so one binary serves both shapes
+    /// and neither guesses.
+    pub prefix: String,
     /// sid -> session
     sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl WebState {
     pub fn new(robot: Arc<dyn Robot>, slug_hash: String) -> Self {
+        Self::mounted(robot, slug_hash, String::new())
+    }
+
+    /// As `new`, mounted under a path prefix.
+    pub fn mounted(robot: Arc<dyn Robot>, slug_hash: String, prefix: String) -> Self {
+        let prefix = prefix.trim_end_matches('/').to_string();
         Self {
             robot,
             slug_hash,
+            prefix,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -130,6 +142,19 @@ impl WebState {
 }
 
 pub fn router(state: Arc<WebState>) -> Router {
+    let prefix = state.prefix.clone();
+    let app = routes(state);
+    if prefix.is_empty() {
+        app
+    } else {
+        // nest, so the app answers on /bender/demo/... and nothing else --
+        // a robot mounted under a path must not also answer at the root of
+        // a domain it shares with other services
+        Router::new().nest(&prefix, app)
+    }
+}
+
+fn routes(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/a/{token}", get(open_slug))
         .route("/i/{token}", get(open_invite))
@@ -157,13 +182,16 @@ pub async fn serve(
     Ok(())
 }
 
-fn session_redirect(sid: String) -> Response {
+fn session_redirect(sid: String, prefix: &str) -> Response {
     Response::builder()
         .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/chat")
+        .header(header::LOCATION, format!("{prefix}/chat"))
         .header(
             header::SET_COOKIE,
-            format!("sid={sid}; HttpOnly; SameSite=Strict; Path=/"),
+            format!(
+                "sid={sid}; HttpOnly; SameSite=Strict; Path={}/",
+                if prefix.is_empty() { "" } else { prefix }
+            ),
         )
         .body(Body::empty())
         .expect("static response")
@@ -174,7 +202,7 @@ async fn open_slug(State(st): State<Arc<WebState>>, Path(token): Path<String>) -
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let sid = st.mint_session(st.robot.owner_principal());
-    session_redirect(sid)
+    session_redirect(sid, &st.prefix)
 }
 
 async fn open_invite(State(st): State<Arc<WebState>>, Path(token): Path<String>) -> Response {
@@ -183,7 +211,7 @@ async fn open_invite(State(st): State<Arc<WebState>>, Path(token): Path<String>)
         Ok(Ok((principal, name))) => {
             tracing::info!("invite redeemed: {name} (principal {principal})");
             let sid = st.mint_session(principal);
-            session_redirect(sid)
+            session_redirect(sid, &st.prefix)
         }
         Ok(Err(e)) => {
             tracing::warn!("invite rejected: {e}");
@@ -272,7 +300,7 @@ async fn chat_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Respo
         )
             .into_response();
     }
-    Html(include_str!("chat.html")).into_response()
+    Html(include_str!("chat.html").replace("__PREFIX__", &st.prefix)).into_response()
 }
 
 async fn dash_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
@@ -288,7 +316,7 @@ async fn dash_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Respo
     }
     let robot = st.robot.clone();
     match tokio::task::spawn_blocking(move || robot.dashboard(principal)).await {
-        Ok(Ok(data)) => Html(dash::render(&data)).into_response(),
+        Ok(Ok(data)) => Html(dash::render(&data).replace("__PREFIX__", &st.prefix)).into_response(),
         Ok(Err(e)) => {
             tracing::error!("dashboard failed: {e:#}");
             (StatusCode::INTERNAL_SERVER_ERROR, "dashboard failed").into_response()

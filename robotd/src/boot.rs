@@ -247,11 +247,25 @@ pub fn bootstrap(cfg: &RobotConfig) -> anyhow::Result<BootResult> {
         }
     }
 
-    let state = Arc::new(surfaces::WebState::new(robot.clone(), slug_hash));
+    let state = Arc::new(surfaces::WebState::mounted(
+        robot.clone(),
+        slug_hash,
+        cfg.server.path_prefix.clone(),
+    ));
     Ok(BootResult {
         robot,
         state,
-        slug_url: format!("http://{addr}/a/{slug}"),
+        // the URL a person actually opens: the public base when the robot
+        // sits behind a proxy, plus the path it is mounted at
+        slug_url: format!(
+            "{}{}/a/{slug}",
+            if cfg.server.public_base.is_empty() {
+                format!("http://{addr}")
+            } else {
+                cfg.server.public_base.trim_end_matches('/').to_string()
+            },
+            cfg.server.path_prefix.trim_end_matches('/')
+        ),
         addr,
     })
 }
@@ -291,6 +305,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 0,
                 public_base: String::new(),
+                path_prefix: String::new(),
             },
             mind: MindSection {
                 embeddings: false, // hermetic tests: no downloads

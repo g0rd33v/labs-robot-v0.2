@@ -275,7 +275,7 @@ pub fn render(d: &DashData) -> String {
   .dim {{ color:#8b949e; font-size:12px; }}
   .ok {{ color:#7ee787; }} .off {{ color:#f85149; }} .outb {{ color:#d29922; }}
 </style></head><body>
-<header>bender<small>dashboard &middot; the control room</small><a href="/chat">&larr; chat</a></header>
+<header>bender<small>dashboard &middot; the control room</small><a href="__PREFIX__/chat">&larr; chat</a></header>
 <main>
 <h2>overview</h2>
 <div class="cards">

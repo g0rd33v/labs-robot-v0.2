@@ -121,6 +121,7 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 0,
                 public_base: String::new(),
+            path_prefix: String::new(),
             },
             mind: MindSection {
                 embeddings: false,

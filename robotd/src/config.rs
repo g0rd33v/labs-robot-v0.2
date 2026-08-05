@@ -95,6 +95,10 @@ impl Default for RobotSection {
 pub struct ServerSection {
     pub host: String,
     pub port: u16,
+    /// Mount point under a shared domain, e.g. "/bender/demo". Empty =
+    /// this robot owns the root of its host.
+    #[serde(default)]
+    pub path_prefix: String,
     /// base URL printed in invite links; empty = http://host:port
     pub public_base: String,
 }
@@ -104,6 +108,7 @@ impl Default for ServerSection {
         Self {
             host: "127.0.0.1".into(),
             port: 7777,
+            path_prefix: String::new(),
             public_base: String::new(),
         }
     }
