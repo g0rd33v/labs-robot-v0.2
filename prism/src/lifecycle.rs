@@ -252,7 +252,23 @@ pub fn run_turn(
     env: &Envelope,
     deps: &TurnDeps,
 ) -> Result<TurnOutput, PrismError> {
-    let intent_id = ids::new_id("int");
+    run_turn_as(cell, env, deps, &ids::new_id("int"))
+}
+
+/// As `run_turn`, with the intent's identity chosen by the caller.
+///
+/// Exists because §4.1.6's coalescing claim has to name a turn *before*
+/// the turn starts — a duplicate arriving mid-flight needs something real
+/// to point at, and a claim holding an id no journal row will ever carry
+/// would be a receipt reference that 404s. So the id is minted once, at
+/// the door, and the turn adopts it.
+pub fn run_turn_as(
+    cell: &Cell,
+    env: &Envelope,
+    deps: &TurnDeps,
+    intent_id: &str,
+) -> Result<TurnOutput, PrismError> {
+    let intent_id = intent_id.to_string();
     let opened = serde_json::json!({
         "surface": env.surface,
         "modality": env.modality,

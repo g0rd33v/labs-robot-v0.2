@@ -5,6 +5,142 @@ dependencies introduced. Newest first.
 
 ---
 
+## Double-send coalescing — §4.1.6 (2026-08-05)
+
+The outbox has always made a double *send* structurally impossible: a
+UNIQUE `dedupe_key`, not a hopeful check. Nothing did the same for a
+double *arrival*. `prism::coalesce` is that mirror — the same content
+inside two seconds claims one turn, and the second arrival gets no reply,
+no transcript entry, no intent, and no effect.
+
+**The holes it closes are the ones a client cannot.** The chat's send
+button is already disabled while a turn runs, so the button was never the
+problem. What is left is an HTTP retry after a timeout where the first
+request actually landed, a second tab or a phone open on the same cell,
+and Telegram's at-least-once redelivery. Each of those costs the person a
+duplicated answer and — worse — a duplicated *effect*.
+
+**Where the check sits, and why exactly there.** After the boundary log
+and before `record_message`. The boundary log is never skipped for a
+duplicate: law 3 is about bytes crossing the process, those bytes crossed
+it, and a log that recorded only what we decided to act on would be a
+different artefact than the one the spec asks for. But the claim comes
+before the message row and before any intent, because a claim made later
+would mean *undoing* a transcript entry and a journal open — and the
+journal is append-only for good reasons.
+
+**A table, not an in-memory map — and not for the reason it first looks
+like.** It is *not* about surviving restarts: a restart takes longer than
+two seconds, so a claim almost never needs to outlive the process. It is a
+table because per-person state belongs in that person's cell, where the
+five-category census can see it. A process-local map would be a second
+store with its own lifetime, holding hashes of what someone just said,
+invisible to the very check that exists so nothing about a person hides
+outside the five categories. The row holds a content hash and no content,
+is swept on the maintenance lane once its window passes, and is mapped to
+`Substrate` — the census caught the new table on the first run, exactly as
+it caught `fact_contests`.
+
+**One identity per turn.** The claim has to name a turn *before* the turn
+starts, so a duplicate arriving mid-flight has something real to point at.
+Minting an id for the claim and letting `run_turn` mint its own would have
+produced a claim referencing an intent no journal row would ever carry — a
+dangling reference dressed as provenance, which the surface would then
+hand to the receipt inspector. So `run_turn_as` takes the id from the
+door, and the one case that legitimately runs under a different intent —
+answering a parked approval, which belongs to the *parked* intent — has
+its claim re-pointed at the real one.
+
+**What the window costs, stated plainly.** Past two seconds nothing can
+distinguish a stubborn retry from a person saying it again, so an
+identical message after the window always earns its own turn. And a
+duplicate never refreshes the claim's timestamp: if it did, a client
+retrying every second would hold the window open indefinitely and the
+person's next deliberate message would vanish with no turn and no receipt.
+The design errs toward answering twice rather than toward silence.
+
+**Gate demo.**
+- 261 tests green; clippy `-D warnings` clean; `robotd eval` PASS.
+- The two end-to-end tests were verified to **FAIL** with the coalescing
+  check disabled and pass with it — including
+  `two_simultaneous_sends_still_produce_one_turn`, which fires both
+  requests at once, since a sequential test cannot catch a check-then-write
+  race.
+- Live, against the owner's real robot: two concurrent identical sends →
+  one answered, one `{"coalesced":true}` naming `int_9e05bd3e238a57ae`,
+  whose receipt resolves 200 with a real claim. Transcript holds one
+  question and one answer.
+- Live, the case that matters: `remember that the coalescing window is two
+  seconds` sent twice concurrently stored **one** fact, not two.
+- Live negatives: three different messages back to back all answered; the
+  same question 3 s later answered again.
+- In the browser: two simultaneous `fetch`es → 1 coalesced, 1 answered,
+  one pair in the transcript.
+
+**A defect this work introduced, found live and then fixed.** A "yes"
+answering a parked approval runs under the *parked* intent — that is whose
+receipt it is — but the claim was made under a fresh id, and the
+re-pointing happened only after the turn finished. A double-tapped "yes"
+arrives while the first is still running, so it was handed an id that
+never reached the journal: the coalesced response named
+`int_ad832ed3731694e5`, whose receipt returned **404**. Exactly the
+dangling reference the design was written to avoid, shipped anyway,
+because the fix was placed after the race instead of before it. Now the
+parked intent is looked up *before* claiming (`parked_answer` is a pure
+read of `approval::waiting`, so it costs one query), the claim names it
+from the start, and `repoint` — written for the broken approach — is
+deleted rather than left lying around. Re-verified live: the coalesced
+response names the parked intent and its receipt resolves 200.
+`a_coalesced_approval_answer_names_the_parked_turn` was verified to fail
+when the fresh-id version is restored.
+
+**`robotd eval --live` FAILED, twice, and it is not this change.**
+Both runs failed the two speed gates: routing p50 3584 ms then 4490 ms
+against a 1800 ms gate, turn p50 4447 ms then 5075 ms against 3000 ms.
+Everything else passed — 60 multilingual cases / 0 misroutes, 69 injection
+trials / 0 leaked.
+
+Not attributable to coalescing, and the evidence rather than the
+plausibility argument: the deterministic floor turn — the local path that
+now carries the extra claim — measured p95 **1.5 ms → 1.6 ms → 1.8 ms**
+across the three runs, against a 300 ms bar. The claim costs nothing
+measurable. What moved is pure model-call latency.
+
+**And it corrects the previous entry's explanation.** That entry read one
+cold run and one warm one and concluded the cache explained the gap.
+`robotd cost` over seven days says otherwise: the route seat's cache-hit
+is **32.5 %** and its p50 is **2882 ms** across 623 calls. So ~2.9 s is
+the *normal* routing latency, the 1110 ms warm run was the outlier rather
+than the baseline, and a live eval PASS is the exception. §1.4.2 stays
+"partly met", which is now supported by a week of measurement instead of
+one lucky pair of runs. Closing the remaining TTFT is punch-list item 1
+and unchanged in scope by this tranche.
+
+**Assumptions.**
+- The fingerprint is trimmed content only, deliberately *not* the surface.
+  The strongest case for coalescing is the same words through two doors at
+  once, and keying on the surface would let exactly that case through. The
+  trade: one word on chat and the same word on Telegram inside two seconds
+  counts as one utterance.
+- Mutual exclusion comes from the **cell lock**, not from the transaction —
+  `Cell::with` holds the connection mutex for the whole claim, so the read
+  and the write cannot interleave in this process. `unchecked_transaction`
+  is `DEFERRED` and excludes nobody; it is there to make the pair one
+  durable unit. That is a single-process guarantee, which is the right one
+  for a robot that owns its data directory. The comment in the source says
+  so rather than implying more.
+- `Said` replaces a bare `String` from `handle_message` so every surface
+  has to decide what silence looks like for it: the chat renders nothing,
+  Telegram sends nothing. An empty string would have been a thing each
+  caller had to remember to check.
+
+**Dependencies introduced.** None.
+
+**Next.** Resumable `robotd package` (§4.8.3.1), the accessibility pass
+(§8.3), the chat's empty state (§4.1 C1), and the last ~1 s of TTFT cold.
+
+---
+
 ## The member-facing surface — receipts, approvals, my-data, leaving (2026-08-05)
 
 The spec conformance read left one gap larger than the rest: §4.1.4 and
@@ -68,6 +204,13 @@ PASS is weak evidence about TTFT, and the §1.4.2 metric stays marked
 *partly met* rather than met on the strength of one warm average — an
 average is not a p50, and a robot that only makes its budget on a warm
 cache misses it for the person who opens it first thing in the morning.
+
+*(Corrected the same day — see the coalescing entry above. Two runs were
+not enough to conclude the cache explained it. `robotd cost` over seven
+days gives the route seat a 32.5% cache-hit and a 2882ms p50 across 623
+calls, so ~2.9s is the normal routing latency and the warm 1110ms run was
+the outlier. The conclusion — §1.4.2 unmet — holds and has hardened; the
+reasoning behind it was thinner than it read.)*
 - `/api/registry` returns the real five categories (6 knowledge, 1
   instruction, 5 preferences, 2 media, 0 grants) with provenance and rung.
 - `/api/export` returns those five plus 333 conversation messages as an

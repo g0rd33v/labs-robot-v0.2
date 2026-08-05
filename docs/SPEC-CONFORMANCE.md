@@ -22,7 +22,7 @@ are marked through.
 | # | Metric | Status |
 |---|---|---|
 | 1 | DoD demo passes end-to-end (M7) | ✅ passed 2026-07-30; re-proven since |
-| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ⚠️ **partly met** — routine met (turn p50 2613 ms). First-visible hit 993 ms avg on a *warm* cache (5 Aug) but 3567 ms on the cold run minutes earlier; not met until it holds cold |
+| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ❌ **not met on the week's numbers.** `robotd cost` over 7 days: route seat p50 **2882 ms** at 32.5 % cache-hit across 623 calls. Individual warm runs have hit 993 ms avg / turn p50 2613 ms, but two live evals on 5 Aug failed both speed gates (routing p50 3584/4490 ms). One good run is not the metric |
 | 3 | Zero intents without terminal receipts, 10K-turn soak | ✅ **exceeded**: 25,000 turns, 0 dropped |
 | 4 | MISROUTE-0 on the routing corpus | ✅ 66/66 offline, 0; live 60 cases, 0 |
 | 5 | Package → USB → resume with 100% memory/receipts/persona | ✅ proven twice (USB, and today to a container) |
@@ -100,17 +100,18 @@ commit.
 | R4.1.2 one verdict call, salvage, one retry, fallback | ✅ measured 1.03 router calls/turn |
 | R4.1.3 reply in sender's language, internals English | ✅ 10 languages, 0 misroutes |
 | R4.1.4 SSE token streaming | ✅ shipped in the speed tranche |
-| **C1: receipts icon → inspector modal** | ❌ **not built** |
-| **C1: approval card with Approve/Deny buttons** | ❌ not built — approvals answered by typing "yes"/"no" |
+| **C1: receipts icon → inspector modal** | ✅ shipped 5 Aug |
+| **C1: approval card with Approve/Deny buttons** | ✅ shipped 5 Aug — over the same durable gate the typed answer uses |
 | **C1: empty state with 3 suggested messages** | ❌ not built |
-| 4.1.6 double-send coalescing within 2 s | ❌ not built |
+| 4.1.6 double-send coalescing within 2 s | ✅ `prism::coalesce`: durable per-cell claim on a content hash, checked before the message is recorded and before any intent exists |
 | 4.1.6 mid-stream abort → partial kept, receipt `partial` | ⚠️ `partial` status exists; the mid-stream path is untested |
 
-The chat *works* — text, voice, files, streaming, media, any language. What
-is missing is the **inspection UI**: the spec's receipts icon and approval
-cards are how a non-technical member sees the receipts law working. Today
-that evidence lives in the dashboard (owner-only) and in the `— ✓ tool`
-action records under each reply.
+The chat *works* — text, voice, files, streaming, media, any language —
+and since 5 Aug the **inspection UI** works too: the receipts icon opens
+the journal's own claims and evidence, and approvals are cards with
+buttons rather than a word to type. What is still missing from §4.1 is the
+empty state's three suggested messages, and a test for the mid-stream
+abort path.
 
 ### 4.2 Memory & Registry ✅ / ❌ split by audience
 
@@ -257,8 +258,12 @@ Ranked by distance from a promise the spec makes to a user's face.
    works in any language.
 9. ~~Spend vs cap on Overview~~ ✅ **done** — spend today and ultra usage
    against the cap.
-10. **Double-send coalescing (§4.1.6)**; **resumable `package`
-    (§4.8.3.1)**; **accessibility pass (§8.3)** — still open.
+10. ~~Double-send coalescing (§4.1.6)~~ ✅ **done (5 Aug)** — the inbound
+    mirror of the outbox's `dedupe_key`: the same content inside two
+    seconds claims one turn, so a retry, a second tab, or a Telegram
+    redelivery cannot produce a second reply, a second transcript entry,
+    or a second effect. **resumable `package` (§4.8.3.1)** and
+    **accessibility pass (§8.3)** — still open.
 
 Items 2, 3 and 4 were one coherent piece of work — **the member-facing
 surface of the governance the runtime already enforces** — and shipped
@@ -267,7 +272,8 @@ passed 247 tests while the chat page rendered **completely empty** in a
 browser, because a modal bound before its markup existed. No test opened
 the page. `every_element_the_script_binds_to_exists_before_the_script` now
 reads the document order of both pages, and was verified to fail when the
-defect is reintroduced. What remains on this list is item 1 and item 10.
+defect is reintroduced. What remains on this list is item 1, and the two halves of item 10 that
+are still open.
 
 ## 7. Open questions from §10.1, still open
 

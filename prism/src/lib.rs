@@ -9,6 +9,7 @@ pub mod approval;
 pub mod floor;
 pub mod journal;
 pub mod lifecycle;
+pub mod coalesce;
 pub mod outbox;
 pub mod pending;
 pub mod receipts;
@@ -140,5 +141,6 @@ CREATE TABLE IF NOT EXISTS receipts (
 ",
     )?;
     pending::init_schema(conn)?;
+    coalesce::init_schema(conn)?;
     Ok(())
 }

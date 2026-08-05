@@ -28,6 +28,12 @@ impl Drop for TestRobot {
 /// the deterministic floor works, model turns answer honestly offline, and
 /// no test touches the network.
 fn boot_test_robot() -> TestRobot {
+    boot_test_robot_with(|_| {})
+}
+
+/// As above, with a chance to adjust the config -- used to switch on an
+/// approval policy so the parked-approval path can be exercised.
+fn boot_test_robot_with(tweak: impl FnOnce(&mut RobotConfig)) -> TestRobot {
     let dir = std::env::temp_dir().join(format!("httptest-{}", trust::ids::random_hex(6)));
     let cfg = RobotConfig {
         robot: RobotSection {
@@ -56,6 +62,8 @@ fn boot_test_robot() -> TestRobot {
     // hermetic: never pick up a developer's keys from the environment
     std::env::remove_var("OPENROUTER_API_KEY");
     std::env::remove_var("SERPER_API_KEY");
+    let mut cfg = cfg;
+    tweak(&mut cfg);
     let booted = robotd::boot::bootstrap(&cfg).expect("bootstrap");
     let slug = booted
         .slug_url
@@ -554,4 +562,209 @@ async fn leaving_requires_the_word_and_then_actually_shreds() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// §4.1.6 end to end: the same message twice inside two seconds produces
+/// one turn, one transcript entry, and one reply.
+///
+/// Asserted against a real cell rather than the double, because the value
+/// of coalescing is entirely in what does NOT appear afterwards — no
+/// second message row, no second intent, no second effect — and only a
+/// real cell has those tables to check.
+#[tokio::test]
+async fn the_same_message_twice_is_one_turn() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    let (status, first) =
+        post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
+    assert_eq!(status, StatusCode::OK);
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert!(first["coalesced"].is_null(), "the first send is not a duplicate");
+    assert!(!first["reply"].as_str().unwrap().is_empty());
+
+    // the double-tap, immediately after
+    let (status, second) =
+        post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
+    assert_eq!(status, StatusCode::OK, "a duplicate is not an error: {second}");
+    let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(second["coalesced"], true, "{second}");
+    assert_eq!(
+        second["reply"].as_str().unwrap_or(""),
+        "",
+        "a coalesced send must not answer a second time"
+    );
+
+    // the intent it names is REAL -- its receipt resolves. A claim that
+    // pointed at an id no journal row carried would be a dangling
+    // reference dressed up as provenance.
+    let into = second["intent"].as_str().expect("the turn it merged into");
+    let (status, receipt) = get(&t.router, &format!("/api/receipt/{into}"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "the coalesced intent has no receipt: {receipt}");
+
+    // and the transcript holds ONE question and ONE answer, not two
+    let (_, body) = get(&t.router, "/api/history?after=0", Some(&cookie)).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let asked = rows
+        .iter()
+        .filter(|r| r["direction"] == "in" && r["content"] == "what time is it?")
+        .count();
+    assert_eq!(asked, 1, "the duplicate left a second bubble in the transcript");
+    let answered = rows.iter().filter(|r| r["direction"] == "out").count();
+    assert_eq!(answered, 1, "the robot answered twice");
+}
+
+/// The same words later are a person repeating themselves, and get their
+/// own turn. Coalescing that would be losing a message, which is worse
+/// than answering twice.
+#[tokio::test]
+async fn the_same_message_after_the_window_is_answered_again() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(
+        prism::coalesce::WINDOW_MS as u64 + 100,
+    ))
+    .await;
+    let (status, again) =
+        post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
+    assert_eq!(status, StatusCode::OK);
+    let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert!(
+        again["coalesced"].is_null(),
+        "past the window this is a question, not a duplicate: {again}"
+    );
+    assert!(!again["reply"].as_str().unwrap().is_empty());
+}
+
+/// Different messages sent back to back must both be answered -- the
+/// failure mode that would make coalescing worse than not having it.
+#[tokio::test]
+async fn a_fast_conversation_is_never_coalesced() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    for text in ["what time is it?", "help", "my facts"] {
+        let (status, body) = post_json(&t.router, "/api/message", &cookie, &say(text)).await;
+        assert_eq!(status, StatusCode::OK);
+        let out: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(out["coalesced"].is_null(), "'{text}' was swallowed: {body}");
+        assert!(!out["reply"].as_str().unwrap().is_empty(), "'{text}' went unanswered");
+    }
+}
+
+/// The real shape of a double send: both requests in flight at once.
+///
+/// The sequential test above cannot catch a check-then-write race, because
+/// the first turn has already finished by the time the second starts. A
+/// double-tap does not work like that — the second request arrives while
+/// the first is still running, which is exactly the interleaving that
+/// makes an unguarded "SELECT then INSERT" produce two turns.
+#[tokio::test]
+async fn two_simultaneous_sends_still_produce_one_turn() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    let body = say("what time is it?");
+    let (a, b) = tokio::join!(
+        post_json(&t.router, "/api/message", &cookie, &body),
+        post_json(&t.router, "/api/message", &cookie, &body),
+    );
+    assert_eq!(a.0, StatusCode::OK);
+    assert_eq!(b.0, StatusCode::OK);
+    let a: serde_json::Value = serde_json::from_str(&a.1).unwrap();
+    let b: serde_json::Value = serde_json::from_str(&b.1).unwrap();
+
+    // exactly one of them is the turn; exactly one is the duplicate. Which
+    // one wins is genuinely a race and must not be asserted.
+    let coalesced = [&a, &b].iter().filter(|r| r["coalesced"] == true).count();
+    assert_eq!(coalesced, 1, "both or neither were coalesced: {a} / {b}");
+    let answered = [&a, &b]
+        .iter()
+        .filter(|r| !r["reply"].as_str().unwrap_or("").is_empty())
+        .count();
+    assert_eq!(answered, 1, "the robot answered a double-tap twice: {a} / {b}");
+
+    let (_, body) = get(&t.router, "/api/history?after=0", Some(&cookie)).await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        rows.iter().filter(|r| r["direction"] == "out").count(),
+        1,
+        "two replies reached the transcript"
+    );
+}
+
+/// The coalesced response must name a turn that REALLY exists.
+///
+/// A "yes" answering a parked approval runs under the *parked* intent, not
+/// under a fresh one — that is whose receipt it is. So the claim has to be
+/// made under the parked id, which means looking it up before claiming.
+/// Doing it afterwards is not enough, and this test is the reason: the
+/// duplicate arrives while the first "yes" is still running, so it is
+/// handed whatever the claim held at that moment. Found live — the
+/// coalesced response named a turn whose receipt 404'd.
+#[tokio::test]
+async fn a_coalesced_approval_answer_names_the_parked_turn() {
+    let t = boot_test_robot_with(|cfg| {
+        cfg.policy.approval_required = vec!["memory.remember".into()];
+    });
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    post_json(
+        &t.router,
+        "/api/message",
+        &cookie,
+        &say("remember that the kettle is broken"),
+    )
+    .await;
+    let (_, body) = get(&t.router, "/api/approvals", Some(&cookie)).await;
+    let waiting: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let parked = waiting
+        .first()
+        .and_then(|a| a["intent"].as_str())
+        .expect("an approval should be parked")
+        .to_string();
+
+    // double-tapped "yes", both in flight
+    let yes = say("yes");
+    let (a, b) = tokio::join!(
+        post_json(&t.router, "/api/message", &cookie, &yes),
+        post_json(&t.router, "/api/message", &cookie, &yes),
+    );
+    let a: serde_json::Value = serde_json::from_str(&a.1).unwrap();
+    let b: serde_json::Value = serde_json::from_str(&b.1).unwrap();
+    let both = [a, b];
+    let coalesced = both
+        .iter()
+        .find(|r| r["coalesced"] == true)
+        .expect("one of the two must have coalesced");
+
+    assert_eq!(
+        coalesced["intent"].as_str().unwrap(),
+        parked,
+        "the coalesced answer named the arrival's id rather than the \
+         parked turn's -- that id never reaches the journal"
+    );
+    // and it dereferences, which is the point of naming it at all
+    let (status, receipt) = get(
+        &t.router,
+        &format!("/api/receipt/{}", coalesced["intent"].as_str().unwrap()),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "dangling receipt reference: {receipt}");
+
+    // the approval ran once, and is closed
+    let (_, body) = get(&t.router, "/api/approvals", Some(&cookie)).await;
+    assert_eq!(body.trim(), "[]", "the approval is still open after a yes");
+    let (_, body) = get(&t.router, "/api/registry", Some(&cookie)).await;
+    let reg: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let kettles = reg["knowledge"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|k| k["value"].as_str().unwrap_or("").contains("kettle"))
+        .count();
+    assert_eq!(kettles, 1, "the approved effect ran twice");
 }

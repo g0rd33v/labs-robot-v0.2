@@ -37,6 +37,14 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
         let handle = robot.cell(principal)?;
         let cell = &handle.cell;
         let now = trust::ids::ts_ms();
+        // §4.1.6's claims are only meaningful for two seconds; anything
+        // older is a hash of something said long ago sitting in the cell
+        // for no reason. Correctness does not depend on this running --
+        // `claim` compares timestamps rather than trusting existence --
+        // so a failure here is logged, not fatal.
+        if let Err(e) = cell.with(|c| prism::coalesce::sweep(c, now)) {
+            tracing::warn!("coalescing sweep: {e}");
+        }
         // short locks only: the whole point of this lane is to observe turns
         // that are stuck, and it cannot do that while holding their cell
         let open = cell.with(prism::journal::open_intents)?;

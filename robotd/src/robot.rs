@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use surfaces::dash::DashData;
+use surfaces::Said;
 use tokio::sync::broadcast;
 use trust::boundary::{self, Crossing, Direction};
 use trust::keys::KeyChain;
@@ -566,9 +567,46 @@ impl RobotCore {
     }
 
     /// One governed turn for any principal on any surface.
-    pub fn turn(&self, principal: i64, text: String, surface: &str) -> anyhow::Result<String> {
+    pub fn turn(&self, principal: i64, text: String, surface: &str) -> anyhow::Result<Said> {
+        // The boundary log comes FIRST and is never skipped, duplicate or
+        // not: law 3 is about bytes crossing the process, and these bytes
+        // crossed it. A dedupe that hid the second arrival from the log
+        // would make the log a record of what we decided to act on rather
+        // than of what happened.
         self.boundary_crossing(Direction::In, surface, &text)?;
         let handle = self.cell(principal)?;
+
+        // §4.1.6: the same message twice inside two seconds is one turn.
+        // Claimed here -- before the message is recorded and before any
+        // intent exists -- so a duplicate leaves no second bubble in the
+        // transcript, no second intent in the journal, and no second
+        // effect in the outbox. Claiming after any of those would mean
+        // undoing them, and the journal is append-only for good reasons.
+        //
+        // The claim has to name the intent that will REALLY carry this
+        // turn, because a duplicate is handed that id and the receipt
+        // inspector will dereference it. Usually that is a fresh id. But a
+        // "yes" answering a parked approval runs under the PARKED intent
+        // -- that is whose receipt it is -- so the parked id is looked up
+        // first. Doing this afterwards was not enough: a double-tapped
+        // "yes" arrives while the first is still running, gets handed the
+        // arrival's id, and that id never reaches the journal. Verified
+        // live: the coalesced response named a turn whose receipt 404'd.
+        //
+        // `parked_answer` is a pure read of `approval::waiting`, so asking
+        // it early costs a query and changes nothing.
+        let answered_park = parked_answer(&handle.cell, &text)?;
+        let intent_id = match &answered_park {
+            Some((parked, _)) => parked.clone(),
+            None => trust::ids::new_id("int"),
+        };
+        if let prism::coalesce::Claim::Duplicate { into } = handle.cell.with(|c| {
+            prism::coalesce::claim(c, &text, &intent_id, trust::ids::ts_ms())
+        })? {
+            tracing::info!(%into, surface, "coalesced a double send");
+            return Ok(Said::Coalesced { into });
+        }
+
         let reply = {
             let cell = &handle.cell;
             let msg_id = cell.with(|c| Ok(mind::record_message(c, "in", surface, &text)))??;
@@ -698,7 +736,7 @@ impl RobotCore {
                     content: resolved,
                     ..env.clone()
                 };
-                let out = prism::run_turn(cell, &env, &deps)?;
+                let out = prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)?;
                 cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
                 cell.with(|c| {
                 Ok(mind::record_message_for(
@@ -712,14 +750,15 @@ impl RobotCore {
                 cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
                 self.boundary_crossing(Direction::Out, surface, &out.reply)?;
                 self.notify(principal);
-                return Ok(out.reply);
+                return Ok(Said::Reply(out.reply));
             }
-            let answered_park = parked_answer(cell, &env.content)?;
             let out = match &answered_park {
                 Some((intent, yes)) => prism::approval::respond(cell, intent, *yes, &deps)?
                     .map(Ok)
-                    .unwrap_or_else(|| prism::run_turn(cell, &env, &deps))?,
-                None => prism::run_turn(cell, &env, &deps)?,
+                    .unwrap_or_else(|| {
+                        prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)
+                    })?,
+                None => prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)?,
             };
             // the ledger (sec 4.5), kept by the orchestrator because prism
             // cannot depend on mind. An answered park closes its entry with
@@ -785,7 +824,7 @@ impl RobotCore {
         };
         self.boundary_crossing(Direction::Out, surface, &reply)?;
         self.notify(principal);
-        Ok(reply)
+        Ok(Said::Reply(reply))
     }
 }
 
@@ -1172,7 +1211,7 @@ impl surfaces::Robot for RobotCore {
         RobotCore::tell_owner(self, text)
     }
 
-    fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<String> {
+    fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<Said> {
         self.turn(principal, text, "chat")
     }
 
@@ -1259,7 +1298,17 @@ impl surfaces::Robot for RobotCore {
                         let answer =
                             self.turn(principal, transcript.clone(), "chat")?;
                         transcribed = true;
-                        format!("heard your voice note: \"{transcript}\"\n\n{answer}")
+                        match answer {
+                            Said::Reply(a) => {
+                                format!("heard your voice note: \"{transcript}\"\n\n{a}")
+                            }
+                            // two identical notes in two seconds: say what
+                            // was heard, but do not answer it twice
+                            Said::Coalesced { .. } => format!(
+                                "heard your voice note: \"{transcript}\"\n\n\
+                                 (you just sent that -- the answer above covers it)"
+                            ),
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("stt failed: {e}");

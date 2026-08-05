@@ -339,7 +339,9 @@ mod tests {
             .state
             .robot
             .handle_message(owner, "what time is it?".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(reply.contains("it's"), "floor time answer expected: {reply}");
 
         // cells are opaque on disk
@@ -383,7 +385,9 @@ mod tests {
             .state
             .robot
             .handle_message(owner, "invite".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(invite_reply.contains("/i/"), "{invite_reply}");
         let token = invite_reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
         let (member, name) = boot.state.robot.accept_invite(&token).unwrap();
@@ -402,7 +406,9 @@ mod tests {
             .state
             .robot
             .handle_message(member, "what do you remember".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(
             !member_recall.contains("4242"),
             "cell isolation broken: {member_recall}"
@@ -430,7 +436,13 @@ mod tests {
         let boot = bootstrap(&cfg).unwrap();
         let owner = boot.robot.owner_principal;
 
-        let reply = boot.state.robot.handle_message(owner, "invite".into()).unwrap();
+        let reply = boot
+            .state
+            .robot
+            .handle_message(owner, "invite".into())
+            .unwrap()
+            .text()
+            .to_string();
         let token = reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
         let (member, _) = boot.state.robot.accept_invite(&token).unwrap();
         boot.state
@@ -514,7 +526,9 @@ mod tests {
             .state
             .robot
             .handle_message(owner, "invite".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(reply.contains("/i/"), "{reply}");
         let token = reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
         let (member, _) = boot.state.robot.accept_invite(&token).unwrap();
@@ -532,7 +546,9 @@ mod tests {
             .state
             .robot
             .handle_message(member, "invite".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(
             reply.contains("only the owner"),
             "member should be refused: {reply}"
@@ -548,7 +564,9 @@ mod tests {
             .state
             .robot
             .handle_message(member, "telegram code".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(reply.contains("only the owner"), "{reply}");
         {
             let core = boot.robot.core.lock().unwrap();
@@ -561,7 +579,9 @@ mod tests {
             .state
             .robot
             .handle_message(owner, "telegram code".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(reply.contains("bind code"), "{reply}");
 
         let _ = std::fs::remove_dir_all(&dir);

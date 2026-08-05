@@ -187,7 +187,9 @@ mod tests {
             .state
             .robot
             .handle_message(owner2, "what do you remember".into())
-            .unwrap();
+            .unwrap()
+            .text()
+            .to_string();
         assert!(reply.contains("package test ran"), "{reply}");
 
         // restoring over an existing robot requires --force and keeps the old

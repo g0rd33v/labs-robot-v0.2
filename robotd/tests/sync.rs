@@ -83,7 +83,12 @@ fn two_instances() -> (PathBuf, RobotConfig, RobotConfig) {
 fn say(cfg: &RobotConfig, text: &str) -> String {
     let boot = robotd::boot::bootstrap(cfg).unwrap();
     let owner = boot.robot.owner_principal;
-    boot.state.robot.handle_message(owner, text.into()).unwrap()
+    boot.state
+        .robot
+        .handle_message(owner, text.into())
+        .unwrap()
+        .text()
+        .to_string()
 }
 
 fn sync(from: &RobotConfig, peer: &Path) -> robotd::sync::SyncReport {

@@ -76,8 +76,15 @@ fn process(robot: &RobotCore, tg: &hub::Telegram, u: &hub::TgUpdate) -> anyhow::
 
     if bound_chat == Some(u.chat_id) {
         // the owner's bound chat: a normal governed turn on the telegram surface
-        let reply = robot.turn(robot.owner_principal, u.text.clone(), "telegram")?;
-        tg.send_message(u.chat_id, &reply)?;
+        // Telegram redelivers on its own schedule, so the coalescing
+        // window earns its keep here: a redelivered update must not
+        // produce a second answer in the person's phone.
+        match robot.turn(robot.owner_principal, u.text.clone(), "telegram")? {
+            surfaces::Said::Reply(reply) => tg.send_message(u.chat_id, &reply)?,
+            surfaces::Said::Coalesced { into } => {
+                tracing::info!(%into, "telegram double send coalesced; sending nothing");
+            }
+        }
         return Ok(());
     }
 

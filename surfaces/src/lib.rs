@@ -28,8 +28,45 @@ pub use dash::DashData;
 
 /// The surface's view of the Robot. Every method is principal-scoped:
 /// cell isolation (law #2) starts at this boundary.
+/// What a turn produced.
+///
+/// A message that merged into an identical one already in flight (spec
+/// §4.1.6) has no reply of its own: the first turn's answer is the answer
+/// to both, and speaking twice is precisely the defect coalescing exists
+/// to prevent. Every surface therefore has to decide what silence looks
+/// like for it -- the chat renders nothing, Telegram sends nothing --
+/// which is why this is a type rather than an empty string each caller
+/// would have to remember to check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Said {
+    Reply(String),
+    /// Merged into `into`, an identical message inside the two-second
+    /// window. That turn's receipt covers both arrivals.
+    Coalesced { into: String },
+}
+
+impl std::fmt::Display for Said {
+    /// A coalesced turn displays as nothing, which is what it contributed
+    /// to the conversation.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
+impl Said {
+    /// The words to show, if any. Empty for a coalesced message -- which
+    /// is the correct thing to append to a transcript for a message that
+    /// was never a separate turn.
+    pub fn text(&self) -> &str {
+        match self {
+            Said::Reply(t) => t,
+            Said::Coalesced { .. } => "",
+        }
+    }
+}
+
 pub trait Robot: Send + Sync {
-    fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<String>;
+    fn handle_message(&self, principal: i64, text: String) -> anyhow::Result<Said>;
     fn handle_media(
         &self,
         principal: i64,
@@ -576,6 +613,15 @@ struct MsgIn {
 #[derive(serde::Serialize)]
 struct MsgOut {
     reply: String,
+    /// Set when this message merged into an identical one (§4.1.6). The
+    /// reply is empty and the surface must render nothing: the turn it
+    /// merged into is already answering, on the same screen.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    coalesced: bool,
+    /// The turn that covers this arrival, so the transcript can still
+    /// offer its receipt.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    intent: String,
 }
 
 async fn api_message(
@@ -588,7 +634,20 @@ async fn api_message(
     };
     let robot = st.robot.clone();
     match tokio::task::spawn_blocking(move || robot.handle_message(principal, msg.text)).await {
-        Ok(Ok(reply)) => Json(MsgOut { reply }).into_response(),
+        Ok(Ok(Said::Reply(reply))) => Json(MsgOut {
+            reply,
+            coalesced: false,
+            intent: String::new(),
+        })
+        .into_response(),
+        // 200, not an error: nothing went wrong. The message was heard,
+        // and the answer is the one already on its way.
+        Ok(Ok(Said::Coalesced { into })) => Json(MsgOut {
+            reply: String::new(),
+            coalesced: true,
+            intent: into,
+        })
+        .into_response(),
         Ok(Err(e)) => {
             tracing::error!("turn failed: {e:#}");
             (StatusCode::INTERNAL_SERVER_ERROR, "turn failed").into_response()
@@ -664,7 +723,12 @@ async fn api_upload(
     })
     .await
     {
-        Ok(Ok(reply)) => Json(MsgOut { reply }).into_response(),
+        Ok(Ok(reply)) => Json(MsgOut {
+            reply,
+            coalesced: false,
+            intent: String::new(),
+        })
+        .into_response(),
         Ok(Err(e)) => {
             tracing::error!("upload failed: {e:#}");
             (StatusCode::INTERNAL_SERVER_ERROR, "upload failed").into_response()
@@ -795,8 +859,13 @@ mod tests {
             Ok("ok".into())
         }
 
-        fn handle_message(&self, p: i64, t: String) -> anyhow::Result<String> {
-            Ok(format!("echo[{p}]: {t}"))
+        fn handle_message(&self, p: i64, t: String) -> anyhow::Result<Said> {
+            // the double sends the real coalescing contract, so the HTTP
+            // shape can be asserted without a real robot behind it
+            if t == "again" {
+                return Ok(Said::Coalesced { into: "int_first".into() });
+            }
+            Ok(Said::Reply(format!("echo[{p}]: {t}")))
         }
         fn handle_media(&self, p: i64, name: String, bytes: Vec<u8>) -> anyhow::Result<String> {
             Ok(format!("stored[{p}]: {name} ({} bytes)", bytes.len()))
