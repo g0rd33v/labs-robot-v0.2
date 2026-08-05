@@ -37,6 +37,157 @@ fn parse_fire_at(raw: &str) -> Result<i64, String> {
     Ok(ms)
 }
 
+/// The pending clarify, in `cell_meta` under one key: at most one time
+/// question is open at a time, because two would make "2" ambiguous --
+/// which is the exact failure this feature exists to prevent.
+pub const CLARIFY_KEY: &str = "reminder:clarify";
+/// A question nobody answers should not answer itself later. Ten minutes
+/// matches the confirmation gate; past that the person has moved on.
+pub const CLARIFY_TTL_MS: i64 = 10 * 60_000;
+
+/// R4.3.1: ask, with options, and never guess.
+pub struct Clarify;
+
+impl Capability for Clarify {
+    fn name(&self) -> &'static str {
+        "reminder.clarify"
+    }
+    fn effect(&self) -> Effect {
+        Effect::Read
+    }
+    fn description(&self) -> &'static str {
+        "Ask which exact time the person meant, when they gave a vague one \
+         (\"in the morning\", \"this evening\", \"at lunch\"). Offer two or \
+         three concrete times and let them pick. Use this INSTEAD of \
+         choosing an hour yourself -- a reminder at a time they did not ask \
+         for is worse than a question."
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "about": {
+                    "type": "string",
+                    "description": "What to be reminded of, in their own words."
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": { "type": "string", "description": "e.g. 09:00" },
+                            "at_ms": { "type": "integer", "description": "epoch ms" }
+                        },
+                        "required": ["label", "at_ms"],
+                        "additionalProperties": false
+                    },
+                    "description": "Two or three concrete times, soonest first."
+                }
+            },
+            "required": ["about", "options"],
+            "additionalProperties": false
+        })
+    }
+    fn validate(&self, args: &serde_json::Value) -> Result<(), String> {
+        let about = args["about"].as_str().unwrap_or_default();
+        if about.trim().is_empty() {
+            return Err("clarify what, exactly?".into());
+        }
+        let opts = args["options"].as_array().ok_or("options must be a list")?;
+        if !(2..=3).contains(&opts.len()) {
+            return Err("offer two or three options -- a list is not a choice".into());
+        }
+        for o in opts {
+            if o["at_ms"].as_i64().unwrap_or(0) <= 0 {
+                return Err("each option needs a real timestamp".into());
+            }
+        }
+        Ok(())
+    }
+    fn execute(&self, ctx: &Ctx<'_>, args: &serde_json::Value) -> Result<Outcome, PrismError> {
+        let about = args["about"].as_str().unwrap_or_default().to_string();
+        let options = args["options"].clone();
+        let parked = serde_json::json!({
+            "about": about,
+            "options": options,
+            "asked_at": trust::ids::ts_ms(),
+        });
+        ctx.cell.with(|c| {
+            c.execute(
+                "INSERT INTO cell_meta(key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![CLARIFY_KEY, parked.to_string()],
+            )
+            .map_err(mind_err)
+        })?;
+        attested(
+            note_evidence("reminder.clarify"),
+            format!("asked which time was meant for: {about}"),
+            Rendering::new(
+                "clarify_time",
+                serde_json::json!({ "about": about, "options": options }),
+            ),
+        )
+    }
+}
+
+/// The answer to an open time question, if this message is one.
+///
+/// Deliberately narrow: a bare number, or a bare time label. Anything
+/// wordier is a new message, not an answer -- a person who typed a
+/// sentence is talking, and treating that as a pick would set a reminder
+/// they never chose.
+pub fn clarify_answer(cell: &prism::Cell, text: &str) -> Option<(String, i64)> {
+    let parked: String = cell
+        .with(|c| {
+            Ok(c.query_row(
+                "SELECT value FROM cell_meta WHERE key = ?1",
+                rusqlite::params![CLARIFY_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .ok())
+        })
+        .ok()
+        .flatten()?;
+    let v: serde_json::Value = serde_json::from_str(&parked).ok()?;
+    let asked_at = v["asked_at"].as_i64().unwrap_or(0);
+    if trust::ids::ts_ms() - asked_at > CLARIFY_TTL_MS {
+        return None;
+    }
+    let options = v["options"].as_array()?;
+    let about = v["about"].as_str()?.to_string();
+    let t = text.trim().trim_end_matches(['.', '!']).trim();
+
+    // "2" -- the universal answer, in any language
+    if let Ok(n) = t.parse::<usize>() {
+        if n >= 1 && n <= options.len() {
+            return options[n - 1]["at_ms"].as_i64().map(|at| (about, at));
+        }
+    }
+    // or the label itself: "09:00", "9:00"
+    for o in options {
+        if let Some(label) = o["label"].as_str() {
+            if t == label || t.trim_start_matches('0') == label.trim_start_matches('0') {
+                return o["at_ms"].as_i64().map(|at| (about, at));
+            }
+        }
+    }
+    None
+}
+
+/// Clear the open question -- answered, or overtaken by events.
+pub fn clear_clarify(cell: &prism::Cell) {
+    let _ = cell.with(|c| {
+        c.execute(
+            "DELETE FROM cell_meta WHERE key = ?1",
+            rusqlite::params![CLARIFY_KEY],
+        )
+        .map_err(mind_err)
+    });
+}
+
 pub struct Create;
 
 impl Capability for Create {

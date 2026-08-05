@@ -53,9 +53,13 @@ pub fn remember(
     intent_id: &str,
     embedding: Option<&[f32]>,
 ) -> Result<Fact, MindError> {
+    // Enters TENTATIVE, not stable (Q21). A fact said once in passing is
+    // not a fact confirmed -- landing everything at `stable` made "you told
+    // me X" a claim about firmness the store could not support. The ladder
+    // below decides where it actually belongs.
     conn.execute(
         "INSERT OR IGNORE INTO facts(id, content, source_msg_id, intent_id, status, confidence, created_at) \
-         VALUES (?1, ?2, ?3, ?4, 'stable', 1.0, ?5)",
+         VALUES (?1, ?2, ?3, ?4, 'tentative', 0.5, ?5)",
         params![
             trust::ids::new_id("fact"),
             content,
@@ -72,6 +76,17 @@ pub fn remember(
     if let Some(emb) = embedding {
         upsert_embedding(conn, &fact.id, emb)?;
     }
+    // `memory.remember` is reached when the person SAYS something about
+    // themselves, so this is an explicit owner statement -- Q21's
+    // tentative→contextual trigger. Extraction from documents will call
+    // this with `false` when it exists.
+    crate::promotion::place(conn, &fact.id, content, true)?;
+    // re-read: the row moved
+    let fact: Fact = conn.query_row(
+        &format!("SELECT {COLS} FROM facts WHERE id = ?1"),
+        params![fact.id],
+        row_to_fact,
+    )?;
     Ok(fact)
 }
 

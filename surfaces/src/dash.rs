@@ -15,6 +15,12 @@ pub struct DashData {
     pub cast_verdict: String,
     /// (id, kind, display_name, status)
     pub principals: Vec<(i64, String, String, String)>,
+    /// Spend today vs the cap (§4.7.3.3): USD spent, ultra calls used, cap.
+    pub spend_today_usd: f64,
+    pub ultra_used_today: u32,
+    pub ultra_cap: u32,
+    /// Live contradictions (Q21): (a, b) contents
+    pub contested: Vec<(String, String)>,
     pub message_count: i64,
     pub fact_count: i64,
     pub active_reminders: i64,
@@ -287,8 +293,10 @@ pub fn render(d: &DashData) -> String {
   <div class=card><span class=lbl>messages</span><b>{msgs}</b></div>
   <div class=card><span class=lbl>facts</span><b>{facts_n}</b></div>
   <div class=card><span class=lbl>active reminders</span><b>{rems}</b></div>
+  <div class=card><span class=lbl>spend today</span><b>${spend:.4}</b><span class=dim>{ultra_line}</span></div>
   <div class=card><span class=lbl>boundary crossings</span><b>{bnd}</b><span class=dim>{chain}</span></div>
 </div>
+{contested_block}
 
 <h2>people</h2>
 <table><tr><th>id</th><th>role</th><th>name</th><th>status</th></tr>{principals}</table>
@@ -346,6 +354,28 @@ is gone, by design.</p>
         msgs = d.message_count,
         facts_n = d.fact_count,
         rems = d.active_reminders,
+        spend = d.spend_today_usd,
+        ultra_line = if d.ultra_cap == 0 {
+            "ultra disabled".to_string()
+        } else {
+            format!("ultra {}/{} today", d.ultra_used_today, d.ultra_cap)
+        },
+        contested_block = if d.contested.is_empty() {
+            String::new()
+        } else {
+            let rows: String = d
+                .contested
+                .iter()
+                .map(|(a, b)| {
+                    format!("<tr><td>{}</td><td>{}</td></tr>", esc(a), esc(b))
+                })
+                .collect();
+            format!(
+                "<h2>conflicting -- pick one</h2><p class=dim>both are kept; \
+                 answers prefer the newest and hedge until you resolve it.</p>\
+                 <table><tr><th>one</th><th>the other</th></tr>{rows}</table>"
+            )
+        },
         bnd = d.boundary_count,
         chain = if d.boundary_chain_ok {
             "<span class=ok>chain verified</span>"

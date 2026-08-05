@@ -195,14 +195,20 @@ Ranked by distance from a promise the spec makes to a user's face.
    chat command and an owner-only panel.
 4. **Member removal + crypto-shred (§4.2.3.4, §5.3)** — a promised right
    with no way to exercise it.
-5. **Fact promotion ladder and `contested` (§5.2, R4.2.2)** — the mutation
-   protocol is half-built; contradictions are not surfaced.
-6. **Effect retry backoff (§5.2)** — 1 s/5 s/25 s, absent.
-7. **Overdue marker on late reminders (§4.3.3.3)**.
-8. **Clarify-with-options for ambiguous times (R4.3.1)**.
-9. **Spend vs cap on Overview (§4.7.3.3)**.
+5. ~~Fact promotion ladder and `contested`~~ ✅ **done** — Q21's exact
+   thresholds in `mind::promotion`; facts enter `tentative`; contradictions
+   keep both and surface on the dashboard as "conflicting — pick one".
+6. ~~Effect retry backoff~~ ✅ **done** — 1 s/5 s/25 s then given up
+   visibly, in `prism::outbox`.
+7. ~~Overdue marker~~ ✅ **done** — a late reminder says how late and that
+   the robot was down.
+8. ~~Clarify-with-options~~ ✅ **done** — "in the morning" asks with two or
+   three numbered times and never guesses; the answer is a number, so it
+   works in any language.
+9. ~~Spend vs cap on Overview~~ ✅ **done** — spend today and ultra usage
+   against the cap.
 10. **Double-send coalescing (§4.1.6)**; **resumable `package`
-    (§4.8.3.1)**; **accessibility pass (§8.3)**.
+    (§4.8.3.1)**; **accessibility pass (§8.3)** — still open.
 
 Items 2, 3 and 4 are one coherent piece of work: **the member-facing
 surface of the governance the runtime already enforces.** That is the

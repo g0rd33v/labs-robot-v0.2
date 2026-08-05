@@ -11,6 +11,7 @@ pub mod facts;
 pub mod instructions;
 pub mod files;
 pub mod merge;
+pub mod promotion;
 pub mod reminders;
 pub mod vault;
 
@@ -184,6 +185,15 @@ CREATE TABLE IF NOT EXISTS commitments (
     closed_why    TEXT,
     CHECK (closed_at IS NULL OR closed_why IS NOT NULL),
     CHECK ((status IN ('open','waiting')) = (closed_at IS NULL))
+);
+-- Contradictions (Q21): a contested fact is still tentative or stable, so
+-- the contradiction is a RELATIONSHIP and cannot live in a status column.
+-- Both facts survive; this records that they disagree.
+CREATE TABLE IF NOT EXISTS fact_contests (
+    fact_a     TEXT NOT NULL REFERENCES facts(id),
+    fact_b     TEXT NOT NULL REFERENCES facts(id),
+    noticed_at INTEGER NOT NULL,
+    PRIMARY KEY (fact_a, fact_b)
 );
 CREATE TABLE IF NOT EXISTS tombstones (
     id         TEXT PRIMARY KEY,

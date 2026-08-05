@@ -44,13 +44,26 @@ fn fire_due_for(robot: &RobotCore, principal: i64) -> anyhow::Result<usize> {
         voice: crate::robot::cell_voice(cell),
     };
     for rem in due {
+        // Spec 4.3.3.3: a reminder the robot was down for fires immediately
+        // AND SAYS SO. Without the marker a late reminder is
+        // indistinguishable from an on-time one, which quietly turns "at
+        // 8am" into "whenever the robot noticed" -- and the person plans
+        // around the wrong one. Sixty seconds of slack absorbs ordinary
+        // tick latency; beyond that it was genuinely late.
+        let late_by = now - rem.fire_at;
+        let overdue = late_by > 60_000;
+        let id = if overdue { "reminder_fired_overdue" } else { "reminder_fired" };
         // a reminder firing at 03:00 speaks the language its person uses
         let text = prism::lifecycle::Renderer::render(
             &speak,
             &lang,
             &[prism::types::ReplyPart::Say(prism::types::Rendering::new(
-                "reminder_fired",
-                serde_json::json!({ "about": rem.about }),
+                id,
+                serde_json::json!({
+                    "about": rem.about,
+                    "was_due_ms": rem.fire_at,
+                    "late_minutes": late_by / 60_000,
+                }),
             ))],
             &[],
         )

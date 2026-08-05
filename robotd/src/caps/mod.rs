@@ -419,6 +419,7 @@ fn all_capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(basics::About),
         Box::new(basics::Help),
         Box::new(reminders::Create),
+        Box::new(reminders::Clarify),
         Box::new(reminders::List),
         Box::new(reminders::CancelLast),
         Box::new(memory::Remember),

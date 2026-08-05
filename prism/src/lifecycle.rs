@@ -689,6 +689,17 @@ pub(crate) fn plan_from_decision(intent_id: &str, decision: &Decision, content: 
             FloorMatch::ConnectStatus => {
                 vec![step("connect.status", serde_json::json!({}), Effect::Read)]
             }
+            FloorMatch::ClarifyTime { about, options } => vec![step(
+                "reminder.clarify",
+                serde_json::json!({
+                    "about": about,
+                    "options": options
+                        .iter()
+                        .map(|(l, t)| serde_json::json!({ "label": l, "at_ms": t }))
+                        .collect::<Vec<_>>(),
+                }),
+                Effect::Read,
+            )],
             FloorMatch::RegistryShow => {
                 vec![step("registry.show", serde_json::json!({}), Effect::Read)]
             }

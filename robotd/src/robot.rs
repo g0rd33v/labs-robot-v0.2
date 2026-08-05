@@ -516,6 +516,27 @@ impl RobotCore {
             // likely the answer to it. Checked BEFORE routing, because a
             // model asked to interpret "yes" with no idea a question is
             // open will happily interpret it as something else.
+            // R4.3.1: an open time question is answered before anything
+            // else looks at the message -- "2" means the second option,
+            // and a router asked to interpret it with no idea a question
+            // is open will read it as something else entirely.
+            if let Some((about, at_ms)) = crate::caps::reminders::clarify_answer(cell, &env.content)
+            {
+                crate::caps::reminders::clear_clarify(cell);
+                let resolved = format!("remind me at {} {about}", prism::lifecycle::rfc3339(at_ms));
+                tracing::debug!("clarify answered -> {resolved}");
+                let env = Envelope {
+                    content: resolved,
+                    ..env.clone()
+                };
+                let out = prism::run_turn(cell, &env, &deps)?;
+                cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
+                cell.with(|c| Ok(mind::record_message(c, "out", surface, &out.reply)))??;
+                cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
+                self.boundary_crossing(Direction::Out, surface, &out.reply)?;
+                self.notify(principal);
+                return Ok(out.reply);
+            }
             let answered_park = parked_answer(cell, &env.content)?;
             let out = match &answered_park {
                 Some((intent, yes)) => prism::approval::respond(cell, intent, *yes, &deps)?
@@ -926,7 +947,27 @@ impl surfaces::Robot for RobotCore {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
+            // spec 4.7.3.3: spend today vs the cap, on Overview. The meter
+            // has had the number since the cost tranche; Overview simply
+            // never asked it.
+            let midnight = {
+                use chrono::{Local, TimeZone};
+                let now = Local::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|d| Local.from_local_datetime(&d).earliest())
+                    .map(|d| d.timestamp_millis())
+                    .unwrap_or(day_ago)
+            };
+            d.spend_today_usd = core
+                .query_row(
+                    "SELECT coalesce(sum(cost_usd), 0.0) FROM model_calls WHERE ts > ?1",
+                    params![midnight],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0.0);
         }
+        d.ultra_cap = self.ultra_daily_cap;
         d.instance_id = self.instance_id.clone();
         d.version = env!("CARGO_PKG_VERSION").into();
         // panel 7: connector states, described without a single secret
@@ -1046,6 +1087,23 @@ impl surfaces::Robot for RobotCore {
                 d.standing_rules = mind::instructions::active(c)
                     .map(|v| v.len() as i64)
                     .unwrap_or(0);
+                // the ultra counter lives per-day in cell_meta (Q18)
+                let key = format!("ultra:{}", chrono::Local::now().format("%Y-%m-%d"));
+                d.ultra_used_today = c
+                    .query_row(
+                        "SELECT value FROM cell_meta WHERE key = ?1",
+                        params![key],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                // Q21's third clause, surfaced: "conflicting -- pick one"
+                d.contested = mind::promotion::contests(c)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, a, _, b)| (a, b))
+                    .collect();
                 Ok(())
             })?;
         }

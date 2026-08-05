@@ -182,9 +182,42 @@ pub fn english(r: &Rendering) -> String {
             format!("your reminders:\n{}", lines.join("\n"))
         }
         "reminder_list_empty" => "no active reminders.".into(),
+        // R4.3.1: ask, never guess. Numbered so the answer is one
+        // character and needs no language.
+        "clarify_time" => {
+            let opts: Vec<String> = a["options"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .map(|(i, o)| format!("{}. {}", i + 1, s(o, "label")))
+                .collect();
+            format!(
+                "when exactly? for \"{}\":\n{}\n(reply with the number, or give \
+                 me an exact time)",
+                s(a, "about"),
+                opts.join("\n")
+            )
+        }
         "reminder_cancelled" => format!("cancelled: {}", s(a, "about")),
         "reminder_nothing_to_cancel" => "nothing to cancel -- no active reminders.".into(),
         "reminder_fired" => format!("⏰ reminder: {}", s(a, "about")),
+        // late, and saying so: the person planned around the time they
+        // asked for, and needs to know this is not it
+        "reminder_fired_overdue" => {
+            let mins = n(a, "late_minutes");
+            let how_late = if mins >= 120 {
+                format!("{} hours late", mins / 60)
+            } else {
+                format!("{mins} minutes late")
+            };
+            format!(
+                "⏰ reminder (overdue -- {how_late}, i was down when it was due at {}): {}",
+                when(n(a, "was_due_ms")),
+                s(a, "about")
+            )
+        }
 
         // ---- memory ----
         "remembered" => format!(

@@ -25,6 +25,13 @@ pub enum FloorMatch {
     SelfMeta,
     Help,
     Remind { fire_at_ms: i64, about: String },
+    /// R4.3.1: the time was vague, so the robot asks rather than guesses.
+    /// The options are resolved instants; the person answers with a number.
+    ClarifyTime {
+        about: String,
+        /// (label a person reads, the instant it means)
+        options: Vec<(String, i64)>,
+    },
     ListReminders,
     CancelReminder,
     Remember { content: String },
@@ -127,6 +134,25 @@ const SEARCH: [(&str, usize); 6] = [
 const FILLER: [&str; 4] = ["to", "that", "about", "for"];
 const MINUTES: [&str; 4] = ["minute", "minutes", "min", "mins"];
 const HOURS: [&str; 3] = ["hour", "hours", "h"];
+
+/// Vague times, and the two or three hours a person actually means by them
+/// (R4.3.1: *never guess silently*). English only, like the rest of the
+/// floor -- other languages reach the same clarify through the model, and
+/// the ANSWER is a number, which needs no language at all.
+///
+/// The windows are deliberately narrow and conventional. The point is not
+/// to be right about what "evening" means to everyone; it is to make the
+/// robot ask instead of picking, and to make answering one tap of work.
+const VAGUE: [(&str, [u32; 3]); 8] = [
+    ("morning", [8, 9, 10]),
+    ("afternoon", [14, 15, 16]),
+    ("evening", [18, 19, 20]),
+    ("tonight", [20, 21, 22]),
+    ("night", [20, 21, 22]),
+    ("lunch", [12, 13, 13]),
+    ("lunchtime", [12, 13, 13]),
+    ("breakfast", [7, 8, 9]),
+];
 
 /// Longest matching head, or none.
 fn head(table: &[(&str, usize)], joined: &str) -> Option<usize> {
@@ -259,6 +285,14 @@ fn parse_reminder(
         i += 1;
     }
 
+    // R4.3.1 FIRST: "in the morning" would otherwise die trying to parse
+    // "the" as a number and return None through `?`, never reaching the
+    // clarify below. A vague marker is unambiguous -- no exact form
+    // contains one -- so testing it first costs nothing and misses nothing.
+    if let Some(clarify) = vague_time(lower, original, i, now) {
+        return Some(clarify);
+    }
+
     let marker = lower.get(i)?.as_str();
 
     // relative: "in 10 minutes X"
@@ -309,7 +343,76 @@ fn parse_reminder(
             about,
         });
     }
+
     None
+}
+
+/// "in the morning", "this evening", "at lunch" -> a clarify with options.
+fn vague_time(
+    lower: &[String],
+    original: &[&str],
+    i: usize,
+    now: DateTime<Local>,
+) -> Option<FloorMatch> {
+    // scan the remainder for a vague marker; the subject is everything else
+    let (at, hours) = lower
+        .iter()
+        .enumerate()
+        .skip(i)
+        .find_map(|(k, w)| VAGUE.iter().find(|(v, _)| v == w).map(|(_, h)| (k, *h)))?;
+
+    // The subject is THEIR WORDS (law 5), so only the time PHRASE comes
+    // out -- the marker plus the contiguous run of filler immediately
+    // before it. Filtering every occurrence of "the" turned "call the
+    // bank" into "call bank", which is a different sentence and not one
+    // they said.
+    let lead: [&str; 6] = ["in", "the", "this", "at", "tomorrow", "later"];
+    let mut cut_from = at;
+    while cut_from > i {
+        let prev = lower[cut_from - 1].trim_matches(',');
+        if lead.contains(&prev) {
+            cut_from -= 1;
+        } else {
+            break;
+        }
+    }
+    let about: String = original
+        .iter()
+        .enumerate()
+        .skip(i)
+        .filter(|(k, _)| *k < cut_from || *k > at)
+        .map(|(_, w)| *w)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let about = about
+        .trim()
+        .trim_start_matches("to ")
+        .trim_end_matches(',')
+        .trim()
+        .to_string();
+    if about.is_empty() {
+        return None;
+    }
+
+    let tomorrow = lower.iter().skip(i).any(|w| w == "tomorrow");
+    let mut options = vec![];
+    for h in hours {
+        let mut day = now.date_naive();
+        if tomorrow {
+            day = day.succ_opt()?;
+        }
+        let mut t = local_at(day, h, 0)?;
+        // a window that has already passed today means tomorrow, not
+        // "never" -- asking about a time in the past helps nobody
+        if t <= now && !tomorrow {
+            t = local_at(day.succ_opt()?, h, 0)?;
+        }
+        let label = t.format("%H:%M").to_string();
+        if !options.iter().any(|(l, _)| *l == label) {
+            options.push((label, t.timestamp_millis()));
+        }
+    }
+    (!options.is_empty()).then_some(FloorMatch::ClarifyTime { about, options })
 }
 
 /// Local wall-clock time on a given day. During a spring-forward gap the
@@ -390,6 +493,48 @@ mod tests {
         match scan("remind me at 9 to check my reminders", now()) {
             Some(FloorMatch::Remind { about, .. }) => assert_eq!(about, "check my reminders"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// R4.3.1: a vague time must ASK, with options -- never resolve to an
+    /// hour the person did not choose.
+    #[test]
+    fn a_vague_time_asks_instead_of_guessing() {
+        let now = Local.with_ymd_and_hms(2026, 8, 5, 6, 0, 0).unwrap();
+        match scan("remind me in the morning to call the bank", now) {
+            Some(FloorMatch::ClarifyTime { about, options }) => {
+                assert_eq!(about, "call the bank", "their words, minus the time");
+                assert_eq!(options.len(), 3, "two or three choices, not a lecture");
+                assert_eq!(options[0].0, "08:00");
+                assert!(options.iter().all(|(_, t)| *t > now.timestamp_millis()));
+            }
+            other => panic!("expected a clarify, got {other:?}"),
+        }
+
+        // an EXACT time is not vague and must not be interrupted
+        assert!(matches!(
+            scan("remind me at 18:30 to call the bank", now),
+            Some(FloorMatch::Remind { .. })
+        ));
+        assert!(matches!(
+            scan("remind me in 10 minutes to stretch", now),
+            Some(FloorMatch::Remind { .. })
+        ));
+    }
+
+    /// A window already past today means tomorrow -- asking about a time
+    /// in the past helps nobody.
+    #[test]
+    fn a_passed_window_offers_tomorrow() {
+        let evening = Local.with_ymd_and_hms(2026, 8, 5, 23, 0, 0).unwrap();
+        match scan("remind me in the morning to take the bins out", evening) {
+            Some(FloorMatch::ClarifyTime { options, .. }) => {
+                assert!(
+                    options.iter().all(|(_, t)| *t > evening.timestamp_millis()),
+                    "every option must be in the future"
+                );
+            }
+            other => panic!("expected a clarify, got {other:?}"),
         }
     }
 

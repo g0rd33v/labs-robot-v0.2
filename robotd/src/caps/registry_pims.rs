@@ -43,6 +43,9 @@ pub const CELL_TABLES: &[(&str, Category)] = &[
     ("facts", Category::Knowledge),
     ("reminders", Category::Knowledge),
     ("commitments", Category::Knowledge),
+    // a contradiction is a statement about two pieces of knowledge, and
+    // the Registry surfaces it as "conflicting -- pick one"
+    ("fact_contests", Category::Knowledge),
     // instructions
     ("instructions", Category::Instructions),
     // preferences: soul's dial and its history; cell_meta holds settings
