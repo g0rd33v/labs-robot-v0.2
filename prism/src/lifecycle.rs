@@ -173,6 +173,10 @@ pub struct Rendered {
     pub disclosed: Vec<String>,
 }
 
+/// Told the tool decision the moment the router commits to it. `None`
+/// means no tool -- the answer path.
+pub type EarlyObserver = dyn Fn(Option<&str>) + Sync;
+
 pub struct TurnDeps<'a> {
     pub router: &'a dyn CapabilityRouter,
     pub verdicts: &'a dyn VerdictProvider,
@@ -184,6 +188,11 @@ pub struct TurnDeps<'a> {
     /// fenced block by the layer that owns the store -- prism carries it to
     /// the router without knowing where rules live.
     pub standing: Option<String>,
+    /// Told the tool decision as soon as the router commits to it, ~2 s
+    /// before the verdict closes (sec 2c). `None` means no tool: the
+    /// answer path, and the composition layer may start answering NOW.
+    /// Prism does not act on this itself -- it has no answer to start.
+    pub on_early: Option<&'a EarlyObserver>,
 }
 
 /// Every boundary the kill-test must murder us at.
@@ -270,9 +279,18 @@ pub fn run_turn(
             //
             let tools = deps.router.describe(cell);
             let now = Local::now().to_rfc3339();
-            let routed = deps
-                .verdicts
-                .route(&env.content, &tools, &now, deps.standing.as_deref());
+            let mut announce = |tool: Option<&str>| {
+                if let Some(f) = deps.on_early {
+                    f(tool);
+                }
+            };
+            let routed = deps.verdicts.route_early(
+                &env.content,
+                &tools,
+                &now,
+                deps.standing.as_deref(),
+                &mut announce,
+            );
             let call = validate_proposal(cell, &intent_id, deps, routed.call)?;
             Decision::Verdict {
                 v: routed.verdict,

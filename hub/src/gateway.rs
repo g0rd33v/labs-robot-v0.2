@@ -531,6 +531,29 @@ impl ModelGateway {
         );
     }
 
+    /// As `chat_stream`, but the callback sees the ACCUMULATED text and may
+    /// stop caring early. Used by routing, where the only field the answer
+    /// path needs is the first one emitted -- see `hub::early`.
+    ///
+    /// The call still runs to completion: the full verdict is wanted for
+    /// the journal and for tool arguments. What changes is that someone
+    /// downstream can act on the decision ~2 s before the object closes.
+    pub fn chat_stream_watched(
+        &self,
+        role: Role,
+        messages: &[Msg],
+        max_tokens: u32,
+        temperature: f32,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<ChatOut, HubError> {
+        let mut acc = String::new();
+        let mut relay = |delta: &str| {
+            acc.push_str(delta);
+            on_partial(&acc);
+        };
+        self.chat_stream(role, messages, max_tokens, temperature, &mut relay)
+    }
+
     /// Streaming chat (sec 2c #1): tokens reach `on_token` as they arrive,
     /// and time-to-first-token is finally a number rather than a promise.
     ///

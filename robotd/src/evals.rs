@@ -210,10 +210,13 @@ fn eval_multilingual(
     // budget, printed so the residue stays visible.
     route_ms.sort_unstable();
     let (p50, p95) = (pct(&route_ms, 0.50), pct(&route_ms, 0.95));
-    let speed_ok = p50 <= 3_500 && p95 <= 6_000;
+    // ratcheted 2026-08-05 after the early-decision router: measured
+    // p50 1080 / p95 3204, so the gate sits just above and the sec 2c
+    // budget is now the ceiling rather than the aspiration
+    let speed_ok = p50 <= 1_800 && p95 <= 4_500;
     println!(
         "[routing speed] p50 {p50}ms, p95 {p95}ms over {} calls \
-         (gate: p50 <= 3500, p95 <= 6000 = sec 2c budget) {}",
+         (gate: p50 <= 1800, p95 <= 4500; sec 2c budget 3000/6000 MET) {}",
         route_ms.len(),
         if speed_ok { "" } else { "FAIL" }
     );
@@ -252,6 +255,7 @@ fn eval_speed_live(gw: std::sync::Arc<hub::ModelGateway>) -> anyhow::Result<(i32
         renderer: &speak,
         crash: None,
         standing: None,
+        on_early: None,
     };
     let questions = [
         "what is the capital of france?",
@@ -282,11 +286,12 @@ fn eval_speed_live(gw: std::sync::Arc<hub::ModelGateway>) -> anyhow::Result<(i32
     // approach but cannot reliably beat. Gate at 4500 (regression floor),
     // budget printed; the residue closes when the verdict/answer calls
     // overlap speculatively.
-    let pass = p50 <= 4_500;
+    // 2749ms measured: sec 2c's 3000ms budget is MET, so the budget is
+    // the gate now -- no more ratchet, no more asterisk
+    let pass = p50 <= 3_000;
     println!(
-        "\n[turn speed] full answer turn: p50 {p50}ms (gate: <= 4500; \
-         sec 2c budget 3000, measured 115ms over) p95 {p95}ms ({} samples, \
-         reported){}",
+        "\n[turn speed] full answer turn: p50 {p50}ms (gate: <= 3000 = \
+         sec 2c budget, MET) p95 {p95}ms ({} samples, reported){}",
         ms.len(),
         if pass { "" } else { " FAIL" }
     );
@@ -615,6 +620,7 @@ fn eval_kill_suite() -> anyhow::Result<i32> {
                     renderer: &speak,
                     crash: Some(&crash),
             standing: None,
+        on_early: None,
                 };
                 let env = envelope(&cell, text)?;
                 let crashed = matches!(
@@ -661,6 +667,7 @@ fn eval_latency() -> anyhow::Result<i32> {
                     renderer: &speak,
         crash: None,
             standing: None,
+        on_early: None,
     };
     let mut times = vec![];
     for _ in 0..20 {

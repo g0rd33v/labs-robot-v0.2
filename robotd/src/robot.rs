@@ -390,6 +390,17 @@ impl RobotCore {
         draft: Option<crate::caps::DraftSink>,
         premix_embedding: Option<Arc<std::sync::OnceLock<Option<Vec<f32>>>>>,
     ) -> Registry {
+        self.router_all(vault, draft, premix_embedding, None)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn router_all(
+        &self,
+        vault: Option<Arc<mind::vault::MediaVault>>,
+        draft: Option<crate::caps::DraftSink>,
+        premix_embedding: Option<Arc<std::sync::OnceLock<Option<Vec<f32>>>>>,
+        warm_answer: Option<Arc<Mutex<Option<crate::caps::WarmAnswer>>>>,
+    ) -> Registry {
         let mut reg = Registry::new(
             Services {
                 embedder: self.embedder.clone(),
@@ -397,6 +408,7 @@ impl RobotCore {
                 research: self.research.clone(),
                 draft,
                 premix_embedding,
+                warm_answer,
                 vault,
                 google: self.google.clone(),
                 oauth_app: self.oauth_app.clone(),
@@ -485,10 +497,17 @@ impl RobotCore {
                     let _ = slot.set(embedder.embed_query(&text).ok());
                 });
             }
-            let router = self.router_full(
+            // sec 2c: the answer starts when the router COMMITS to "no
+            // tool", not when the verdict closes -- about two seconds
+            // earlier. Nothing is guessed: `tool` is written once, so a
+            // commitment cannot be walked back, and the capability adopts
+            // this instead of calling again.
+            let warm: Arc<Mutex<Option<crate::caps::WarmAnswer>>> = Arc::new(Mutex::new(None));
+            let router = self.router_all(
                 Some(handle.vault.clone()),
-                Some(draft_sink),
+                Some(draft_sink.clone()),
                 Some(premix),
+                Some(warm.clone()),
             );
             let verdicts: Box<dyn VerdictProvider> = match &self.gateway {
                 Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
@@ -503,12 +522,62 @@ impl RobotCore {
             // knowing where rules live
             let standing =
                 cell.with(|c| mind::instructions::context_block(c).map_err(crate::caps::mind_err))?;
+            let early_gw = self.gateway.clone();
+            let early_query = env.content.clone();
+            let early_warm = warm.clone();
+            let early_sink = draft_sink.clone();
+            let on_early = move |tool: Option<&str>| {
+                // only the answer path: a named tool needs arguments that
+                // have not arrived, and there is nothing to start early
+                if tool.is_some() {
+                    return;
+                }
+                let (Some(gw), Ok(mut slot)) = (early_gw.clone(), early_warm.lock()) else {
+                    return;
+                };
+                if slot.is_some() {
+                    return; // already running
+                }
+                let q = early_query.clone();
+                let sink = early_sink.clone();
+                let messages = vec![hub::gateway::Msg {
+                    role: "user",
+                    content: q.clone(),
+                }];
+                let handle = std::thread::spawn(move || {
+                    let mut acc = String::new();
+                    let mut last = 0usize;
+                    let mut on_token = |delta: &str| {
+                        acc.push_str(delta);
+                        // the FIRST fragment goes out immediately: waiting
+                        // for a full chunk adds ~400ms to the number the
+                        // person actually experiences, and time-to-first-
+                        // token is the whole point. Throttle after that.
+                        if last == 0 || acc.len() - last >= 48 {
+                            last = acc.len();
+                            sink(&acc);
+                        }
+                    };
+                    gw.chat_stream(
+                        hub::gateway::Role::Answer,
+                        &messages,
+                        1200,
+                        0.4,
+                        &mut on_token,
+                    )
+                });
+                *slot = Some(crate::caps::WarmAnswer {
+                    query: early_query.clone(),
+                    handle,
+                });
+            };
             let deps = TurnDeps {
                 router: &router,
                 verdicts: verdicts.as_ref(),
                 renderer: &speak,
                 crash: None,
                 standing,
+                on_early: Some(&on_early),
             };
             // the cell is locked only in short bursts inside run_turn; the
             // model call in the middle happens with it free
@@ -1182,6 +1251,7 @@ mod tests {
             renderer: &SPEAK,
             crash: None,
             standing: None,
+        on_early: None,
         }
     }
 
@@ -1267,6 +1337,7 @@ mod tests {
             renderer: &SPEAK,
             crash: None,
             standing: None,
+        on_early: None,
         };
         let out = prism::run_turn(
             &cell,
@@ -1304,6 +1375,7 @@ mod tests {
                 renderer: &SPEAK,
                 crash: None,
             standing: None,
+        on_early: None,
             };
             prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
         };
@@ -1418,6 +1490,7 @@ mod tests {
                 renderer: &SPEAK,
                 crash: None,
             standing: None,
+        on_early: None,
             };
             prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap()
         };
@@ -1503,6 +1576,7 @@ mod tests {
                 renderer: &SPEAK,
                 crash: None,
             standing: None,
+        on_early: None,
             };
             let out =
                 prism::run_turn(&cell, &envelope(&cell, "что-нибудь сделай"), &deps).unwrap();
@@ -1735,6 +1809,7 @@ mod tests {
                     renderer: &SPEAK,
                     crash: Some(&crash),
             standing: None,
+        on_early: None,
                 };
                 let err = prism::run_turn(&cell, &envelope(&cell, text), &deps).unwrap_err();
                 assert!(matches!(err, PrismError::SimulatedCrash(_)), "{text}@{point}");
@@ -1813,6 +1888,7 @@ mod tests {
                 renderer: &SPEAK,
                 crash: None,
             standing: None,
+        on_early: None,
             };
             prism::run_turn(&cell, &env, &deps).unwrap()
         });

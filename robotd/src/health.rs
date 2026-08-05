@@ -49,6 +49,7 @@ pub fn health(cfg: &crate::config::RobotConfig) -> anyhow::Result<i32> {
         renderer: &speak,
         crash: None,
         standing: None,
+        on_early: None,
     };
     let msg_id = cell.with(|c| {
         mind::record_message(c, "in", "health", "what time is it?").map_err(crate::caps::mind_err)
@@ -94,6 +95,7 @@ pub fn loadtest(turns: usize) -> anyhow::Result<i32> {
         renderer: &speak,
         crash: None,
         standing: None,
+        on_early: None,
     };
 
     // the floor's own repertoire, cycled -- reads and writes both

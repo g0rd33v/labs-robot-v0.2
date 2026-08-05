@@ -215,6 +215,26 @@ impl VerdictProvider for GatewayVerdicts {
         }
     }
 
+    fn route_early(
+        &self,
+        text: &str,
+        tools: &[ToolDef],
+        now: &str,
+        standing: Option<&str>,
+        on_early: &mut dyn FnMut(Option<&str>),
+    ) -> Routing {
+        match self.route_call_watched(text, tools, now, standing, Some(on_early)) {
+            Some(r) => r,
+            None => {
+                tracing::warn!("routing unparseable, deterministic fallback");
+                Routing {
+                    verdict: FallbackVerdict.verdict(text),
+                    call: None,
+                }
+            }
+        }
+    }
+
     fn route(&self, text: &str, tools: &[ToolDef], now: &str, standing: Option<&str>) -> Routing {
         match self.route_call(text, tools, now, standing) {
             Some(r) => r,
@@ -307,6 +327,9 @@ fn routing_system(tools: &[ToolDef], now: &str, standing: Option<&str>) -> Strin
     out
 }
 
+/// Told the tool decision as soon as the stream reveals it.
+pub type EarlySink<'a> = dyn FnMut(Option<&str>) + 'a;
+
 /// The sentinel meaning "no tool fits". A plain string rather than null:
 /// "decide explicitly" was the property we wanted, and a nullable union is
 /// the shape most likely to confuse a decoder.
@@ -314,6 +337,14 @@ pub const NO_TOOL: &str = "none";
 
 /// The exact output shape, stated in the prompt rather than enforced as a
 /// response schema.
+///
+/// **`call` comes FIRST, and the order is load-bearing.** The routing call
+/// is streamed, and the tool decision is the only field the answer path
+/// needs -- so emitting it first means the decision lands ~600 ms in while
+/// the rest of the verdict is still arriving, and the answer can start
+/// then rather than after the whole object. Moving `verdict` back to the
+/// front would silently cost ~2 seconds of every reply's time-to-first-
+/// token, with no test failing.
 ///
 /// A tool call's `args` is a different shape per tool, so it can only be a
 /// free-form object -- and a constrained decoder asked to satisfy that pads
@@ -334,12 +365,12 @@ fn output_shape(tools: &[ToolDef]) -> String {
     format!(
         "output EXACTLY this shape, and nothing else -- no prose, no fences, \
          no trailing padding:\n\
-         {{\"verdict\": {{\"action\": \"answer|task|search|meta|clarify|chitchat\", \
+         {{\"call\": {{\"tool\": <one of {}>, \"args\": {{...}}}}, \
+         \"verdict\": {{\"action\": \"answer|task|search|meta|clarify|chitchat\", \
          \"domain\": \"reminder|note|fact|calendar|email|file|none\", \
          \"door\": \"exact|vector|web|blended|followup\", \
          \"tier\": \"fast|super|ultra\", \"lang\": \"<BCP 47>\", \
-         \"mood\": {{\"valence\": 0.0, \"urgency\": 0.0}}, \"confidence\": 0.0}}, \
-         \"call\": {{\"tool\": <one of {}>, \"args\": {{...}}}}}}",
+         \"mood\": {{\"valence\": 0.0, \"urgency\": 0.0}}, \"confidence\": 0.0}}}}",
         names.join(" | ")
     )
 }
@@ -356,6 +387,18 @@ impl GatewayVerdicts {
         now: &str,
         standing: Option<&str>,
     ) -> Option<Routing> {
+        self.route_call_watched(text, tools, now, standing, None)
+    }
+
+    /// As `route_call`, optionally reporting the decision early.
+    fn route_call_watched(
+        &self,
+        text: &str,
+        tools: &[ToolDef],
+        now: &str,
+        standing: Option<&str>,
+        on_early: Option<&mut EarlySink<'_>>,
+    ) -> Option<Routing> {
         // standing rules shape what is PROPOSED -- an email drafted without
         // greetings because they said so -- fenced as data about their
         // wishes, never as authority over the catalog
@@ -369,11 +412,36 @@ impl GatewayVerdicts {
                 content: text.into(),
             },
         ];
-        let out = self
-            .gateway
-            .chat(Role::Route, &messages, None, 400)
-            .map_err(|e| tracing::warn!("routing call failed: {e}"))
-            .ok()?;
+        let out = match on_early {
+            // sec 2c: stream, and report the tool decision as soon as it is
+            // readable -- `output_shape` emits `call.tool` first precisely
+            // so this lands ~2 s before the object closes. The answer path
+            // needs nothing else, so the reply can begin then.
+            Some(observer) => {
+                let mut announced = false;
+                let mut watch = |partial: &str| {
+                    if announced {
+                        return;
+                    }
+                    if let Some(d) = crate::early::decision(partial) {
+                        announced = true;
+                        match d {
+                            crate::early::Early::NoTool => observer(None),
+                            crate::early::Early::Tool(name) => observer(Some(&name)),
+                        }
+                    }
+                };
+                self.gateway
+                    .chat_stream_watched(Role::Route, &messages, 400, 0.4, &mut watch)
+                    .map_err(|e| tracing::warn!("routing stream failed: {e}"))
+                    .ok()?
+            }
+            None => self
+                .gateway
+                .chat(Role::Route, &messages, None, 400)
+                .map_err(|e| tracing::warn!("routing call failed: {e}"))
+                .ok()?,
+        };
         if std::env::var("BENDER_ROUTE_DEBUG").is_ok() {
             eprintln!("--- routing raw ---\n{}\n---", out.content);
         }

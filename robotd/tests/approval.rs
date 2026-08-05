@@ -117,6 +117,7 @@ fn a_send_parks_for_approval_and_cannot_execute_without_one() {
         renderer: &speak,
         crash: None,
             standing: None,
+        on_early: None,
     };
 
     let env = envelope(&cell, "email someone@example.com the quarterly numbers");
@@ -177,6 +178,7 @@ fn declining_closes_the_intent_and_still_nothing_runs() {
         renderer: &speak,
         crash: None,
             standing: None,
+        on_early: None,
     };
     let env = envelope(&cell, "send it");
     let out = prism::lifecycle::run_turn(&cell, &env, &deps).unwrap();
@@ -217,6 +219,7 @@ fn approving_is_what_lets_it_through() {
         renderer: &speak,
         crash: None,
             standing: None,
+        on_early: None,
     };
     let env = envelope(&cell, "send it");
     let out = prism::lifecycle::run_turn(&cell, &env, &deps).unwrap();
@@ -260,6 +263,7 @@ fn every_deferred_ask_is_in_the_ledger_and_closes_with_a_reason() {
         renderer: &speak,
         crash: None,
         standing: None,
+        on_early: None,
     };
 
     // hooks live in robotd's orchestration; this test mirrors them the way

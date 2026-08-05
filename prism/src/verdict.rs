@@ -13,6 +13,27 @@ use crate::types::{
 pub trait VerdictProvider: Send + Sync {
     fn verdict(&self, text: &str) -> Verdict;
 
+    /// As `route`, reporting the tool decision the MOMENT it is readable
+    /// rather than when the whole verdict closes.
+    ///
+    /// `on_early` receives `None` when the router has committed to no tool
+    /// -- the answer path, which needs nothing else and can start ~2 s
+    /// early -- or `Some(name)` when a tool was named and its arguments
+    /// are still arriving. The default ignores it and behaves exactly like
+    /// `route`, so a provider that cannot stream loses speed and nothing
+    /// else.
+    fn route_early(
+        &self,
+        text: &str,
+        tools: &[ToolDef],
+        now: &str,
+        standing: Option<&str>,
+        on_early: &mut dyn FnMut(Option<&str>),
+    ) -> Routing {
+        let _ = &mut *on_early;
+        self.route(text, tools, now, standing)
+    }
+
     /// Route a turn: classify it, and -- if one of the offered tools fits --
     /// propose a call.
     ///

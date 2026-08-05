@@ -8,6 +8,7 @@
 //! -- is boundary-logged in both directions. M4 fills in OpenRouter, Serper,
 //! and the fetch/READ loop.
 
+pub mod early;
 pub mod escalation;
 pub mod evaluator;
 pub mod gateway;

@@ -56,7 +56,18 @@ speed helps: **routing is a wall in front of it.** Trimming the catalog
 still ~2 s, and it attacks the multilingual mechanism that took three
 attempts to get right.
 
-**The design that does reach it: early decision from a streamed router.**
+**Built 2026-08-05, and measured.** Routing p50 **2987 → 1080 ms**, full
+answer turn p50 **3115 → 2749 ms — §2c's 3 s budget is now MET** and is
+the gate rather than an aspiration. Cache-hit on the routing prefix rose
+to **78%**, 0 misroutes held, 1.00 router calls/turn. Surface TTFT
+measured 2.1 s and 4.0 s on two hand samples — clearly better than the
+~3.2 s baseline, but **still not the ≤1 s target**, and single samples
+are dominated by provider variance. What remains between here and 1 s is
+the router's own time-to-first-token: the decision cannot be read before
+the model starts speaking. Honest status: **substantially closed, not
+closed.**
+
+**The design: early decision from a streamed router.**
 Stream the routing call and put `call.tool` FIRST in the output shape.
 The tool decision then arrives ~600 ms in, while the rest of the verdict
 is still streaming — and for the answer path (`tool: "none"`) nothing else

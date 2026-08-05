@@ -43,6 +43,7 @@ pub fn resume_incomplete(
         renderer,
         crash: None,
             standing: None,
+        on_early: None,
     };
 
     for intent_id in cell.with(journal::open_intents)? {

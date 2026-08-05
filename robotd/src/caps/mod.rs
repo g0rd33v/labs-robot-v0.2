@@ -35,6 +35,17 @@ use std::sync::{Arc, Mutex};
 /// A principal-bound sink for streamed draft text.
 pub type DraftSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// An answer started early, and the query it answers.
+///
+/// The query is carried so the adopter can prove the warm answer is for
+/// THIS question -- adopting a reply to a different message would be the
+/// worst bug this optimisation could produce, and an equality check costs
+/// nothing.
+pub struct WarmAnswer {
+    pub query: String,
+    pub handle: std::thread::JoinHandle<Result<hub::gateway::ChatOut, hub::HubError>>,
+}
+
 /// Outbound services a capability may use. Built once at boot.
 #[derive(Default, Clone)]
 pub struct Services {
@@ -50,6 +61,12 @@ pub struct Services {
     /// is useful for ten minutes and writing it to disk would give it a
     /// lifetime it has no business having.
     pub pending_auth: Option<Arc<Mutex<HashMap<String, hub::oauth::Attempt>>>>,
+    /// sec 2c: an answer already in flight, started the moment the router
+    /// committed to "no tool" -- ~2 s before the verdict closed. The
+    /// answer capability ADOPTS it instead of making a second call, so the
+    /// early start costs nothing when it is used and one wasted call when
+    /// the router changes its mind (it cannot: `tool` is written once).
+    pub warm_answer: Option<Arc<Mutex<Option<WarmAnswer>>>>,
     /// sec 2c #2, parallel fan-out: the query embedding, computed on its
     /// own thread WHILE the routing model call runs, so the answer path
     /// finds it ready instead of computing it serially. The outer Option is

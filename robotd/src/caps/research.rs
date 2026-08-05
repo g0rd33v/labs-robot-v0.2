@@ -121,7 +121,8 @@ impl Capability for WebResearch {
         let mut on_token = |delta: &str| {
             acc.push_str(delta);
             if let Some(sink) = &sink {
-                if acc.len() - last_sent >= 48 {
+                // first fragment immediately; throttle after that
+                if last_sent == 0 || acc.len() - last_sent >= 48 {
                     last_sent = acc.len();
                     sink(&acc);
                 }

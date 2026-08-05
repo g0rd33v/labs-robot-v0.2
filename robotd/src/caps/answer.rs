@@ -211,6 +211,47 @@ impl Capability for ModelAnswer {
             content: last,
         });
 
+        // sec 2c: was this already started when the router committed to
+        // "no tool"? Then it has been streaming for ~2 seconds and there
+        // is nothing to call. The query is compared because adopting an
+        // answer to a DIFFERENT question would be the worst bug this
+        // optimisation could produce.
+        let warm = ctx.services.warm_answer.as_ref().and_then(|slot| {
+            let mut slot = slot.lock().ok()?;
+            match slot.take() {
+                Some(w) if w.query == query => Some(w.handle),
+                // not ours: put it back for whoever it belongs to
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        });
+        if let Some(handle) = warm {
+            return match handle.join() {
+                Ok(Ok(out)) => spoke(
+                    vec![super::model_evidence(&out.model, &out.content)],
+                    format!("{}{quota_note}", out.content),
+                ),
+                Ok(Err(e)) => failed(
+                    note_evidence("provider-failure"),
+                    format!("the model call failed: {e}"),
+                    Rendering::new(
+                        "provider_failure",
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
+                ),
+                Err(_) => failed(
+                    note_evidence("provider-failure"),
+                    "the early answer thread panicked".to_string(),
+                    Rendering::new(
+                        "provider_failure",
+                        serde_json::json!({ "error": "early answer panicked" }),
+                    ),
+                ),
+            };
+        }
+
         // sec 2c #1: stream. The person sees the answer being born instead
         // of a spinner; TTFT becomes a measured number in the meter either
         // way. The draft sink carries the accumulated text, throttled so a
@@ -221,7 +262,8 @@ impl Capability for ModelAnswer {
         let mut on_token = |delta: &str| {
             acc.push_str(delta);
             if let Some(sink) = &sink {
-                if acc.len() - last_sent >= 48 {
+                // first fragment immediately; throttle after that
+                if last_sent == 0 || acc.len() - last_sent >= 48 {
                     last_sent = acc.len();
                     sink(&acc);
                 }
