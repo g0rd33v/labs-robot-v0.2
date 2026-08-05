@@ -258,6 +258,10 @@ CREATE TABLE IF NOT EXISTS cell_meta (
             // sec 4's mutation protocol ends at "owner-confirmed fact"; the
             // Registry's confirm button needs somewhere to put that.
             ("facts", "confirmed_at", "INTEGER"),
+            // spec 4.1.4: the receipts icon needs a reply to name its turn.
+            // Without this the chat can only guess by matching text, and a
+            // receipt shown against the wrong reply is worse than none.
+            ("messages", "intent_id", "TEXT"),
         ],
     )?;
 
@@ -385,10 +389,25 @@ pub fn record_message(
     surface: &str,
     content: &str,
 ) -> Result<String, MindError> {
+    record_message_for(conn, direction, surface, content, None)
+}
+
+/// As `record_message`, naming the turn that produced it. Replies carry
+/// their `intent_id` so the chat can show the receipt BEHIND a reply
+/// (spec 4.1.4) rather than matching on text, which would eventually show
+/// the wrong evidence against the wrong sentence.
+pub fn record_message_for(
+    conn: &Connection,
+    direction: &str,
+    surface: &str,
+    content: &str,
+    intent_id: Option<&str>,
+) -> Result<String, MindError> {
     let id = trust::ids::new_id("msg");
     conn.execute(
-        "INSERT INTO messages(id, ts, direction, surface, content) VALUES (?1,?2,?3,?4,?5)",
-        params![id, trust::ids::ts_ms(), direction, surface, content],
+        "INSERT INTO messages(id, ts, direction, surface, content, intent_id) \
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![id, trust::ids::ts_ms(), direction, surface, content, intent_id],
     )?;
     Ok(id)
 }
@@ -456,18 +475,20 @@ pub fn recent_messages(
 
 /// Messages after a timestamp, chronological: (ts, direction, content).
 /// Feeds the chat history/poll endpoint.
+/// (ts, direction, content, intent_id) -- the intent is empty for
+/// messages recorded before it was carried, and for inbound ones.
 pub fn messages_after(
     conn: &Connection,
     after_ts: i64,
     limit: usize,
-) -> Result<Vec<(i64, String, String)>, MindError> {
+) -> Result<Vec<(i64, String, String, String)>, MindError> {
     let mut stmt = conn.prepare(
-        "SELECT ts, direction, content FROM messages WHERE ts > ?1 \
-         ORDER BY ts ASC, rowid ASC LIMIT ?2",
+        "SELECT ts, direction, content, coalesce(intent_id, '') FROM messages \
+         WHERE ts > ?1 ORDER BY ts ASC, rowid ASC LIMIT ?2",
     )?;
     let rows = stmt
         .query_map(params![after_ts, limit as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)

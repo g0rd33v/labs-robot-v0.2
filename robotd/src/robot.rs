@@ -267,6 +267,106 @@ impl RobotCore {
         Ok(handle)
     }
 
+    /// Remove a person and destroy their data (spec §4.2.3.4).
+    ///
+    /// This is a crypto-shred, and the order it happens in is the whole
+    /// point. A cell is a SQLCipher file encrypted under a random DEK that
+    /// exists in exactly two places: wrapped in `cell_keys`, and unwrapped
+    /// inside a live `CellHandle`. So:
+    ///
+    /// 1. drop the live handle — otherwise the key stays in this process's
+    ///    memory and the file stays open,
+    /// 2. delete the wrapped DEK — after this the bytes on disk are
+    ///    unreadable to anyone, including us, forever,
+    /// 3. unlink the file and the media vault,
+    /// 4. mark the principal removed and journal it.
+    ///
+    /// Doing (3) before (2) would leave a recoverable file with a live key
+    /// during the window in between; doing (2) first means an interruption
+    /// anywhere after it still leaves the data destroyed. The delete is
+    /// what makes it real — a `status` flag would be hiding, and §4.2.3.4
+    /// promises erasure.
+    ///
+    /// The owner cannot be removed: their cell is the robot.
+    pub fn remove_member(&self, actor: i64, target: i64) -> anyhow::Result<String> {
+        // a person may always remove themselves; only the owner may remove
+        // anyone else. Both are the same operation, and neither is undoable.
+        if actor != target && actor != self.owner_principal {
+            bail!("only the owner can remove someone else");
+        }
+        if target == self.owner_principal {
+            bail!("the owner cannot be removed — that is deleting the robot");
+        }
+        let cell_id: String = {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            core.query_row(
+                "SELECT cell_id FROM principals WHERE id = ?1 AND status = 'active'",
+                params![target],
+                |r| r.get(0),
+            )
+            .optional()?
+            .with_context(|| format!("no active person {target}"))?
+        };
+
+        // (1) the live handle, and with it the unwrapped key, goes first
+        self.cells
+            .lock()
+            .map_err(|_| anyhow!("cells lock poisoned"))?
+            .remove(&target);
+
+        // (2) the key. After this line the ciphertext is noise.
+        {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            core.execute("DELETE FROM cell_keys WHERE cell_id = ?1", params![cell_id])?;
+        }
+
+        // (3) the bytes. SQLCipher leaves -wal and -shm beside the file and
+        // both hold plaintext pages; removing only the .db would leave the
+        // most recent writes lying around.
+        let base = self.data_dir.join("cells").join(format!("{cell_id}.db"));
+        for suffix in ["", "-wal", "-shm"] {
+            let path = if suffix.is_empty() {
+                base.clone()
+            } else {
+                std::path::PathBuf::from(format!("{}{suffix}", base.display()))
+            };
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        let media = self.data_dir.join("media").join(&cell_id);
+        if media.exists() {
+            std::fs::remove_dir_all(&media)
+                .with_context(|| format!("removing {}", media.display()))?;
+        }
+
+        // (4) say so, in the one log that outlives the cell
+        {
+            let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
+            core.execute(
+                "UPDATE principals SET status = 'removed' WHERE id = ?1",
+                params![target],
+            )?;
+            schema::core_journal(
+                &core,
+                "member.removed",
+                &serde_json::json!({
+                    "principal": target,
+                    "by": actor,
+                    "cell_id": cell_id,
+                    "method": "crypto-shred",
+                })
+                .to_string(),
+            )?;
+        }
+        Ok(format!(
+            "Done. {cell_id} is gone: the key is destroyed and the file is deleted. \
+             Nothing of it can be read again, by me or by anyone. The only trace \
+             left is a line in the core journal saying this happened."
+        ))
+    }
+
     pub fn principals_active(&self) -> anyhow::Result<Vec<i64>> {
         let core = self.core.lock().map_err(|_| anyhow!("core lock poisoned"))?;
         let mut stmt = core.prepare("SELECT id FROM principals WHERE status = 'active'")?;
@@ -600,7 +700,15 @@ impl RobotCore {
                 };
                 let out = prism::run_turn(cell, &env, &deps)?;
                 cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
-                cell.with(|c| Ok(mind::record_message(c, "out", surface, &out.reply)))??;
+                cell.with(|c| {
+                Ok(mind::record_message_for(
+                    c,
+                    "out",
+                    surface,
+                    &out.reply,
+                    Some(&out.intent_id),
+                ))
+            })??;
                 cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
                 self.boundary_crossing(Direction::Out, surface, &out.reply)?;
                 self.notify(principal);
@@ -663,7 +771,15 @@ impl RobotCore {
             self.expression_verify(cell, &out);
 
             cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
-            cell.with(|c| Ok(mind::record_message(c, "out", surface, &out.reply)))??;
+            cell.with(|c| {
+                Ok(mind::record_message_for(
+                    c,
+                    "out",
+                    surface,
+                    &out.reply,
+                    Some(&out.intent_id),
+                ))
+            })??;
             cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
             out.reply
         };
@@ -744,6 +860,308 @@ const AUDIO_EXTS: [&str; 8] = ["ogg", "oga", "mp3", "m4a", "wav", "webm", "opus"
 impl surfaces::Robot for RobotCore {
     fn subscribe_drafts(&self) -> broadcast::Receiver<(i64, String)> {
         self.drafts.subscribe()
+    }
+
+    /// The receipt behind one turn, in the shape the inspector renders.
+    /// Read from the caller's OWN cell: a receipt is what the robot did
+    /// for that person, and cells do not read each other (law 2).
+    fn receipt(&self, principal: i64, intent_id: &str) -> anyhow::Result<serde_json::Value> {
+        let handle = self.cell(principal)?;
+        let r = handle
+            .cell
+            .with(|c| prism::receipts::get(c, intent_id))?
+            .ok_or_else(|| anyhow!("no receipt for {intent_id}"))?;
+        Ok(serde_json::json!({
+            "intent": r.intent_id,
+            "status": r.status.as_str(),
+            "claims": r.claims.iter().map(|c| serde_json::json!({
+                "claim": c.claim,
+                "evidence": c.evidence.iter().map(|e| serde_json::json!({
+                    "kind": e.kind,
+                    "provider": e.provider,
+                    "external_id": e.external_id,
+                    "ts": e.ts,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "models": r.models_used,
+            "disclosures": r.data_disclosures,
+        }))
+    }
+
+    fn pending_approvals(&self, principal: i64) -> anyhow::Result<serde_json::Value> {
+        let handle = self.cell(principal)?;
+        let waiting = prism::approval::waiting(&handle.cell)?;
+        Ok(serde_json::json!(waiting
+            .iter()
+            .map(|p| serde_json::json!({
+                "intent": p.intent_id,
+                "capability": p.capability,
+                "args": p.args,
+                "asked_at": p.asked_at,
+            }))
+            .collect::<Vec<_>>()))
+    }
+
+    /// The buttons' path is the TYPED path: sec 3b.2's durable approval,
+    /// not a shortcut around it. A button that bypassed the journal would
+    /// be a second way to act, and the receipts law only covers the first.
+    fn answer_approval(
+        &self,
+        principal: i64,
+        intent_id: &str,
+        approved: bool,
+    ) -> anyhow::Result<String> {
+        let handle = self.cell(principal)?;
+        let cell = &handle.cell;
+        let router = self.router(Some(handle.vault.clone()));
+        let verdicts: Box<dyn VerdictProvider> = match &self.gateway {
+            Some(g) => Box::new(hub::GatewayVerdicts { gateway: g.clone() }),
+            None => Box::new(FallbackVerdict),
+        };
+        let speak = crate::render::Speak {
+            gateway: self.gateway.clone(),
+            voice: cell_voice(cell),
+        };
+        let deps = TurnDeps {
+            router: &router,
+            verdicts: verdicts.as_ref(),
+            renderer: &speak,
+            crash: None,
+            standing: None,
+            on_early: None,
+        };
+        let out = prism::approval::respond(cell, intent_id, approved, &deps)?
+            .ok_or_else(|| anyhow!("that approval is no longer open"))?;
+        cell.with(|c| {
+            mind::commitments::close(
+                c,
+                intent_id,
+                if approved { "done" } else { "declined" },
+                if approved {
+                    "you approved it; it ran"
+                } else {
+                    "you declined it; nothing ran"
+                },
+            )
+            .map_err(crate::caps::mind_err)
+        })?;
+        cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
+        cell.with(|c| {
+            Ok(mind::record_message_for(
+                c,
+                "out",
+                "web",
+                &out.reply,
+                Some(&out.intent_id),
+            ))
+        })??;
+        cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "confirmed", None))?;
+        self.notify(principal);
+        Ok(out.reply)
+    }
+
+    /// All five sec 4b categories for the caller's own cell.
+    fn my_registry(&self, principal: i64) -> anyhow::Result<serde_json::Value> {
+        let handle = self.cell(principal)?;
+        let vault_root = handle.vault.root().to_path_buf();
+        let _ = vault_root;
+        Ok(handle.cell.with(|c| {
+            let knowledge: Vec<serde_json::Value> = mind::facts::registry_list(c, 200)
+                .map_err(crate::caps::mind_err)?
+                .into_iter()
+                .map(|(f, source, ts)| {
+                    let contested =
+                        mind::promotion::is_contested(c, &f.id).unwrap_or(false);
+                    serde_json::json!({
+                        "value": f.content,
+                        "source": source,
+                        "learned_at": ts,
+                        "status": f.status,
+                        "confidence": f.confidence,
+                        "class": f.class,
+                        "contested": contested,
+                    })
+                })
+                .collect();
+            let instructions: Vec<serde_json::Value> = mind::instructions::active(c)
+                .map_err(crate::caps::mind_err)?
+                .into_iter()
+                .map(|i| serde_json::json!({ "value": i.body, "since": i.created_at }))
+                .collect();
+            let dial = soul::dial::load(c).ok();
+            let preferences: Vec<serde_json::Value> = dial
+                .as_ref()
+                .map(|d| {
+                    d.settings
+                        .iter()
+                        .map(|v| {
+                            serde_json::json!({
+                                "value": format!("{}: {}", v.dimension.as_str(), v.value),
+                                "inferred": !v.pinned(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let media: Vec<serde_json::Value> = mind::files::list(c)
+                .map_err(crate::caps::mind_err)?
+                .into_iter()
+                .map(|f| serde_json::json!({
+                    "value": f.name, "size": f.size, "class": f.class, "since": f.created_at
+                }))
+                .collect();
+            let grants: Vec<serde_json::Value> = mind::connections::list(c)
+                .map_err(crate::caps::mind_err)?
+                .into_iter()
+                .map(|a| serde_json::json!({
+                    "value": format!("{} as {}", a.provider, a.account),
+                    "scopes": a.scopes,
+                    "since": a.connected_at,
+                }))
+                .collect();
+            Ok(serde_json::json!({
+                "knowledge": knowledge,
+                "instructions": instructions,
+                "preferences": preferences,
+                "media": media,
+                "grants": grants,
+            }))
+        })?)
+    }
+
+    /// One item action. Everything routes through the SAME capabilities the
+    /// chat commands use, so a button and a sentence cannot diverge in what
+    /// they actually do.
+    fn remove_person(&self, actor: i64, target: i64) -> anyhow::Result<String> {
+        self.remove_member(actor, target)
+    }
+
+    /// Everything held about this person, as one portable document
+    /// (spec §4.2.3.4: departure EXPORTS and then shreds).
+    ///
+    /// The registry is what the person can already see; the conversation
+    /// is the rest of it, and leaving without it would be handing someone
+    /// an index of a book they are about to burn. Media stays out by
+    /// reference: the files are theirs and already on their disk if they
+    /// put them there, and inlining a vault as base64 turns a right into a
+    /// download that times out.
+    fn my_export(&self, principal: i64) -> anyhow::Result<serde_json::Value> {
+        let registry = self.my_registry(principal)?;
+        let handle = self.cell(principal)?;
+        // no limit: an export that silently stops at N messages is worse
+        // than no export, because it looks complete
+        let conversation = handle.cell.with(|c| {
+            mind::messages_after(c, 0, usize::MAX).map_err(crate::caps::mind_err)
+        })?;
+        Ok(serde_json::json!({
+            "robot": self.robot_name,
+            "instance": self.instance_id,
+            "exported_at": trust::ids::ts_ms(),
+            "note": "Everything this robot holds about you. Times are unix \
+                     milliseconds. Media files are listed in `registry.media` \
+                     by name; their contents stay in your vault.",
+            "registry": registry,
+            "conversation": conversation
+                .into_iter()
+                .map(|(ts, direction, content, intent)| serde_json::json!({
+                    "ts": ts,
+                    "direction": direction,
+                    "content": content,
+                    "receipt": intent,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    fn registry_action(
+        &self,
+        principal: i64,
+        category: &str,
+        index: usize,
+        action: &str,
+        value: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let handle = self.cell(principal)?;
+        let cell = &handle.cell;
+        match (category, action) {
+            ("knowledge", "erase") => {
+                let origin = self.instance_id.clone();
+                let gone = cell.with(|c| {
+                    mind::facts::forget_by_index(c, index, &trust::ids::new_id("int"), &origin)
+                        .map_err(crate::caps::mind_err)
+                })?;
+                match gone {
+                    Some(f) => Ok(format!("erased for real: {f}")),
+                    None => bail!("no item {index} to erase"),
+                }
+            }
+            ("knowledge", "confirm") => {
+                let done = cell.with(|c| {
+                    mind::facts::confirm_by_index(c, index).map_err(crate::caps::mind_err)
+                })?;
+                match done {
+                    Some(f) => Ok(format!("confirmed: {f}")),
+                    None => bail!("no item {index} to confirm"),
+                }
+            }
+            ("knowledge", "correct") => {
+                let new = value.ok_or_else(|| anyhow!("a correction needs the new wording"))?;
+                // law 5 applies to a BUTTON exactly as to a sentence: the
+                // corrected fact needs a source, and the source is the
+                // person saying this. Recorded as their own words first,
+                // so the registry can show where the correction came from.
+                let done = cell.with(|c| {
+                    let src = mind::record_message(c, "in", "registry", new)
+                        .map_err(crate::caps::mind_err)?;
+                    mind::facts::correct_by_index(
+                        c,
+                        index,
+                        new,
+                        &src,
+                        &trust::ids::new_id("int"),
+                        None,
+                    )
+                    .map_err(crate::caps::mind_err)
+                })?;
+                match done {
+                    Some((old, _)) => Ok(format!("corrected: \"{old}\" -> \"{new}\"")),
+                    None => bail!("no item {index} to correct"),
+                }
+            }
+            ("instructions", "erase") => {
+                let gone = cell.with(|c| {
+                    mind::instructions::retire(c, index).map_err(crate::caps::mind_err)
+                })?;
+                match gone {
+                    Some(i) => Ok(format!("dropped: {}", i.body)),
+                    None => bail!("no rule {index} to drop"),
+                }
+            }
+            ("media", "erase") => {
+                let name = value.ok_or_else(|| anyhow!("which file?"))?;
+                let origin = self.instance_id.clone();
+                let gone = cell.with(|c| {
+                    mind::files::delete(c, name, &origin).map_err(crate::caps::mind_err)
+                })?;
+                if gone {
+                    Ok(format!("deleted {name}"))
+                } else {
+                    bail!("no file called {name}")
+                }
+            }
+            ("grants", "erase") => {
+                let provider = value.unwrap_or("google");
+                let gone = cell.with(|c| {
+                    mind::connections::disconnect(c, provider).map_err(crate::caps::mind_err)
+                })?;
+                if gone {
+                    Ok(format!("disconnected {provider}"))
+                } else {
+                    bail!("{provider} was not connected")
+                }
+            }
+            _ => bail!("{action} is not something you can do to {category} here"),
+        }
     }
 
     fn complete_google_auth(&self, state: &str, code: &str) -> anyhow::Result<String> {
@@ -888,7 +1306,11 @@ impl surfaces::Robot for RobotCore {
         Ok(reply)
     }
 
-    fn history(&self, principal: i64, after_ts: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
+    fn history(
+        &self,
+        principal: i64,
+        after_ts: i64,
+    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
         let handle = self.cell(principal)?;
         Ok(handle
             .cell

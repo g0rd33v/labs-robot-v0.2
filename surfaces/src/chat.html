@@ -36,10 +36,45 @@
   label.up { background: #21262d; padding: 10px 14px; }
   button:disabled { opacity: .5; }
   #thinking { display: none; color: #8b949e; font-size: 12px; padding: 0 16px 6px; }
+  .receipt { background:transparent; border:1px solid #30363d; color:#8b949e;
+             font-size:11px; padding:2px 8px; border-radius:6px; cursor:pointer;
+             margin-top:7px; }
+  .receipt:hover { color:#e6edf3; border-color:#58a6ff; }
+  #modal { display:none; position:fixed; inset:0; background:#000a; z-index:50;
+           align-items:center; justify-content:center; padding:20px; }
+  #modal-box { background:#161b22; border:1px solid #30363d; border-radius:12px;
+               padding:18px 20px; max-width:640px; width:100%; max-height:80vh;
+               overflow:auto; }
+  #modal h3 { margin:0 0 4px; font-size:14px; }
+  #modal-box { position:relative; }
+  #modal-close { position:absolute; top:10px; right:12px; background:transparent;
+                 border:0; color:#8b949e; font-size:20px; line-height:1;
+                 cursor:pointer; padding:2px 6px; border-radius:6px; }
+  #modal-close:hover { color:#e6edf3; }
+  .rc-status { display:inline-block; font-size:11px; text-transform:uppercase;
+               letter-spacing:.08em; padding:2px 9px; border-radius:5px; margin-bottom:10px; }
+  .rc-status.ok { background:#1a7f3722; color:#7ee787; }
+  .rc-status.warn { background:#d2992222; color:#d29922; }
+  .rc-claim { border-left:2px solid #30363d; padding:6px 0 6px 11px; margin:9px 0; }
+  .rc-ev { color:#8b949e; font-size:12.5px; margin-top:3px; }
+  .approval { background:#161b22; border:1px solid #d2992255; border-radius:10px;
+              padding:13px 15px; margin:10px 0; }
+  .ap-title { color:#d29922; font-size:12px; text-transform:uppercase;
+              letter-spacing:.07em; }
+  .ap-what { margin:7px 0 11px; }
+  .ap-what code { background:#0d1117; border:1px solid #21262d; border-radius:5px;
+                  padding:1px 6px; font-size:13px; }
+  .ap-args { color:#8b949e; font-size:13px; margin-top:5px; }
+  .ap-bar button { border:1px solid #30363d; background:#21262d; color:#e6edf3;
+                   padding:6px 15px; border-radius:7px; cursor:pointer; margin-right:7px; }
+  .ap-bar button.ok { border-color:#238636; color:#7ee787; }
+  .ap-bar button.no { border-color:#5c2a26; color:#f85149; }
+  button:focus-visible, a:focus-visible, input:focus-visible {
+    outline:2px solid #58a6ff; outline-offset:2px; }
 </style>
 </head>
 <body>
-<header>bender<small>robot v0.2</small><a href="__PREFIX__/dash">dashboard</a></header>
+<header>bender<small>robot v0.2</small><a href="__PREFIX__/dash">dashboard</a><a href="__PREFIX__/me" style="margin-right:14px">my data</a></header>
 <div id="log"></div>
 <div id="thinking">thinking&hellip;</div>
 <form id="f">
@@ -47,6 +82,11 @@
   <input id="t" type="text" autocomplete="off" placeholder="say something to your robot" autofocus>
   <button id="b">send</button>
 </form>
+<div id="modal" role="dialog" aria-modal="true" aria-label="receipt">
+  <div id="modal-box"><button id="modal-close" aria-label="close receipt">&times;</button>
+  <h3>receipt &mdash; what this reply actually did</h3>
+  <div id="modal-body"></div></div>
+</div>
 <script>
   const log = document.getElementById('log');
   const input = document.getElementById('t');
@@ -69,6 +109,17 @@
     const b = document.createElement('div');
     b.textContent = row.content;
     d.append(w, b);
+    // spec 4.1.4: the receipts law, made visible. Every reply that came
+    // from a turn can show what it actually did and the evidence behind
+    // each claim -- otherwise "evidence-grade" is a word in a document.
+    if (row.intent) {
+      const r = document.createElement('button');
+      r.className = 'receipt';
+      r.textContent = 'receipt';
+      r.title = 'what this reply actually did, and the evidence for it';
+      r.onclick = () => showReceipt(row.intent);
+      d.appendChild(r);
+    }
     log.appendChild(d);
     log.scrollTop = log.scrollHeight;
   }
@@ -150,6 +201,143 @@
     }
   };
 
+  // ---- the receipt inspector (spec 4.1.4) ----
+  async function showReceipt(intent) {
+    const box = document.getElementById('modal');
+    const body = document.getElementById('modal-body');
+    body.textContent = 'reading the journal…';
+    box.style.display = 'flex';
+    try {
+      const r = await fetch('__PREFIX__/api/receipt/' + encodeURIComponent(intent));
+      if (!r.ok) { body.textContent = 'no receipt for that turn.'; return; }
+      const j = await r.json();
+      body.innerHTML = '';
+      const h = document.createElement('div');
+      h.className = 'rc-status ' + (j.status === 'verified' ? 'ok' : 'warn');
+      h.textContent = j.status;
+      body.appendChild(h);
+      (j.claims || []).forEach(c => {
+        const box2 = document.createElement('div');
+        box2.className = 'rc-claim';
+        const t = document.createElement('div');
+        t.textContent = c.claim;
+        box2.appendChild(t);
+        (c.evidence || []).forEach(e => {
+          const ev = document.createElement('div');
+          ev.className = 'rc-ev';
+          ev.textContent = '· ' + e.kind + (e.provider ? ' / ' + e.provider : '') +
+                           (e.external_id ? ' → ' + e.external_id : '');
+          box2.appendChild(ev);
+        });
+        if (!(c.evidence || []).length) {
+          const ev = document.createElement('div');
+          ev.className = 'rc-ev';
+          ev.textContent = '· no evidence — this asserts nothing about the world';
+          box2.appendChild(ev);
+        }
+        body.appendChild(box2);
+      });
+      const foot = document.createElement('div');
+      foot.className = 'rc-ev';
+      const models = (j.models || []).join(', ');
+      foot.textContent = (models ? 'models: ' + models : 'no model spoke') +
+        ((j.disclosures || []).length ? ' · disclosed: ' + j.disclosures.join(', ') : '');
+      body.appendChild(foot);
+    } catch (e) {
+      body.textContent = 'could not read the receipt: ' + e;
+    }
+  }
+  // guarded: this used to be a bare getElementById whose null took the
+  // whole script down with it -- and everything after it, including the
+  // history poll, so the chat rendered EMPTY. A decoration must never be
+  // able to cost the page its content.
+  const modalEl = document.getElementById('modal');
+  if (modalEl) {
+    // clicking the backdrop works, but only with a mouse; a keyboard user
+    // needs something focusable to reach
+    document.getElementById('modal-close').onclick = () => {
+      modalEl.style.display = 'none';
+    };
+    modalEl.onclick = (e) => {
+      if (e.target.id === 'modal') e.target.style.display = 'none';
+    };
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') modalEl.style.display = 'none';
+    });
+  }
+
+  // ---- approval cards (spec 4.1.4): buttons over the durable gate ----
+  let approvalsDrawn = new Set();
+  async function loadApprovals() {
+    try {
+      const r = await fetch('__PREFIX__/api/approvals');
+      if (!r.ok) return;
+      const list = await r.json();
+      const live = new Set(list.map(a => a.intent));
+      // an approval answered elsewhere leaves the screen
+      document.querySelectorAll('.approval').forEach(el => {
+        if (!live.has(el.dataset.intent)) { el.remove(); approvalsDrawn.delete(el.dataset.intent); }
+      });
+      list.forEach(a => {
+        if (approvalsDrawn.has(a.intent)) return;
+        approvalsDrawn.add(a.intent);
+        const card = document.createElement('div');
+        card.className = 'approval';
+        card.dataset.intent = a.intent;
+        const t = document.createElement('div');
+        t.className = 'ap-title';
+        t.textContent = 'needs your say-so';
+        const what = document.createElement('div');
+        what.className = 'ap-what';
+        const g = a.args || {};
+        // a card that asks for consent has to say what it is asking about.
+        // Raw JSON is not a description -- someone approving a send should
+        // read the recipient, not parse an object.
+        if (a.capability === 'email.send') {
+          what.textContent = 'Send an email to ' + (g.to || 'an unnamed address') +
+            (g.subject ? ' — “' + g.subject + '”' : '');
+        } else {
+          const args = Object.entries(g)
+            .map(([k, v]) => k + ': ' + (typeof v === 'string' ? v : JSON.stringify(v)));
+          const name = document.createElement('code');
+          name.textContent = a.capability;
+          what.textContent = '';
+          what.append('Run ', name);
+          if (args.length) {
+            const detail = document.createElement('div');
+            detail.className = 'ap-args';
+            detail.textContent = args.join(' · ');
+            what.appendChild(detail);
+          }
+        }
+        const bar = document.createElement('div');
+        bar.className = 'ap-bar';
+        const mk = (label, approved, cls) => {
+          const b = document.createElement('button');
+          b.textContent = label;
+          if (cls) b.className = cls;
+          b.onclick = async () => {
+            bar.querySelectorAll('button').forEach(x => x.disabled = true);
+            const res = await fetch('__PREFIX__/api/approvals/' + encodeURIComponent(a.intent), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ approved }),
+            });
+            if (!res.ok) { t.textContent = 'that approval is no longer open'; }
+            card.remove(); approvalsDrawn.delete(a.intent);
+            poll(); loadApprovals();
+          };
+          bar.appendChild(b);
+        };
+        mk('Approve', true, 'ok');
+        mk('Deny', false, 'no');
+        card.append(t, what, bar);
+        log.appendChild(card);
+        log.scrollTop = log.scrollHeight;
+      });
+    } catch (_) {}
+  }
+
   // SSE push: replies and scheduler fires arrive the moment they exist;
   // a slow poll stays on as the fallback when the stream reconnects.
   try {
@@ -159,13 +347,15 @@
       // everything rather than sit silently stale
       if (e.data === 'resync') { lastTs = 0; seen.clear(); log.innerHTML = ''; draftEl = null; }
       poll();
+      loadApprovals();
     };
     es.addEventListener('draft', (e) => {
       try { showDraft(JSON.parse(e.data)); } catch (_) {}
     });
   } catch (_) {}
   poll();
-  setInterval(poll, 15000);
+  loadApprovals();
+  setInterval(() => { poll(); loadApprovals(); }, 15000);
 </script>
 </body>
 </html>

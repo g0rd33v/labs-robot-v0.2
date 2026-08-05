@@ -418,6 +418,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Removal is a crypto-shred, not a flag (spec 4.2.3.4).
+    ///
+    /// The assertion that matters is not "the reply said done" but that the
+    /// file is gone AND the key is gone -- checked separately, because
+    /// deleting only the file leaves a live key for a backup to resurrect,
+    /// and deleting only the key leaves bytes that look like data.
+    #[test]
+    fn removing_someone_destroys_their_cell_beyond_recovery() {
+        let (cfg, dir) = test_cfg();
+        let boot = bootstrap(&cfg).unwrap();
+        let owner = boot.robot.owner_principal;
+
+        let reply = boot.state.robot.handle_message(owner, "invite".into()).unwrap();
+        let token = reply.split("/i/").nth(1).unwrap().lines().next().unwrap().trim().to_string();
+        let (member, _) = boot.state.robot.accept_invite(&token).unwrap();
+        boot.state
+            .robot
+            .handle_message(member, "remember that my passport number is X99".into())
+            .unwrap();
+
+        let cell_id: String = {
+            let core = boot.robot.core.lock().unwrap();
+            core.query_row(
+                "SELECT cell_id FROM principals WHERE id = ?1",
+                rusqlite::params![member],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let cell_file = dir.join("cells").join(format!("{cell_id}.db"));
+        assert!(cell_file.exists(), "the member's cell should exist first");
+
+        // a member may not remove the owner, nor anyone but themselves
+        assert!(boot.robot.remove_member(member, owner).is_err());
+        assert!(boot.robot.remove_member(owner, owner).is_err(), "the owner is the robot");
+
+        let said = boot.robot.remove_member(owner, member).unwrap();
+        assert!(said.contains("key is destroyed"), "{said}");
+
+        // 1. the bytes are gone -- including the WAL, which holds the most
+        //    recent plaintext pages
+        assert!(!cell_file.exists(), "the cell file survived a removal");
+        assert!(!dir.join("cells").join(format!("{cell_id}.db-wal")).exists());
+
+        // 2. the key is gone, so even a restored file would be noise
+        let keys_left: i64 = {
+            let core = boot.robot.core.lock().unwrap();
+            core.query_row(
+                "SELECT count(*) FROM cell_keys WHERE cell_id = ?1",
+                rusqlite::params![cell_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(keys_left, 0, "the wrapped DEK survived -- this is not a shred");
+
+        // 3. the person can no longer act, and re-opening does not silently
+        //    mint them a fresh cell
+        assert!(boot.state.robot.history(member, 0).is_err());
+        assert!(!boot.robot.principals_active().unwrap().contains(&member));
+
+        // 4. one line survives, which is what makes this auditable rather
+        //    than merely quiet
+        let journaled: i64 = {
+            let core = boot.robot.core.lock().unwrap();
+            core.query_row(
+                "SELECT count(*) FROM core_journal WHERE kind = 'member.removed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(journaled, 1);
+
+        // and removing twice is an error, not a second silent success
+        assert!(boot.robot.remove_member(owner, member).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The only authorization boundary in the product, exercised for real:
     /// an owner and a member, both with journaled intents, asserting the
     /// ABSENCE of the effect for the member -- not just the refusal string.

@@ -36,14 +36,43 @@ pub trait Robot: Send + Sync {
         filename: String,
         bytes: Vec<u8>,
     ) -> anyhow::Result<String>;
+    /// (ts, direction, content, intent_id) -- intent empty when there is
+    /// no receipt behind the line.
     fn history(&self, principal: i64, after_ts: i64)
-        -> anyhow::Result<Vec<(i64, String, String)>>;
+        -> anyhow::Result<Vec<(i64, String, String, String)>>;
     /// Redeem a one-time invite token; returns the new member principal.
     fn accept_invite(&self, token: &str) -> anyhow::Result<(i64, String)>;
     /// New-message signal: receivers get the principal id that has news.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<i64>;
     /// Live draft text while an answer streams: (principal, accumulated).
     fn subscribe_drafts(&self) -> tokio::sync::broadcast::Receiver<(i64, String)>;
+    /// The receipt behind one turn, as JSON (spec 4.1.4's inspector).
+    fn receipt(&self, principal: i64, intent_id: &str) -> anyhow::Result<serde_json::Value>;
+    /// Anything waiting for this person's yes, as JSON cards.
+    fn pending_approvals(&self, principal: i64) -> anyhow::Result<serde_json::Value>;
+    /// Answer one. Returns the robot's reply.
+    fn answer_approval(
+        &self,
+        principal: i64,
+        intent_id: &str,
+        approved: bool,
+    ) -> anyhow::Result<String>;
+    /// Everything held about THIS person, all five sec 4b categories.
+    fn my_registry(&self, principal: i64) -> anyhow::Result<serde_json::Value>;
+    /// Everything held about this person, as one portable document.
+    fn my_export(&self, principal: i64) -> anyhow::Result<serde_json::Value>;
+    /// Remove a person and destroy their cell (spec 4.2.3.4). `actor` may
+    /// remove themselves; only the owner may remove anyone else.
+    fn remove_person(&self, actor: i64, target: i64) -> anyhow::Result<String>;
+    /// One item action: correct | confirm | erase.
+    fn registry_action(
+        &self,
+        principal: i64,
+        category: &str,
+        index: usize,
+        action: &str,
+        value: Option<&str>,
+    ) -> anyhow::Result<String>;
     fn dashboard(&self, principal: i64) -> anyhow::Result<DashData>;
     fn owner_principal(&self) -> i64;
     /// Finish an OAuth sign-in; returns which account was connected.
@@ -164,6 +193,14 @@ fn routes(state: Arc<WebState>) -> Router {
         .route("/api/history", get(api_history))
         .route("/api/upload", post(api_upload))
         .route("/api/stream", get(api_stream))
+        .route("/api/receipt/{intent}", get(api_receipt))
+        .route("/api/approvals", get(api_approvals))
+        .route("/api/approvals/{intent}", post(api_answer_approval))
+        .route("/api/registry", get(api_registry))
+        .route("/api/registry/action", post(api_registry_action))
+        .route("/api/people/{id}/remove", post(api_remove_person))
+        .route("/api/export", get(api_export))
+        .route("/me", get(me_page))
         .route("/oauth/google/callback", get(oauth_callback))
         .with_state(state)
 }
@@ -292,6 +329,209 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// The receipt behind a reply (spec 4.1.4). Scoped to the caller's own
+/// cell -- a receipt names what the robot did FOR THIS PERSON, and cells
+/// do not read each other.
+async fn api_receipt(
+    State(st): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(intent): Path<String>,
+) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.receipt(principal, &intent)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("receipt lookup failed: {e:#}");
+            (StatusCode::NOT_FOUND, "no receipt for that turn").into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "receipt failed").into_response(),
+    }
+}
+
+async fn api_approvals(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.pending_approvals(principal)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "approvals failed").into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ApprovalBody {
+    approved: bool,
+}
+
+/// Approve or deny (spec 4.1.4's buttons). The same durable path a typed
+/// "yes" takes -- the buttons are a surface over sec 3b.2, not a bypass.
+async fn api_answer_approval(
+    State(st): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(intent): Path<String>,
+    Json(body): Json<ApprovalBody>,
+) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || {
+        robot.answer_approval(principal, &intent, body.approved)
+    })
+    .await
+    {
+        Ok(Ok(reply)) => Json(serde_json::json!({ "reply": reply })).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("approval answer failed: {e:#}");
+            (StatusCode::CONFLICT, "that approval is no longer open").into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "approval failed").into_response(),
+    }
+}
+
+/// The member's own Registry (spec 4.2.4 + 10.1.3: full self-view, all
+/// five categories -- the owner's decision).
+async fn api_registry(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.my_registry(principal)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("registry read failed: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "registry failed").into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "registry failed").into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryAction {
+    category: String,
+    index: usize,
+    action: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+/// Take it with you (spec 4.2.3.4). Served as a download rather than a
+/// page, because the point is a file that outlives this robot.
+async fn api_export(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.my_export(principal)).await {
+        Ok(Ok(doc)) => {
+            let body = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into());
+            (
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"my-data.json\"",
+                    ),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "export failed").into_response(),
+    }
+}
+
+/// What the person must type to prove they mean it. Not a checkbox: this
+/// destroys a key, and there is no undo behind it.
+#[derive(serde::Deserialize)]
+struct RemoveBody {
+    confirm: String,
+}
+
+/// Erase a person (spec 4.2.3.4). The authorisation check lives in the
+/// robot, not here -- a surface must never be the thing that decides who
+/// may delete whom.
+async fn api_remove_person(
+    State(st): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(who): Path<String>,
+    Json(body): Json<RemoveBody>,
+) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    if body.confirm.trim() != "ERASE" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": "type ERASE to confirm" })),
+        )
+            .into_response();
+    }
+    // "me" is the only identity a member's own page ever names; an owner
+    // removing someone else passes that person's id.
+    let target = if who == "me" {
+        principal
+    } else {
+        match who.parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => return (StatusCode::BAD_REQUEST, "not a person").into_response(),
+        }
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || robot.remove_person(principal, target)).await {
+        Ok(Ok(msg)) => Json(serde_json::json!({ "ok": true, "message": msg })).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "removal failed").into_response(),
+    }
+}
+
+async fn api_registry_action(
+    State(st): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(body): Json<RegistryAction>,
+) -> Response {
+    let Some(principal) = st.session_principal(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    let robot = st.robot.clone();
+    match tokio::task::spawn_blocking(move || {
+        robot.registry_action(
+            principal,
+            &body.category,
+            body.index,
+            &body.action,
+            body.value.as_deref(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(msg)) => Json(serde_json::json!({ "ok": true, "message": msg })).into_response(),
+        // an erase that failed must SAY so -- spec 4.2.4: never fake success
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "action failed").into_response(),
+    }
+}
+
+async fn me_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    if st.session_principal(&headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "open your link first").into_response();
+    }
+    Html(include_str!("me.html").replace("__PREFIX__", &st.prefix)).into_response()
+}
+
 async fn chat_page(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Response {
     if st.session_principal(&headers).is_none() {
         return (
@@ -371,6 +611,10 @@ struct HistoryRow {
     ts: i64,
     direction: String,
     content: String,
+    /// The turn behind this reply, so the chat can offer its receipt.
+    /// Empty when there is none (inbound, or recorded before this existed).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    intent: String,
 }
 
 async fn api_history(
@@ -385,10 +629,11 @@ async fn api_history(
     match tokio::task::spawn_blocking(move || robot.history(principal, q.after)).await {
         Ok(Ok(rows)) => Json(
             rows.into_iter()
-                .map(|(ts, direction, content)| HistoryRow {
+                .map(|(ts, direction, content, intent)| HistoryRow {
                     ts,
                     direction,
                     content,
+                    intent,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -471,6 +716,39 @@ async fn api_stream(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Resp
 
 #[cfg(test)]
 mod tests {
+    /// A page's script must not bind to markup that does not exist yet.
+    ///
+    /// This is a real regression, not a hypothetical: the receipt modal was
+    /// appended after `</script>`, so `getElementById('modal')` returned
+    /// null, the TypeError killed the rest of the script, and with it the
+    /// history poll -- the chat rendered COMPLETELY EMPTY. Every test
+    /// passed, because no test opens the page. So this one reads the
+    /// document order instead: every id the script looks up at load time
+    /// must appear above the script that looks it up.
+    #[test]
+    fn every_element_the_script_binds_to_exists_before_the_script() {
+        for (name, html) in [
+            ("chat.html", include_str!("chat.html")),
+            ("me.html", include_str!("me.html")),
+        ] {
+            let script_at = html.find("<script>").unwrap_or_else(|| panic!("{name}: no script"));
+            let (markup, script) = html.split_at(script_at);
+            // every getElementById('x') the script performs
+            let mut rest = script;
+            while let Some(at) = rest.find("getElementById('") {
+                rest = &rest[at + "getElementById('".len()..];
+                let id = &rest[..rest.find('\'').expect("closing quote")];
+                assert!(
+                    markup.contains(&format!("id=\"{id}\"")),
+                    "{name}: the script binds #{id}, but that element is not in \
+                     the markup ABOVE the script. At load time it is null, and \
+                     the TypeError takes every later statement with it -- \
+                     including whatever renders the page."
+                );
+            }
+        }
+    }
+
     use super::*;
     use axum::http::Request;
     use http_body_util::BodyExt;
@@ -487,6 +765,35 @@ mod tests {
         fn subscribe_drafts(&self) -> tokio::sync::broadcast::Receiver<(i64, String)> {
             tokio::sync::broadcast::channel(1).1
         }
+        fn receipt(&self, _p: i64, intent: &str) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({ "intent": intent, "status": "verified", "claims": [] }))
+        }
+        fn pending_approvals(&self, _p: i64) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!([]))
+        }
+        fn answer_approval(&self, _p: i64, _i: &str, _a: bool) -> anyhow::Result<String> {
+            anyhow::bail!("no approval in the test double")
+        }
+        fn my_registry(&self, _p: i64) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({ "knowledge": [], "instructions": [],
+                                   "preferences": [], "media": [], "grants": [] }))
+        }
+        fn my_export(&self, _p: i64) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({ "registry": {}, "conversation": [] }))
+        }
+        fn remove_person(&self, _a: i64, _t: i64) -> anyhow::Result<String> {
+            Ok("erased".into())
+        }
+        fn registry_action(
+            &self,
+            _p: i64,
+            _c: &str,
+            _i: usize,
+            _a: &str,
+            _v: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok("ok".into())
+        }
 
         fn handle_message(&self, p: i64, t: String) -> anyhow::Result<String> {
             Ok(format!("echo[{p}]: {t}"))
@@ -494,8 +801,8 @@ mod tests {
         fn handle_media(&self, p: i64, name: String, bytes: Vec<u8>) -> anyhow::Result<String> {
             Ok(format!("stored[{p}]: {name} ({} bytes)", bytes.len()))
         }
-        fn history(&self, p: i64, after: i64) -> anyhow::Result<Vec<(i64, String, String)>> {
-            Ok(vec![(after + 1, "out".into(), format!("h[{p}]"))])
+        fn history(&self, p: i64, after: i64) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+            Ok(vec![(after + 1, "out".into(), format!("h[{p}]"), String::new())])
         }
         fn accept_invite(&self, token: &str) -> anyhow::Result<(i64, String)> {
             if token == "good" {

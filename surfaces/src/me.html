@@ -1,0 +1,231 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my data</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0d1117; color:#e6edf3;
+         font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { padding:12px 20px; border-bottom:1px solid #21262d; font-weight:600;
+           color:#7ee787; letter-spacing:.03em; }
+  header small { color:#8b949e; font-weight:400; margin-left:8px; }
+  header a { color:#58a6ff; float:right; text-decoration:none; }
+  main { padding:20px; max-width:900px; margin:0 auto; }
+  .tabs { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:18px; }
+  .tab { background:#161b22; border:1px solid #21262d; color:#8b949e;
+         padding:7px 14px; border-radius:8px; cursor:pointer; font-size:14px; }
+  .tab[aria-selected="true"] { background:#1f6feb22; border-color:#1f6feb; color:#e6edf3; }
+  .tab:focus-visible, button:focus-visible { outline:2px solid #58a6ff; outline-offset:2px; }
+  .item { background:#161b22; border:1px solid #21262d; border-radius:10px;
+          padding:12px 14px; margin-bottom:8px; }
+  .val { font-size:15px; }
+  .meta { color:#8b949e; font-size:12.5px; margin-top:4px; }
+  .acts { margin-top:9px; display:flex; gap:6px; flex-wrap:wrap; }
+  button { background:#21262d; border:1px solid #30363d; color:#e6edf3;
+           padding:5px 11px; border-radius:7px; cursor:pointer; font-size:13px; }
+  button:hover { background:#30363d; }
+  button.danger { color:#f85149; border-color:#5c2a26; }
+  .flag { display:inline-block; background:#d2992222; color:#d29922; border-radius:5px;
+          padding:1px 7px; font-size:11.5px; margin-left:6px; }
+  .note { color:#8b949e; font-size:13px; margin:10px 0 16px; }
+  #say { position:fixed; left:50%; transform:translateX(-50%); bottom:22px;
+         background:#161b22; border:1px solid #30363d; border-radius:9px;
+         padding:9px 16px; display:none; max-width:88vw; }
+  .empty { color:#8b949e; padding:14px 0; }
+  #leave { margin-top:34px; border-top:1px solid #21262d; padding-top:18px; }
+  #leave h2 { font-size:15px; color:#f85149; margin:0 0 6px; }
+  #leave p { color:#8b949e; font-size:13.5px; max-width:640px; }
+  #leave a { color:#58a6ff; }
+  #leave label { display:block; font-size:13px; color:#8b949e; margin:12px 0 5px; }
+  #leave input { background:#0d1117; border:1px solid #30363d; color:#e6edf3;
+                 border-radius:7px; padding:7px 11px; font-size:14px; width:170px;
+                 margin-right:8px; }
+</style></head><body>
+<header>my data<small>everything this robot holds about you</small><a href="__PREFIX__/chat">&larr; chat</a></header>
+<main>
+  <p class="note">Five categories, and nothing about you exists outside them.
+     Every item shows where it came from. You can correct it, confirm it, or
+     erase it &mdash; erasing is real, not hiding.</p>
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div id="list" role="tabpanel" aria-live="polite"></div>
+  <section id="leave">
+    <h2>Leave, and take everything with you</h2>
+    <p>Your cell is one encrypted file with one key. Leaving destroys the key
+       and deletes the file, so what is stored about you stops being readable
+       &mdash; by this robot, by whoever holds the disk, by anyone. It cannot
+       be undone and there is no copy. All that survives is one line saying it
+       happened.</p>
+    <p><a id="export" href="__PREFIX__/api/export" download="my-data.json">Download
+       everything first</a> &mdash; one file: every fact with its source, every
+       standing rule, your preferences, your file list, and the whole
+       conversation. Take it before you erase it; afterwards there is nothing
+       left to take it from.</p>
+    <label for="confirm">Type <b>ERASE</b> to confirm</label>
+    <input id="confirm" autocomplete="off" spellcheck="false" aria-describedby="leave">
+    <button class="danger" id="leave-btn">Erase everything and leave</button>
+  </section>
+</main>
+<div id="say" role="status" aria-live="polite"></div>
+<script>
+  const CATS = [
+    ['knowledge',    'Knowledge',    'facts you told me, each with your own words behind it'],
+    ['instructions', 'Instructions', 'standing rules you gave me'],
+    ['preferences',  'Preferences',  'how I speak to you'],
+    ['media',        'Media',        'files in your vault'],
+    ['grants',       'Grants',       'outside accounts you connected'],
+  ];
+  const P = '__PREFIX__';
+  let data = {}, active = 'knowledge';
+  const tabsEl = document.getElementById('tabs');
+  const listEl = document.getElementById('list');
+  const sayEl  = document.getElementById('say');
+
+  function say(msg, bad) {
+    sayEl.textContent = msg;
+    sayEl.style.display = 'block';
+    sayEl.style.borderColor = bad ? '#5c2a26' : '#30363d';
+    setTimeout(() => { sayEl.style.display = 'none'; }, 4200);
+  }
+
+  function when(ms) {
+    if (!ms) return '';
+    try { return new Date(ms).toLocaleDateString(); } catch (_) { return ''; }
+  }
+
+  function drawTabs() {
+    tabsEl.innerHTML = '';
+    CATS.forEach(([key, label]) => {
+      const b = document.createElement('button');
+      b.className = 'tab';
+      b.role = 'tab';
+      b.setAttribute('aria-selected', key === active);
+      b.textContent = label + ' (' + ((data[key] || []).length) + ')';
+      b.onclick = () => { active = key; drawTabs(); drawList(); };
+      tabsEl.appendChild(b);
+    });
+  }
+
+  function act(category, index, action, value) {
+    return fetch(P + '/api/registry/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ category, index, action, value }),
+    }).then(async r => {
+      const j = await r.json().catch(() => ({ message: 'that did not work' }));
+      // never fake success: a failed erase says so, loudly
+      say(j.message, !r.ok);
+      if (r.ok) load();
+    });
+  }
+
+  function drawList() {
+    const rows = data[active] || [];
+    const blurb = (CATS.find(c => c[0] === active) || [])[2] || '';
+    listEl.innerHTML = '';
+    const head = document.createElement('p');
+    head.className = 'note';
+    head.textContent = blurb;
+    listEl.appendChild(head);
+    if (!rows.length) {
+      const e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = 'Nothing stored yet — talk to your robot.';
+      listEl.appendChild(e);
+      return;
+    }
+    rows.forEach((row, i) => {
+      const n = i + 1;
+      const d = document.createElement('div');
+      d.className = 'item';
+
+      const v = document.createElement('div');
+      v.className = 'val';
+      v.textContent = n + '. ' + row.value;
+      if (row.contested) {
+        const f = document.createElement('span');
+        f.className = 'flag';
+        f.textContent = 'conflicting — pick one';
+        v.appendChild(f);
+      }
+      d.appendChild(v);
+
+      const bits = [];
+      if (row.source) bits.push('from your words: “' + row.source + '”');
+      if (row.learned_at) bits.push(when(row.learned_at));
+      if (row.since) bits.push('since ' + when(row.since));
+      if (row.status) bits.push(row.status);
+      if (row.class && row.class !== 'owner_private') bits.push(row.class);
+      if (row.size) bits.push(row.size + ' bytes');
+      if (row.scopes) bits.push(row.scopes.length + ' permissions');
+      if (row.inferred) bits.push('inferred');
+      if (bits.length) {
+        const m = document.createElement('div');
+        m.className = 'meta';
+        m.textContent = bits.join(' · ');
+        d.appendChild(m);
+      }
+
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      const add = (label, fn, danger) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        if (danger) b.className = 'danger';
+        b.onclick = fn;
+        acts.appendChild(b);
+      };
+      if (active === 'knowledge') {
+        add('confirm', () => act('knowledge', n, 'confirm'));
+        add('correct', () => {
+          const next = prompt('Correct it to:', row.value);
+          if (next && next !== row.value) act('knowledge', n, 'correct', next);
+        });
+        add('erase', () => {
+          if (confirm('Erase for real?\n\n' + row.value)) act('knowledge', n, 'erase');
+        }, true);
+      } else if (active === 'instructions') {
+        add('drop', () => {
+          if (confirm('Stop following this rule?\n\n' + row.value)) act('instructions', n, 'erase');
+        }, true);
+      } else if (active === 'media') {
+        add('delete', () => {
+          if (confirm('Delete this file?\n\n' + row.value)) act('media', n, 'erase', row.value);
+        }, true);
+      } else if (active === 'grants') {
+        add('disconnect', () => {
+          const provider = String(row.value).split(' ')[0];
+          if (confirm('Disconnect ' + provider + '?')) act('grants', n, 'erase', provider);
+        }, true);
+      }
+      if (acts.children.length) d.appendChild(acts);
+      listEl.appendChild(d);
+    });
+  }
+
+  function load() {
+    return fetch(P + '/api/registry')
+      .then(r => r.json())
+      .then(j => { data = j; drawTabs(); drawList(); })
+      .catch(() => say('could not read your registry', true));
+  }
+  document.getElementById('leave-btn').onclick = async () => {
+    const confirmText = document.getElementById('confirm').value;
+    if (confirmText.trim() !== 'ERASE') { say('type ERASE to confirm', true); return; }
+    // ME: the server resolves the session to a principal and checks who may
+    // remove whom -- the page never asserts an identity of its own.
+    const r = await fetch(P + '/api/people/me/remove', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: confirmText }),
+    });
+    const j = await r.json().catch(() => ({ message: 'that did not work' }));
+    say(j.message, !r.ok);
+    if (r.ok) {
+      document.getElementById('list').innerHTML = '';
+      document.getElementById('tabs').innerHTML = '';
+      document.getElementById('leave').innerHTML =
+        '<h2>Gone.</h2><p>' + j.message + '</p>';
+    }
+  };
+  load();
+</script>
+</body></html>

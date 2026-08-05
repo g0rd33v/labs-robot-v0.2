@@ -9,9 +9,11 @@ later and more careful read.
 **Headline: the MVP's Must list is complete, and the runtime has gone well
 past it** — items the spec calls Post-MVP (calendar, email, sync, update
 channels, the full Registry, the commitment ledger) shipped in the last
-week. What is genuinely unmet is concentrated in three places: **one
-performance target, the chat surface's inspection affordances, and the
-member-facing half of the Registry.**
+week. What is genuinely unmet is now concentrated in **one place: a
+performance target.** The chat surface's inspection affordances and the
+member-facing half of the Registry — items 2, 3 and 4 of the punch list
+below, and the largest single gap this read found — shipped on 5 Aug and
+are marked through.
 
 ---
 
@@ -20,7 +22,7 @@ member-facing half of the Registry.**
 | # | Metric | Status |
 |---|---|---|
 | 1 | DoD demo passes end-to-end (M7) | ✅ passed 2026-07-30; re-proven since |
-| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ⚠️ **partly met — see below** |
+| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ⚠️ **partly met** — routine met (turn p50 2613 ms). First-visible hit 993 ms avg on a *warm* cache (5 Aug) but 3567 ms on the cold run minutes earlier; not met until it holds cold |
 | 3 | Zero intents without terminal receipts, 10K-turn soak | ✅ **exceeded**: 25,000 turns, 0 dropped |
 | 4 | MISROUTE-0 on the routing corpus | ✅ 66/66 offline, 0; live 60 cases, 0 |
 | 5 | Package → USB → resume with 100% memory/receipts/persona | ✅ proven twice (USB, and today to a container) |
@@ -117,7 +119,7 @@ action records under each reply.
 | 4.2.3.1 source one tap away, FK-backed | ✅ FK constraint; source shown in registry list |
 | 4.2.3.2 correction supersedes, not deletes | ✅ |
 | 4.2.3.3 erase is real and journaled | ✅ row deleted, tombstoned, travels in sync |
-| 4.2.3.4 member departure exports + crypto-shreds the key | ❌ **not built** — no member-removal command exists |
+| 4.2.3.4 member departure exports + crypto-shreds the key | ✅ both halves: `/api/export` serves registry + whole conversation as a download; `RobotCore::remove_member` drops the handle, deletes the wrapped DEK, unlinks the file + `-wal`/`-shm` + media vault, journals |
 | D2: five category tabs | ⚠️ **all five exist as data and in the owner dashboard**; `/registry` renders all five in chat. There is no per-category tabbed UI with per-item row actions. |
 | D2: per item — view source · correct · confirm · erase | ⚠️ all four exist **as chat commands** (`my facts`, `correct fact N`, `confirm fact N`, `forget fact N`); none as buttons |
 | D2: export all (JSON) | ✅ `registry.export` writes item-by-item JSON into the person's vault |
@@ -154,13 +156,17 @@ Re-read at full fidelity ✅. Generated artifacts saved and retrievable ✅
 (`file.save/read/list/delete`, beyond the spec's ask). Expiry jobs remain
 Post-MVP as the spec allows.
 
-### 4.6 People ✅ except departure
+### 4.6 People ✅
 
 Invite links → own cell → own chat ✅. **Zero cross-cell reads** ✅,
 verified by the harness. Telegram pending-approval flow ✅ (Q2). Roles
 Owner/Member ✅. Join policy Private preset ✅. **Member removal with
-crypto-shred: ❌ not built** — the mechanism exists (per-cell keys) but no
-command invokes it.
+crypto-shred: ✅ shipped 5 Aug** — with the export the clause also asks
+for, offered on the same screen and before the erase. A person may erase
+themselves, the owner
+may erase anyone else, and nobody may erase the owner. Ordered so an
+interruption at any point after the key is deleted still leaves the data
+destroyed.
 
 ### 4.7 Dashboard & Boundary Log ✅ exceeded
 
@@ -230,14 +236,15 @@ Ranked by distance from a promise the spec makes to a user's face.
 
 1. **TTFT at the surface (§1.4.2, §4.1.3.1)** — the only unmet success
    metric. Fix: speculative fan-out so routing and answer-context overlap.
-2. **Receipt inspector + approval cards in chat (§4.1.4)** — the receipts
-   law is real but invisible to a member; this is the feature that makes
-   "evidence-grade" legible to someone who never opens a dashboard.
-3. **Registry as a member-facing screen (§4.2.4)** — five tabs, per-item
-   buttons, and a member self-view. Today every capability exists as a
-   chat command and an owner-only panel.
-4. **Member removal + crypto-shred (§4.2.3.4, §5.3)** — a promised right
-   with no way to exercise it.
+2. ~~Receipt inspector + approval cards in chat~~ ✅ **done (5 Aug)** — a
+   `receipt` button on every reply that came from a turn, opening the
+   journal's claims and evidence; approvals render as cards with Approve /
+   Deny over the same durable §3b.2 gate the typed answer uses.
+3. ~~Registry as a member-facing screen~~ ✅ **done (5 Aug)** — `/me`, five
+   tabs, per-item confirm / correct / erase, source and promotion rung on
+   every item, routed through the same `mind` functions as the chat
+   commands so "forget" has one implementation.
+4. ~~Member removal + crypto-shred~~ ✅ **done (5 Aug)** — see §4.6.
 5. ~~Fact promotion ladder and `contested`~~ ✅ **done** — Q21's exact
    thresholds in `mind::promotion`; facts enter `tentative`; contradictions
    keep both and surface on the dashboard as "conflicting — pick one".
@@ -253,16 +260,19 @@ Ranked by distance from a promise the spec makes to a user's face.
 10. **Double-send coalescing (§4.1.6)**; **resumable `package`
     (§4.8.3.1)**; **accessibility pass (§8.3)** — still open.
 
-Items 2, 3 and 4 are one coherent piece of work: **the member-facing
-surface of the governance the runtime already enforces.** That is the
-largest single gap between this specification and this product — and it is
-UI work over mechanisms that are already built and tested, not new
-machinery.
+Items 2, 3 and 4 were one coherent piece of work — **the member-facing
+surface of the governance the runtime already enforces** — and shipped
+together on 5 Aug. Building it produced its own lesson: the whole tranche
+passed 247 tests while the chat page rendered **completely empty** in a
+browser, because a modal bound before its markup existed. No test opened
+the page. `every_element_the_script_binds_to_exists_before_the_script` now
+reads the document order of both pages, and was verified to fail when the
+defect is reintroduced. What remains on this list is item 1 and item 10.
 
 ## 7. Open questions from §10.1, still open
 
 1. **Akita log numbers** (Q39) — still owner-side. Partly overtaken:
    router calls/turn is now *measured* at 1.03 rather than assumed ~2.
 2. **Voice replies (TTS)** — still out of MVP; unconfirmed.
-3. **Member self-view scope** — unresolved, and now blocking punch-list
-   item 3.
+3. ~~Member self-view scope~~ — **resolved by the owner**: all five
+   categories, which is what `/me` implements.

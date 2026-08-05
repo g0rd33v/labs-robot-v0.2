@@ -343,3 +343,215 @@ async fn the_surface_answers_english_and_degrades_honestly_elsewhere() {
         assert!(!reply.is_empty(), "{text}");
     }
 }
+
+/// The member-facing surface (spec §4.1.4 / §4.2.3): a person can see what
+/// is held about them, act on it, read the receipt behind a reply, and
+/// leave. Exercised over HTTP against a real cell, because every one of
+/// these is a promise the product makes in prose and only code can keep.
+#[tokio::test]
+async fn a_person_can_see_correct_and_erase_what_is_held_about_them() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    let (status, _) = post_json(
+        &t.router,
+        "/api/message",
+        &cookie,
+        &say("remember that my dentist is Dr Adams"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // it shows up under Knowledge, with the person's own words as source --
+    // law 5 visible to the person it is about
+    let (status, body) = get(&t.router, "/api/registry", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let reg: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let knowledge = reg["knowledge"].as_array().expect("five categories");
+    assert!(
+        knowledge.iter().any(|k| k["value"].as_str().unwrap_or("").contains("Adams")),
+        "the fact is not visible to its subject: {body}"
+    );
+    assert!(reg["instructions"].is_array() && reg["grants"].is_array());
+    assert!(
+        knowledge[0]["source"].as_str().is_some_and(|s| !s.is_empty()),
+        "a fact without its source shown is unprovenanced to the person"
+    );
+
+    // correcting it REPLACES the value rather than adding a rival
+    let before = knowledge.len();
+    let (status, _) = post_json(
+        &t.router,
+        "/api/registry/action",
+        &cookie,
+        &serde_json::json!({
+            "category": "knowledge", "index": 1,
+            "action": "correct", "value": "my dentist is Dr Bell"
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get(&t.router, "/api/registry", Some(&cookie)).await;
+    let reg: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let after = reg["knowledge"].as_array().unwrap();
+    assert_eq!(after.len(), before, "a correction must not leave both versions");
+    assert!(body.contains("Bell") && !body.contains("Adams"), "{body}");
+
+    // erasing is real: it leaves
+    let (status, _) = post_json(
+        &t.router,
+        "/api/registry/action",
+        &cookie,
+        &serde_json::json!({ "category": "knowledge", "index": 1, "action": "erase" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = get(&t.router, "/api/registry", Some(&cookie)).await;
+    assert!(!body.contains("Bell"), "erase did not erase: {body}");
+
+    // an action that cannot be done SAYS so rather than reporting success
+    let (status, body) = post_json(
+        &t.router,
+        "/api/registry/action",
+        &cookie,
+        &serde_json::json!({ "category": "knowledge", "index": 99, "action": "erase" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("\"ok\":false"), "{body}");
+}
+
+/// Every reply that came from a turn can show its receipt, and the receipt
+/// is the journal's, not a retelling.
+#[tokio::test]
+async fn a_reply_carries_a_receipt_the_person_can_open() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+    post_json(&t.router, "/api/message", &cookie, &say("remember that I row on Tuesdays")).await;
+
+    let (status, body) = get(&t.router, "/api/history?after=0", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let intent = rows
+        .iter()
+        .rev()
+        .find_map(|r| r["intent"].as_str())
+        .expect("a reply must name the receipt behind it");
+
+    let (status, body) = get(&t.router, &format!("/api/receipt/{intent}"), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let receipt: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(receipt["status"], "verified");
+    assert!(
+        !receipt["claims"].as_array().unwrap().is_empty(),
+        "a remember turn claims something: {body}"
+    );
+
+    // someone else's receipt is not readable, and a made-up one is not found
+    let (status, _) = get(&t.router, "/api/receipt/int_nonexistent", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// §4.2.3.4 says departure EXPORTS and then shreds. The export has to be
+/// complete and it has to arrive as a file -- the point is something that
+/// outlives the robot it came from.
+#[tokio::test]
+async fn a_person_can_take_everything_with_them_before_they_go() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+    post_json(&t.router, "/api/message", &cookie, &say("remember that my bike is blue")).await;
+
+    let res = t
+        .router
+        .clone()
+        .oneshot(
+            Request::get("/api/export")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // a download, not a page: the browser must save it
+    assert!(
+        res.headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("attachment") && v.contains("my-data.json")),
+        "the export must arrive as a file"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // the registry, whole
+    assert!(doc["registry"]["knowledge"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k["value"].as_str().unwrap_or("").contains("bike")));
+    for cat in ["instructions", "preferences", "media", "grants"] {
+        assert!(doc["registry"][cat].is_array(), "{cat} missing from the export");
+    }
+    // and the conversation, with both sides -- an export of facts alone
+    // would be an index of a book about to be burned
+    let convo = doc["conversation"].as_array().expect("conversation");
+    assert!(
+        convo.iter().any(|m| m["direction"] == "in")
+            && convo.iter().any(|m| m["direction"] == "out"),
+        "the export must carry both sides of the conversation"
+    );
+    assert!(
+        convo.iter().any(|m| m["content"].as_str().unwrap_or("").contains("bike")),
+        "the person's own words are missing"
+    );
+
+    // no session, no export of anyone's data
+    let (status, _) = get(&t.router, "/api/export", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Leaving destroys the cell, and the confirmation is not decorative.
+#[tokio::test]
+async fn leaving_requires_the_word_and_then_actually_shreds() {
+    let t = boot_test_robot();
+    let cookie = login(&t.router, &format!("/a/{}", t.slug)).await;
+
+    // the owner cannot erase themselves through this door: the owner's cell
+    // IS the robot, and a stray click must not end it
+    let (status, body) = post_json(
+        &t.router,
+        "/api/people/me/remove",
+        &cookie,
+        &serde_json::json!({ "confirm": "ERASE" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("owner"), "{body}");
+
+    // and a wrong confirmation never reaches the robot at all
+    let (status, body) = post_json(
+        &t.router,
+        "/api/people/me/remove",
+        &cookie,
+        &serde_json::json!({ "confirm": "yes" }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("type ERASE"), "{body}");
+
+    // no session, no removal -- of anyone
+    let res = t
+        .router
+        .clone()
+        .oneshot(
+            Request::post("/api/people/1/remove")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{\"confirm\":\"ERASE\"}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}

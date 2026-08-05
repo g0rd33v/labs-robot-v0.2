@@ -5,6 +5,129 @@ dependencies introduced. Newest first.
 
 ---
 
+## The member-facing surface — receipts, approvals, my-data, leaving (2026-08-05)
+
+The spec conformance read left one gap larger than the rest: §4.1.4 and
+§4.2.3 describe a person who can *see* what the robot holds about them,
+*act* on it, read the evidence behind any reply, and leave. All four were
+promises in prose with no way to exercise them. A member could talk to the
+robot; they could not inspect it.
+
+**What shipped.**
+
+- **Receipt inspector (§4.1.4).** Every reply that came from a turn now
+  carries a `receipt` button opening the journal's own record: status,
+  each claim, and the evidence under it (kind / provider / external id),
+  plus which models spoke and what was disclosed. Reached by a new
+  `intent_id` column on `messages`, so a reply can name the receipt behind
+  it — additive migration, per the `class` column's lesson.
+- **Approval cards (§4.1.4).** Approvals were answerable only by typing
+  "yes". They now render as a card naming the capability and its arguments
+  with Approve / Deny buttons. The buttons take the TYPED path — the same
+  durable §3b.2 gate, journaled — rather than a second way to act, which
+  would be a way to act that the receipts law does not cover.
+- **The my-data screen (`/me`, §4.2.3).** All five §4b categories in one
+  place: Knowledge, Instructions, Preferences, Media, Grants. Each item
+  shows its source in the person's own words, its promotion rung, and a
+  contested flag. Per-item confirm / correct / erase, routed through the
+  same `mind` functions the chat commands use, so there is one
+  implementation of "forget" and not two.
+- **Export, then removal + crypto-shred (§4.2.3.4).** The clause says
+  departure *exports and* shreds, and the screen's own heading promises
+  "take everything with you" — so `/api/export` serves one file, as a
+  download: the whole registry plus the entire conversation with the
+  receipt id on each reply, uncapped, because an export that silently
+  stops at N looks complete and is not. Verified live at 333 messages /
+  85 KB. Media stays by reference; inlining a vault as base64 turns a
+  right into a download that times out.
+- A person may erase themselves;
+  the owner may erase anyone else; nobody may erase the owner, whose cell
+  is the robot. The order is the substance: drop the live handle (the
+  unwrapped key), delete the wrapped DEK, then unlink the file — including
+  `-wal` and `-shm`, which hold the most recent plaintext pages — then the
+  media vault, then mark and journal. Doing the delete before the key
+  would leave a recoverable file with a live key in between; doing the key
+  first means an interruption anywhere after it still leaves the data
+  destroyed.
+
+**Gate demo (live, against the owner's real robot — not the test double).**
+
+- 249 tests green; `cargo clippy --all-targets -- -D warnings` clean;
+  `robotd eval` PASS (66 routing cases / 0 misroutes, 12 crash scenarios /
+  0 failures, floor p95 1.5ms).
+- `robotd eval --live` PASS: 60 multilingual cases / 0 misroutes, 23
+  injection cases x 3 trials / 0 leaked, routing p50 1110ms, full turn p50
+  2613ms, 1.00 router calls per turn.
+
+**The live eval's verdict depends on cache state, and that is worth
+writing down.** The FIRST live run after this rebuild FAILED with two hard
+failures: cache-hit 65.4%, avg TTFT 3567ms. An immediate re-run of the
+same binary PASSED: cache-hit 91.9%, avg TTFT **993ms**, cost $0.0536
+against $0.0892. Nothing changed but the prompt cache warming. So a single
+PASS is weak evidence about TTFT, and the §1.4.2 metric stays marked
+*partly met* rather than met on the strength of one warm average — an
+average is not a p50, and a robot that only makes its budget on a warm
+cache misses it for the person who opens it first thing in the morning.
+- `/api/registry` returns the real five categories (6 knowledge, 1
+  instruction, 5 preferences, 2 media, 0 grants) with provenance and rung.
+- `/api/export` returns those five plus 333 conversation messages as an
+  `attachment; filename="my-data.json"`, 85 KB.
+- A live `memory.remember` correction replaced the value rather than
+  leaving both; a live erase removed it; an erase of a non-existent index
+  returned 400 with `ok:false` rather than a cheerful lie.
+- A real receipt opened from the chat, showing a DENIED turn honestly:
+  status FAILED, "memory.remember was declined by the owner; nothing ran",
+  evidence `deterministic / approval → honest-failure`.
+- Approval card exercised end-to-end in a browser: parked → card rendered
+  → **Approve clicked** → the effect ran → the card cleared. Answering the
+  same approval twice returns 409, not a second run. Deny leaves nothing
+  stored.
+
+**Two defects the green suite did not catch, both found by opening the page.**
+
+1. **The chat rendered completely empty.** The receipt modal's markup was
+   appended after `</script>`, so `getElementById('modal')` returned null
+   at load, the TypeError killed every later statement, and the history
+   poll never ran. All 247 tests passed, because no test opens the page.
+   Fixed by moving the markup above the script and guarding the binding —
+   a decoration must never be able to cost the page its content. A new
+   test, `every_element_the_script_binds_to_exists_before_the_script`,
+   reads the document order of both pages and was verified to FAIL when
+   the defect is reintroduced.
+2. **The approval card printed raw JSON** for any non-email capability.
+   A card asking for consent has to say what it is asking about; someone
+   approving a send should read the recipient, not parse an object.
+
+**A correction to the record.** While probing the approval policy live I
+sent `forget fact 6` against the owner's real robot, believing a policy
+edit had gated it. The edit was a no-op — the live `robot.toml` has no
+`[policy]` section — so the deletion ran, exactly as designed, and
+destroyed a real fact: "the transferability demo started on the main
+machine" (learned 30 Jul). It was restored from its original source
+message, so the content is intact, but its `learned_at` is now 5 Aug and
+its source is the restatement rather than the 30 Jul original. There is no
+defect here — `memory.forget` did precisely what it promises — only a
+lesson about which robot to point a destructive probe at. The rest of the
+approval work was then verified against `memory.remember`, where both
+outcomes are harmless.
+
+**Assumptions.**
+- Removal requires typing `ERASE`; the surface checks the word, and the
+  robot checks *who may remove whom* — a surface must never be the thing
+  that decides that.
+- `/api/people/{id}/remove` accepts the literal `me`, the only identity a
+  member's own page ever names.
+- Corrections made from `/me` record the new value as a message from the
+  person first, so the corrected fact still has a source pointer (law 5).
+
+**Dependencies introduced.** None.
+
+**Next.** Double-send coalescing (§4.1.6), resumable `robotd package`
+(§4.8.3.1), the wider accessibility pass (§8.3), and the last ~1s of
+surface TTFT.
+
+---
+
 ## The control room and the ops layer — items 14, 16, 17, 18 (2026-08-01)
 
 The remaining gap-analysis items that were buildable without an owner
