@@ -9,7 +9,7 @@ dependencies introduced. Newest first.
 
 The outbox has always made a double *send* structurally impossible: a
 UNIQUE `dedupe_key`, not a hopeful check. Nothing did the same for a
-double *arrival*. `prism::coalesce` is that mirror — the same content
+double *arrival*. `prism::repeats` is that mirror — the same content
 inside two seconds claims one turn, and the second arrival gets no reply,
 no transcript entry, no intent, and no effect.
 

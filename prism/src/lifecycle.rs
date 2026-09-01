@@ -252,7 +252,7 @@ pub fn run_turn(
     env: &Envelope,
     deps: &TurnDeps,
 ) -> Result<TurnOutput, PrismError> {
-    run_turn_as(cell, env, deps, &ids::new_id("int"))
+    run_turn_with_id(cell, env, deps, &ids::new_id("int"))
 }
 
 /// As `run_turn`, with the intent's identity chosen by the caller.
@@ -262,7 +262,7 @@ pub fn run_turn(
 /// to point at, and a claim holding an id no journal row will ever carry
 /// would be a receipt reference that 404s. So the id is minted once, at
 /// the door, and the turn adopts it.
-pub fn run_turn_as(
+pub fn run_turn_with_id(
     cell: &Cell,
     env: &Envelope,
     deps: &TurnDeps,

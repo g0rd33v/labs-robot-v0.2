@@ -81,8 +81,8 @@ fn process(robot: &RobotCore, tg: &hub::Telegram, u: &hub::TgUpdate) -> anyhow::
         // produce a second answer in the person's phone.
         match robot.turn(robot.owner_principal, u.text.clone(), "telegram")? {
             surfaces::Said::Reply(reply) => tg.send_message(u.chat_id, &reply)?,
-            surfaces::Said::Coalesced { into } => {
-                tracing::info!(%into, "telegram double send coalesced; sending nothing");
+            surfaces::Said::Repeat { same_turn } => {
+                tracing::info!(%same_turn, "telegram repeat: sending nothing");
             }
         }
         return Ok(());

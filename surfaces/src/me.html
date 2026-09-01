@@ -105,7 +105,7 @@
   }
 
   function act(category, index, action, value) {
-    return fetch(P + '/api/registry/action', {
+    return fetch(P + '/api/registry/change', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ category, index, action, value }),

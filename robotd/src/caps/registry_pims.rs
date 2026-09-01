@@ -69,7 +69,7 @@ pub const CELL_TABLES: &[(&str, Category)] = &[
     // intent that claimed it -- no content, and swept once the two-second
     // window passes. Substrate: it decides whether a message becomes a
     // turn, and remembers nothing about the person once it has.
-    ("inbound_claims", Category::Substrate),
+    ("recent_messages", Category::Substrate),
     ("tombstones", Category::Substrate),
     // soul's own append-only diary of what it changed and why -- audit
     // trail, cited by the preferences rows above

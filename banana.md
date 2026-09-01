@@ -119,3 +119,28 @@ DeepInfra в том же окне стабильно давал 792–2664 ms. �
 
 Второй сиденье-модель `gemma-4-26b-a4b` уже стабильно садится на
 DeepInfra (935–1206 ms), там менять нечего.
+
+### Указ 10 — имена. Проверил свои, переименовал
+
+Было → стало (всё моё, этой сессии):
+
+| было | стало | почему |
+|---|---|---|
+| `coalesce.rs` | `repeats.rs` | «coalesce» — жаргон; «repeats» понятно с первого взгляда |
+| `Claim::Fresh` / `Claim::Duplicate { into }` | `Repeat::First` / `Repeat::Again { same_turn }` | «claim» ничего не говорит; `same_turn` называет вещь своим именем |
+| `claim()` | `check()` | функция спрашивает «это повтор?» |
+| `sweep()` | `forget_old()` | что делает, а не как |
+| `inbound_claims` | `recent_messages` | таблица хранит недавние сообщения |
+| `run_turn_as` | `run_turn_with_id` | «as» не говорит «as что» |
+| `Said::Coalesced` | `Said::Repeat` | согласовано с модулем |
+| JSON `coalesced: true` | `repeat: true` | то же на границе API |
+| `registry_action` / `RegistryAction` | `change_item` / `ItemChange` | «action» — пустое слово; меняем один пункт |
+| `/api/registry/action` | `/api/registry/change` | то же в адресе |
+
+Оставил `init_schema` — он такой же в prism/mind/soul, переименовать один
+из пяти хуже, чем оставить все. `registry`, `intent`, `receipt` — язык
+самого продукта из спеки, не жаргон.
+
+261 тест зелёный, clippy чист, живьём проверено: повтор → `repeat: true`,
+его receipt отдаёт 200, `/me` 200, `/api/registry/change` честно
+отказывает на несуществующем индексе, экспорт 365 сообщений.

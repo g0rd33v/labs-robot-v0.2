@@ -390,7 +390,7 @@ async fn a_person_can_see_correct_and_erase_what_is_held_about_them() {
     let before = knowledge.len();
     let (status, _) = post_json(
         &t.router,
-        "/api/registry/action",
+        "/api/registry/change",
         &cookie,
         &serde_json::json!({
             "category": "knowledge", "index": 1,
@@ -409,7 +409,7 @@ async fn a_person_can_see_correct_and_erase_what_is_held_about_them() {
     // erasing is real: it leaves
     let (status, _) = post_json(
         &t.router,
-        "/api/registry/action",
+        "/api/registry/change",
         &cookie,
         &serde_json::json!({ "category": "knowledge", "index": 1, "action": "erase" }).to_string(),
     )
@@ -421,7 +421,7 @@ async fn a_person_can_see_correct_and_erase_what_is_held_about_them() {
     // an action that cannot be done SAYS so rather than reporting success
     let (status, body) = post_json(
         &t.router,
-        "/api/registry/action",
+        "/api/registry/change",
         &cookie,
         &serde_json::json!({ "category": "knowledge", "index": 99, "action": "erase" }).to_string(),
     )
@@ -580,7 +580,7 @@ async fn the_same_message_twice_is_one_turn() {
         post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
     assert_eq!(status, StatusCode::OK);
     let first: serde_json::Value = serde_json::from_str(&first).unwrap();
-    assert!(first["coalesced"].is_null(), "the first send is not a duplicate");
+    assert!(first["repeat"].is_null(), "the first send is not a duplicate");
     assert!(!first["reply"].as_str().unwrap().is_empty());
 
     // the double-tap, immediately after
@@ -588,7 +588,7 @@ async fn the_same_message_twice_is_one_turn() {
         post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
     assert_eq!(status, StatusCode::OK, "a duplicate is not an error: {second}");
     let second: serde_json::Value = serde_json::from_str(&second).unwrap();
-    assert_eq!(second["coalesced"], true, "{second}");
+    assert_eq!(second["repeat"], true, "{second}");
     assert_eq!(
         second["reply"].as_str().unwrap_or(""),
         "",
@@ -624,7 +624,7 @@ async fn the_same_message_after_the_window_is_answered_again() {
 
     post_json(&t.router, "/api/message", &cookie, &say("what time is it?")).await;
     tokio::time::sleep(std::time::Duration::from_millis(
-        prism::coalesce::WINDOW_MS as u64 + 100,
+        prism::repeats::WINDOW_MS as u64 + 100,
     ))
     .await;
     let (status, again) =
@@ -632,7 +632,7 @@ async fn the_same_message_after_the_window_is_answered_again() {
     assert_eq!(status, StatusCode::OK);
     let again: serde_json::Value = serde_json::from_str(&again).unwrap();
     assert!(
-        again["coalesced"].is_null(),
+        again["repeat"].is_null(),
         "past the window this is a question, not a duplicate: {again}"
     );
     assert!(!again["reply"].as_str().unwrap().is_empty());
@@ -649,7 +649,7 @@ async fn a_fast_conversation_is_never_coalesced() {
         let (status, body) = post_json(&t.router, "/api/message", &cookie, &say(text)).await;
         assert_eq!(status, StatusCode::OK);
         let out: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(out["coalesced"].is_null(), "'{text}' was swallowed: {body}");
+        assert!(out["repeat"].is_null(), "'{text}' was swallowed: {body}");
         assert!(!out["reply"].as_str().unwrap().is_empty(), "'{text}' went unanswered");
     }
 }
@@ -678,7 +678,7 @@ async fn two_simultaneous_sends_still_produce_one_turn() {
 
     // exactly one of them is the turn; exactly one is the duplicate. Which
     // one wins is genuinely a race and must not be asserted.
-    let coalesced = [&a, &b].iter().filter(|r| r["coalesced"] == true).count();
+    let coalesced = [&a, &b].iter().filter(|r| r["repeat"] == true).count();
     assert_eq!(coalesced, 1, "both or neither were coalesced: {a} / {b}");
     let answered = [&a, &b]
         .iter()
@@ -705,7 +705,7 @@ async fn two_simultaneous_sends_still_produce_one_turn() {
 /// handed whatever the claim held at that moment. Found live — the
 /// coalesced response named a turn whose receipt 404'd.
 #[tokio::test]
-async fn a_coalesced_approval_answer_names_the_parked_turn() {
+async fn a_repeated_yes_names_the_parked_turn() {
     let t = boot_test_robot_with(|cfg| {
         cfg.policy.approval_required = vec!["memory.remember".into()];
     });
@@ -737,8 +737,8 @@ async fn a_coalesced_approval_answer_names_the_parked_turn() {
     let both = [a, b];
     let coalesced = both
         .iter()
-        .find(|r| r["coalesced"] == true)
-        .expect("one of the two must have coalesced");
+        .find(|r| r["repeat"] == true)
+        .expect("one of the two must be the repeat");
 
     assert_eq!(
         coalesced["intent"].as_str().unwrap(),

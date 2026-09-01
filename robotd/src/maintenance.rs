@@ -42,7 +42,7 @@ pub fn sweep(robot: &RobotCore) -> anyhow::Result<(usize, usize)> {
         // for no reason. Correctness does not depend on this running --
         // `claim` compares timestamps rather than trusting existence --
         // so a failure here is logged, not fatal.
-        if let Err(e) = cell.with(|c| prism::coalesce::sweep(c, now)) {
+        if let Err(e) = cell.with(|c| prism::repeats::forget_old(c, now)) {
             tracing::warn!("coalescing sweep: {e}");
         }
         // short locks only: the whole point of this lane is to observe turns

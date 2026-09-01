@@ -42,7 +42,7 @@ pub enum Said {
     Reply(String),
     /// Merged into `into`, an identical message inside the two-second
     /// window. That turn's receipt covers both arrivals.
-    Coalesced { into: String },
+    Repeat { same_turn: String },
 }
 
 impl std::fmt::Display for Said {
@@ -60,7 +60,7 @@ impl Said {
     pub fn text(&self) -> &str {
         match self {
             Said::Reply(t) => t,
-            Said::Coalesced { .. } => "",
+            Said::Repeat { .. } => "",
         }
     }
 }
@@ -102,7 +102,7 @@ pub trait Robot: Send + Sync {
     /// remove themselves; only the owner may remove anyone else.
     fn remove_person(&self, actor: i64, target: i64) -> anyhow::Result<String>;
     /// One item action: correct | confirm | erase.
-    fn registry_action(
+    fn change_item(
         &self,
         principal: i64,
         category: &str,
@@ -234,7 +234,7 @@ fn routes(state: Arc<WebState>) -> Router {
         .route("/api/approvals", get(api_approvals))
         .route("/api/approvals/{intent}", post(api_answer_approval))
         .route("/api/registry", get(api_registry))
-        .route("/api/registry/action", post(api_registry_action))
+        .route("/api/registry/change", post(api_change_item))
         .route("/api/people/{id}/remove", post(api_remove_person))
         .route("/api/export", get(api_export))
         .route("/me", get(me_page))
@@ -448,7 +448,7 @@ async fn api_registry(State(st): State<Arc<WebState>>, headers: HeaderMap) -> Re
 }
 
 #[derive(serde::Deserialize)]
-struct RegistryAction {
+struct ItemChange {
     category: String,
     index: usize,
     action: String,
@@ -531,17 +531,17 @@ async fn api_remove_person(
     }
 }
 
-async fn api_registry_action(
+async fn api_change_item(
     State(st): State<Arc<WebState>>,
     headers: HeaderMap,
-    Json(body): Json<RegistryAction>,
+    Json(body): Json<ItemChange>,
 ) -> Response {
     let Some(principal) = st.session_principal(&headers) else {
         return (StatusCode::UNAUTHORIZED, "no session").into_response();
     };
     let robot = st.robot.clone();
     match tokio::task::spawn_blocking(move || {
-        robot.registry_action(
+        robot.change_item(
             principal,
             &body.category,
             body.index,
@@ -617,7 +617,7 @@ struct MsgOut {
     /// reply is empty and the surface must render nothing: the turn it
     /// merged into is already answering, on the same screen.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    coalesced: bool,
+    repeat: bool,
     /// The turn that covers this arrival, so the transcript can still
     /// offer its receipt.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -636,16 +636,16 @@ async fn api_message(
     match tokio::task::spawn_blocking(move || robot.handle_message(principal, msg.text)).await {
         Ok(Ok(Said::Reply(reply))) => Json(MsgOut {
             reply,
-            coalesced: false,
+            repeat: false,
             intent: String::new(),
         })
         .into_response(),
         // 200, not an error: nothing went wrong. The message was heard,
         // and the answer is the one already on its way.
-        Ok(Ok(Said::Coalesced { into })) => Json(MsgOut {
+        Ok(Ok(Said::Repeat { same_turn })) => Json(MsgOut {
             reply: String::new(),
-            coalesced: true,
-            intent: into,
+            repeat: true,
+            intent: same_turn,
         })
         .into_response(),
         Ok(Err(e)) => {
@@ -725,7 +725,7 @@ async fn api_upload(
     {
         Ok(Ok(reply)) => Json(MsgOut {
             reply,
-            coalesced: false,
+            repeat: false,
             intent: String::new(),
         })
         .into_response(),
@@ -848,7 +848,7 @@ mod tests {
         fn remove_person(&self, _a: i64, _t: i64) -> anyhow::Result<String> {
             Ok("erased".into())
         }
-        fn registry_action(
+        fn change_item(
             &self,
             _p: i64,
             _c: &str,
@@ -863,7 +863,7 @@ mod tests {
             // the double sends the real coalescing contract, so the HTTP
             // shape can be asserted without a real robot behind it
             if t == "again" {
-                return Ok(Said::Coalesced { into: "int_first".into() });
+                return Ok(Said::Repeat { same_turn: "int_first".into() });
             }
             Ok(Said::Reply(format!("echo[{p}]: {t}")))
         }

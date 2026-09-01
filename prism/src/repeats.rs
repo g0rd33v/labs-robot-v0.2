@@ -33,22 +33,22 @@ use trust::ids;
 /// double-tap and the immediate retry.
 pub const WINDOW_MS: i64 = 2_000;
 
-/// What the claim decided.
+/// Was this message already here a moment ago?
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Claim {
-    /// This message is new (or the window has passed): run the turn.
-    Fresh,
-    /// An identical message is already being handled, or was handled
-    /// moments ago. `into` is that turn's intent, so the caller can point
-    /// at the one receipt that covers both arrivals rather than inventing
-    /// a second.
-    Duplicate { into: String },
+pub enum Repeat {
+    /// New, or the window has passed: run the turn.
+    First,
+    /// The same message is already being handled, or was handled moments
+    /// ago. `same_turn` is that turn's intent, so the caller can point at
+    /// the one receipt covering both arrivals instead of inventing a
+    /// second.
+    Again { same_turn: String },
 }
 
 pub fn init_schema(conn: &Connection) -> Result<(), PrismError> {
     conn.execute_batch(
         "
-CREATE TABLE IF NOT EXISTS inbound_claims (
+CREATE TABLE IF NOT EXISTS recent_messages (
     fingerprint TEXT PRIMARY KEY,
     intent_id   TEXT NOT NULL,
     ts          INTEGER NOT NULL
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS inbound_claims (
 /// through. The trade is that saying one word on chat and the same word on
 /// Telegram inside two seconds counts as one utterance, which it almost
 /// certainly is.
-fn fingerprint(content: &str) -> String {
+fn text_hash(content: &str) -> String {
     ids::sha256_hex(content.trim().as_bytes())
 }
 
@@ -90,39 +90,39 @@ fn fingerprint(content: &str) -> String {
 /// file open could still race this; nothing in the MVP does, and if
 /// something ever does, the fix is `BEGIN IMMEDIATE` here rather than
 /// hoping.
-pub fn claim(
+pub fn check(
     conn: &Connection,
     content: &str,
     intent_id: &str,
     now: i64,
-) -> Result<Claim, PrismError> {
-    let fp = fingerprint(content);
+) -> Result<Repeat, PrismError> {
+    let fp = text_hash(content);
     let tx = conn.unchecked_transaction()?;
     let prior: Option<(String, i64)> = tx
         .query_row(
-            "SELECT intent_id, ts FROM inbound_claims WHERE fingerprint = ?1",
+            "SELECT intent_id, ts FROM recent_messages WHERE fingerprint = ?1",
             params![fp],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some((into, ts)) = prior {
+    if let Some((same_turn, ts)) = prior {
         // still inside the window: this is the same utterance arriving
         // twice. The claim's timestamp is NOT refreshed -- otherwise a
         // client retrying every second would hold the window open forever
         // and the person's second, deliberate message would vanish.
         if now.saturating_sub(ts) < WINDOW_MS {
             tx.commit()?;
-            return Ok(Claim::Duplicate { into });
+            return Ok(Repeat::Again { same_turn });
         }
     }
     tx.execute(
-        "INSERT INTO inbound_claims(fingerprint, intent_id, ts) VALUES (?1,?2,?3) \
+        "INSERT INTO recent_messages(fingerprint, intent_id, ts) VALUES (?1,?2,?3) \
          ON CONFLICT(fingerprint) DO UPDATE SET intent_id = excluded.intent_id, \
          ts = excluded.ts",
         params![fp, intent_id, now],
     )?;
     tx.commit()?;
-    Ok(Claim::Fresh)
+    Ok(Repeat::First)
 }
 
 /// Drop claims older than the window.
@@ -132,9 +132,9 @@ pub fn claim(
 /// think to look when asked what the robot stores. Called on the
 /// maintenance lane; correctness does not depend on it, because `claim`
 /// compares timestamps rather than trusting the row's existence.
-pub fn sweep(conn: &Connection, now: i64) -> Result<usize, PrismError> {
+pub fn forget_old(conn: &Connection, now: i64) -> Result<usize, PrismError> {
     let n = conn.execute(
-        "DELETE FROM inbound_claims WHERE ts < ?1",
+        "DELETE FROM recent_messages WHERE ts < ?1",
         params![now - WINDOW_MS],
     )?;
     Ok(n)
@@ -155,17 +155,17 @@ mod tests {
     fn the_same_message_twice_inside_the_window_is_one_turn() {
         let c = cell();
         let t = 1_000_000;
-        assert_eq!(claim(&c, "send the invoice", "int_1", t).unwrap(), Claim::Fresh);
+        assert_eq!(check(&c, "send the invoice", "int_1", t).unwrap(), Repeat::First);
         // 120ms later -- a double-tap
         assert_eq!(
-            claim(&c, "send the invoice", "int_2", t + 120).unwrap(),
-            Claim::Duplicate { into: "int_1".into() },
+            check(&c, "send the invoice", "int_2", t + 120).unwrap(),
+            Repeat::Again { same_turn: "int_1".into() },
             "the second arrival must point at the FIRST turn, not its own"
         );
         // and at the edge of the window it is still the same utterance
         assert_eq!(
-            claim(&c, "send the invoice", "int_3", t + 1_999).unwrap(),
-            Claim::Duplicate { into: "int_1".into() }
+            check(&c, "send the invoice", "int_3", t + 1_999).unwrap(),
+            Repeat::Again { same_turn: "int_1".into() }
         );
     }
 
@@ -174,16 +174,16 @@ mod tests {
     fn the_same_message_later_is_a_new_turn() {
         let c = cell();
         let t = 1_000_000;
-        claim(&c, "what time is it", "int_1", t).unwrap();
+        check(&c, "what time is it", "int_1", t).unwrap();
         assert_eq!(
-            claim(&c, "what time is it", "int_2", t + WINDOW_MS).unwrap(),
-            Claim::Fresh,
+            check(&c, "what time is it", "int_2", t + WINDOW_MS).unwrap(),
+            Repeat::First,
             "two seconds later is a question, not a duplicate"
         );
         // and the new turn owns the window from here
         assert_eq!(
-            claim(&c, "what time is it", "int_3", t + WINDOW_MS + 10).unwrap(),
-            Claim::Duplicate { into: "int_2".into() }
+            check(&c, "what time is it", "int_3", t + WINDOW_MS + 10).unwrap(),
+            Repeat::Again { same_turn: "int_2".into() }
         );
     }
 
@@ -204,18 +204,18 @@ mod tests {
     fn a_duplicate_does_not_extend_the_window() {
         let c = cell();
         let t = 1_000_000;
-        claim(&c, "ping", "int_1", t).unwrap();
+        check(&c, "ping", "int_1", t).unwrap();
         for step in [500, 1_000, 1_500, 1_900] {
             assert_eq!(
-                claim(&c, "ping", "int_x", t + step).unwrap(),
-                Claim::Duplicate { into: "int_1".into() },
+                check(&c, "ping", "int_x", t + step).unwrap(),
+                Repeat::Again { same_turn: "int_1".into() },
                 "at +{step}ms this is still the first utterance"
             );
         }
         // measured from t, not from the retry at t+1900
         assert_eq!(
-            claim(&c, "ping", "int_2", t + WINDOW_MS).unwrap(),
-            Claim::Fresh,
+            check(&c, "ping", "int_2", t + WINDOW_MS).unwrap(),
+            Repeat::First,
             "the window was pushed out by duplicates -- a later real \
              message would be swallowed"
         );
@@ -226,9 +226,9 @@ mod tests {
     fn different_messages_are_never_merged() {
         let c = cell();
         let t = 1_000_000;
-        assert_eq!(claim(&c, "yes", "int_1", t).unwrap(), Claim::Fresh);
-        assert_eq!(claim(&c, "no", "int_2", t + 5).unwrap(), Claim::Fresh);
-        assert_eq!(claim(&c, "yes please", "int_3", t + 10).unwrap(), Claim::Fresh);
+        assert_eq!(check(&c, "yes", "int_1", t).unwrap(), Repeat::First);
+        assert_eq!(check(&c, "no", "int_2", t + 5).unwrap(), Repeat::First);
+        assert_eq!(check(&c, "yes please", "int_3", t + 10).unwrap(), Repeat::First);
     }
 
     /// Whitespace is not meaning: a client that trims and one that does
@@ -237,10 +237,10 @@ mod tests {
     fn surrounding_whitespace_does_not_make_it_a_different_message() {
         let c = cell();
         let t = 1_000_000;
-        claim(&c, "book the table", "int_1", t).unwrap();
+        check(&c, "book the table", "int_1", t).unwrap();
         assert_eq!(
-            claim(&c, "  book the table\n", "int_2", t + 50).unwrap(),
-            Claim::Duplicate { into: "int_1".into() }
+            check(&c, "  book the table\n", "int_2", t + 50).unwrap(),
+            Repeat::Again { same_turn: "int_1".into() }
         );
     }
 
@@ -250,20 +250,20 @@ mod tests {
         let c = cell();
         let t = 1_000_000;
         for i in 0..50 {
-            claim(&c, &format!("message {i}"), &format!("int_{i}"), t + i).unwrap();
+            check(&c, &format!("message {i}"), &format!("int_{i}"), t + i).unwrap();
         }
         let before: i64 = c
-            .query_row("SELECT count(*) FROM inbound_claims", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM recent_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(before, 50);
-        let swept = sweep(&c, t + 50 + WINDOW_MS).unwrap();
+        let swept = forget_old(&c, t + 50 + WINDOW_MS).unwrap();
         assert_eq!(swept, 50);
         let after: i64 = c
-            .query_row("SELECT count(*) FROM inbound_claims", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM recent_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(after, 0);
         // and sweeping does not resurrect anything: a fresh claim still works
-        assert_eq!(claim(&c, "message 0", "int_new", t + 9_000).unwrap(), Claim::Fresh);
+        assert_eq!(check(&c, "message 0", "int_new", t + 9_000).unwrap(), Repeat::First);
     }
 
     /// Sweeping must never drop a claim that is still protecting a turn.
@@ -271,11 +271,11 @@ mod tests {
     fn sweeping_leaves_the_live_window_alone() {
         let c = cell();
         let t = 1_000_000;
-        claim(&c, "still running", "int_1", t).unwrap();
-        sweep(&c, t + 500).unwrap();
+        check(&c, "still running", "int_1", t).unwrap();
+        forget_old(&c, t + 500).unwrap();
         assert_eq!(
-            claim(&c, "still running", "int_2", t + 600).unwrap(),
-            Claim::Duplicate { into: "int_1".into() },
+            check(&c, "still running", "int_2", t + 600).unwrap(),
+            Repeat::Again { same_turn: "int_1".into() },
             "a live claim was swept and a duplicate got through"
         );
     }

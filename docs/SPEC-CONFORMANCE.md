@@ -103,7 +103,7 @@ commit.
 | **C1: receipts icon → inspector modal** | ✅ shipped 5 Aug |
 | **C1: approval card with Approve/Deny buttons** | ✅ shipped 5 Aug — over the same durable gate the typed answer uses |
 | **C1: empty state with 3 suggested messages** | ❌ not built |
-| 4.1.6 double-send coalescing within 2 s | ✅ `prism::coalesce`: durable per-cell claim on a content hash, checked before the message is recorded and before any intent exists |
+| 4.1.6 double-send coalescing within 2 s | ✅ `prism::repeats`: durable per-cell claim on a content hash, checked before the message is recorded and before any intent exists |
 | 4.1.6 mid-stream abort → partial kept, receipt `partial` | ⚠️ `partial` status exists; the mid-stream path is untested |
 
 The chat *works* — text, voice, files, streaming, media, any language —

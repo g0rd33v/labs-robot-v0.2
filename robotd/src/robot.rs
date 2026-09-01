@@ -600,11 +600,11 @@ impl RobotCore {
             Some((parked, _)) => parked.clone(),
             None => trust::ids::new_id("int"),
         };
-        if let prism::coalesce::Claim::Duplicate { into } = handle.cell.with(|c| {
-            prism::coalesce::claim(c, &text, &intent_id, trust::ids::ts_ms())
+        if let prism::repeats::Repeat::Again { same_turn } = handle.cell.with(|c| {
+            prism::repeats::check(c, &text, &intent_id, trust::ids::ts_ms())
         })? {
-            tracing::info!(%into, surface, "coalesced a double send");
-            return Ok(Said::Coalesced { into });
+            tracing::info!(%same_turn, surface, "a repeat: one turn, not two");
+            return Ok(Said::Repeat { same_turn });
         }
 
         let reply = {
@@ -736,7 +736,7 @@ impl RobotCore {
                     content: resolved,
                     ..env.clone()
                 };
-                let out = prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)?;
+                let out = prism::lifecycle::run_turn_with_id(cell, &env, &deps, &intent_id)?;
                 cell.with(|c| prism::outbox::mark(c, &out.reply_effect_id, "sent", None))?;
                 cell.with(|c| {
                 Ok(mind::record_message_for(
@@ -756,9 +756,9 @@ impl RobotCore {
                 Some((intent, yes)) => prism::approval::respond(cell, intent, *yes, &deps)?
                     .map(Ok)
                     .unwrap_or_else(|| {
-                        prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)
+                        prism::lifecycle::run_turn_with_id(cell, &env, &deps, &intent_id)
                     })?,
-                None => prism::lifecycle::run_turn_as(cell, &env, &deps, &intent_id)?,
+                None => prism::lifecycle::run_turn_with_id(cell, &env, &deps, &intent_id)?,
             };
             // the ledger (sec 4.5), kept by the orchestrator because prism
             // cannot depend on mind. An answered park closes its entry with
@@ -1112,7 +1112,7 @@ impl surfaces::Robot for RobotCore {
         }))
     }
 
-    fn registry_action(
+    fn change_item(
         &self,
         principal: i64,
         category: &str,
@@ -1304,7 +1304,7 @@ impl surfaces::Robot for RobotCore {
                             }
                             // two identical notes in two seconds: say what
                             // was heard, but do not answer it twice
-                            Said::Coalesced { .. } => format!(
+                            Said::Repeat { .. } => format!(
                                 "heard your voice note: \"{transcript}\"\n\n\
                                  (you just sent that -- the answer above covers it)"
                             ),
