@@ -136,13 +136,35 @@ pub struct GatewayConfig {
     pub answer_timeout_ms: u64,
     /// hedge deadline for the verdict class (Q19)
     pub hedge_after_ms: u64,
-    /// sec 2c #4: which provider variant OpenRouter should prefer.
-    /// "latency" picks the lowest measured time-to-first-token endpoint --
-    /// the right sort for a 5K-token routing prefill and for streaming
-    /// answers alike. None sends no preference (the router's default,
-    /// which sorts by PRICE and was measured at p50 3.1-3.9s on the route
-    /// seat).
-    pub provider_sort: Option<String>,
+    /// Which endpoints OpenRouter should try, in order of preference.
+    ///
+    /// This used to be `sort: "latency"`, which scattered every call. Two
+    /// things went wrong with that, and the second one was the expensive
+    /// one.
+    ///
+    /// **The sort does not deliver low latency.** Measured directly, same
+    /// 6K prefix, gemma-4-31b, two runs: `sort: latency` gave p50
+    /// 1487/2148 ms but p95 18443/3411 ms, picking endpoints that took
+    /// 19.5 s and 37.5 s while pinned DeepInfra in the same window was
+    /// steady at 792-2664 ms. It sorts on stale global statistics.
+    ///
+    /// **And a scattered call can never warm a prompt cache**, because
+    /// caches are per-endpoint. This is what the 32.5% lifetime cache-hit
+    /// on the route seat actually was: the average of occasionally landing
+    /// on the same endpoint twice in a row. Pinned, the real routing
+    /// prefix reaches **88.7%** after ten turns and climbs as it goes --
+    /// with `ttft[route]` p50 771 ms, p95 976 ms, against a 7-day
+    /// baseline of p50 2882 ms and p95 9094 ms.
+    ///
+    /// So the cache-stable layout the speed tranche built was never the
+    /// problem; it had nothing to accumulate on. Provider choice is what
+    /// lets it pay.
+    ///
+    /// Fallbacks stay ON, so this is a preference and not a dependency:
+    /// if DeepInfra is down or rate-limited the call still goes through,
+    /// at the cost of a cold cache for as long as it is away. Empty sends
+    /// no preference at all.
+    pub providers: Vec<String>,
     /// hedge deadline for the ROUTING class, which is a different animal:
     /// the doorman's 2.5s was sized for a one-line classification, and a
     /// routing call carrying the whole catalog normally takes longer than
@@ -163,7 +185,7 @@ impl Default for GatewayConfig {
             answer_timeout_ms: 45_000,
             hedge_after_ms: 2500,
             route_hedge_after_ms: 8000,
-            provider_sort: Some("latency".into()),
+            providers: vec!["DeepInfra".into(), "Together".into()],
         }
     }
 }
@@ -577,8 +599,11 @@ impl ModelGateway {
             "temperature": temperature,
             "usage": { "include": true },
         });
-        if let Some(sort) = &self.cfg.provider_sort {
-            body["provider"] = serde_json::json!({ "sort": sort });
+        if !self.cfg.providers.is_empty() {
+            body["provider"] = serde_json::json!({
+                "order": self.cfg.providers,
+                "allow_fallbacks": true,
+            });
         }
         let chain = self.cast.chain(role);
         let mut last_err = HubError::Gateway("empty chain".into());
@@ -656,8 +681,11 @@ impl ModelGateway {
             // provider's number rather than our price-table estimate
             "usage": { "include": true },
         });
-        if let Some(sort) = &self.cfg.provider_sort {
-            body["provider"] = serde_json::json!({ "sort": sort });
+        if !self.cfg.providers.is_empty() {
+            body["provider"] = serde_json::json!({
+                "order": self.cfg.providers,
+                "allow_fallbacks": true,
+            });
         }
         if let Some(s) = schema {
             // Strict constrained decoding cannot express a tool call's `args`,

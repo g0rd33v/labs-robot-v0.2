@@ -22,7 +22,7 @@ are marked through.
 | # | Metric | Status |
 |---|---|---|
 | 1 | DoD demo passes end-to-end (M7) | ✅ passed 2026-07-30; re-proven since |
-| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ❌ **not met on the week's numbers.** `robotd cost` over 7 days: route seat p50 **2882 ms** at 32.5 % cache-hit across 623 calls. Individual warm runs have hit 993 ms avg / turn p50 2613 ms, but two live evals on 5 Aug failed both speed gates (routing p50 3584/4490 ms). One good run is not the metric |
+| 2 | First visible response ≤1.0 s p50; routine ≤3 s p50 | ⚠️ **provider order pinned 1 Sep, re-measuring.** After the change: route cache 32.5%→88.7%, `ttft[route]` p50 771 ms / p95 976 ms over 10 live turns, against a 7-day baseline of p50 2882 ms / p95 9094 ms. Full `eval --live` not yet re-run (decree 11). Prior reading: `robotd cost` over 7 days: route seat p50 **2882 ms** at 32.5 % cache-hit across 623 calls. Individual warm runs have hit 993 ms avg / turn p50 2613 ms, but two live evals on 5 Aug failed both speed gates (routing p50 3584/4490 ms). One good run is not the metric |
 | 3 | Zero intents without terminal receipts, 10K-turn soak | ✅ **exceeded**: 25,000 turns, 0 dropped |
 | 4 | MISROUTE-0 on the routing corpus | ✅ 66/66 offline, 0; live 60 cases, 0 |
 | 5 | Package → USB → resume with 100% memory/receipts/persona | ✅ proven twice (USB, and today to a container) |
